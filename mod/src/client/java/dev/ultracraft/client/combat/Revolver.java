@@ -1,6 +1,7 @@
 package dev.ultracraft.client.combat;
 
 import dev.ultracraft.client.movement.UltraSounds;
+import dev.ultracraft.client.render.FirstPersonWeapons;
 
 /**
  * ULTRAKILL's revolver (Revolver), one per variant: the 0.5 s shot cooldown, the piercer's charged shot and
@@ -35,6 +36,8 @@ final class Revolver {
 	private double pierceCharge = 100;
 	/** How far the piercer's shot is charged, 0 to 100. */
 	double pierceShotCharge;
+	/** How fast the charge spins the cylinder (RevolverCylinder.spinSpeed). */
+	private double cylinderSpin;
 	private boolean chargingPierce;
 
 	Revolver(Variant variant, UltraSounds sounds) {
@@ -69,6 +72,13 @@ final class Revolver {
 
 	/** Revolver.Update's firing logic, while held. */
 	void update(double dt, Input input, Actions actions) {
+		if (this.variant == Variant.PIERCER) {
+			if (!this.pierceReady) {
+				this.cylinderSpin = Math.max(this.cylinderSpin - 50 * dt, 0);
+			} else {
+				this.cylinderSpin = this.pierceShotCharge;
+			}
+		}
 		if (this.variant == Variant.PIERCER) {
 			if (this.gunReady) {
 				double rate = 175;
@@ -125,6 +135,11 @@ final class Revolver {
 	/** The ReadyGun animation event. */
 	void readyGun() {
 		this.gunReady = true;
+	}
+
+	/** What its screen, charge glow and cylinder show. */
+	FirstPersonWeapons.RevolverState display(double coinCharge) {
+		return new FirstPersonWeapons.RevolverState(this.pierceShotCharge, this.pierceCharge, this.pierceReady, coinCharge, this.cylinderSpin);
 	}
 
 	/** Put away: its sounds stop and any charge is lost. */

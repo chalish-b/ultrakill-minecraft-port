@@ -11,10 +11,12 @@ import dev.ultracraft.client.render.animation.Animator;
 import dev.ultracraft.client.render.animation.Pose;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.SubmitNodeCollector;
+import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.renderer.rendertype.RenderTypes;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.packs.resources.Resource;
+import net.minecraft.util.LightCoordsUtil;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
@@ -32,29 +34,82 @@ import java.util.Optional;
  * A model extracted by tools/extract_models.py: a rig of bones with the prefab's local transforms, and
  * textured meshes skinned to them, in ULTRAKILL units on Unity's axes (x right, y up, z forward). Drawing flips
  * z, which gives Minecraft's camera space (-z forward). First-person models are placed relative to the camera,
- * world models relative to themselves. Models with an Animator also carry its controller and clips.
+ * world models relative to themselves. Models with an Animator also carry its controller and clips. Built-in
+ * quads (screens, glows), world-space UI canvases and values of the ULTRAKILL scripts on the model come along
+ * for the code that ports those scripts to draw.
  */
 public final class UltraModel {
 	private static final Map<String, Optional<UltraModel>> CACHE = new HashMap<>();
 	private static final Matrix4f FLIP_Z = new Matrix4f().scaling(1, 1, -1);
 
+	/** A Unity built-in Quad (1 x 1, centered) on a bone. */
+	public record Quad(String name, int bone, @Nullable Identifier texture) {
+	}
+
+	/**
+	 * A UI Image on a world-space canvas, laid out in the canvas's units.
+	 *
+	 * @param rect left, bottom, right, top
+	 * @param border sliced borders (left, bottom, right, top) in canvas units; {@code uvBorder} in texture space
+	 * @param fillOrigin where a radial fill starts: bottom, right, top or left
+	 */
+	public record Image(
+		String name, float[] rect, Identifier texture, float[] color, ImageType type, float[] border, float[] uvBorder,
+		FillMethod fillMethod, int fillOrigin, boolean fillClockwise, float fillAmount
+	) {
+	}
+
+	public enum FillMethod {
+		HORIZONTAL,
+		VERTICAL,
+		RADIAL90,
+		RADIAL180,
+		RADIAL360
+	}
+
+	public enum ImageType {
+		SIMPLE,
+		SLICED,
+		TILED,
+		FILLED
+	}
+
+	public record Canvas(int bone, List<Image> images) {
+	}
+
 	private final Vector3f origin;
+	private final String[] names;
 	private final int[] parents;
 	private final Pose rest;
 	private final List<Part> parts;
+	private final List<Quad> quads;
+	private final List<Canvas> canvases;
+	private final JsonObject scripts;
 	private final Animator.@Nullable Data animation;
 
-	private UltraModel(Vector3f origin, int[] parents, Pose rest, List<Part> parts, Animator.@Nullable Data animation) {
+	private UltraModel(
+		Vector3f origin, String[] names, int[] parents, Pose rest, List<Part> parts, List<Quad> quads, List<Canvas> canvases,
+		JsonObject scripts, Animator.@Nullable Data animation
+	) {
 		this.origin = origin;
+		this.names = names;
 		this.parents = parents;
 		this.rest = rest;
 		this.parts = parts;
+		this.quads = quads;
+		this.canvases = canvases;
+		this.scripts = scripts;
 		this.animation = animation;
 	}
 
 	/** The model called {@code name}, or null if it hasn't been extracted. */
 	public static @Nullable UltraModel get(String name) {
 		return CACHE.computeIfAbsent(name, UltraModel::load).orElse(null);
+	}
+
+	/** Where the model's root hangs from, in camera space for first-person models (Unity units and axes). */
+	public Vector3f origin() {
+		return new Vector3f(this.origin);
 	}
 
 	/** The prefab's own pose. */
@@ -67,21 +122,40 @@ public final class UltraModel {
 		return this.animation == null ? null : new Animator(this.animation, this.rest);
 	}
 
-	public void submit(PoseStack poseStack, SubmitNodeCollector collector, int light) {
-		submit(poseStack, collector, light, this.rest);
+	public List<Quad> quads() {
+		return this.quads;
 	}
 
-	/** Draws the model in {@code pose}, skinned on the CPU. */
-	public void submit(PoseStack poseStack, SubmitNodeCollector collector, int light, Pose pose) {
-		Matrix4f[] world = boneMatrices(pose);
+	public List<Canvas> canvases() {
+		return this.canvases;
+	}
+
+	/** The values extracted from an ULTRAKILL script on the model ("revolver", "cylinder"), if it has one. */
+	public @Nullable JsonObject script(String name) {
+		return this.scripts.has(name) ? this.scripts.getAsJsonObject(name) : null;
+	}
+
+	public void submit(PoseStack poseStack, SubmitNodeCollector collector, int light) {
+		submit(poseStack, collector, light, boneMatrices(this.rest, new Quaternionf()));
+	}
+
+	/** Draws the meshes with the given bone matrices, skinned on the CPU, and their glow on top. */
+	public void submit(PoseStack poseStack, SubmitNodeCollector collector, int light, Matrix4f[] world) {
 		for (Part part : this.parts) {
 			float[][] skinned = part.skin(world);
-			collector.submitCustomGeometry(poseStack, RenderTypes.entityCutout(part.texture), (p, buffer) -> part.emit(p, buffer, skinned[0], skinned[1], light));
+			collector.submitCustomGeometry(poseStack, RenderTypes.entityCutout(part.texture), (p, buffer) -> part.emit(p, buffer, skinned[0], skinned[1], 0xFFFFFFFF, light));
+			if (part.emissive != null) {
+				collector.submitCustomGeometry(poseStack, part.emissive, (p, buffer) -> part.emit(p, buffer, skinned[0], skinned[1], part.emissiveColor, LightCoordsUtil.FULL_BRIGHT));
+			}
 		}
 	}
 
-	/** Each bone's matrix in camera space, z already flipped. */
-	private Matrix4f[] boneMatrices(Pose pose) {
+	/**
+	 * Each bone's matrix in camera space, z already flipped.
+	 *
+	 * @param originRotation turns the model about its origin (Unity space), as a parent transform would
+	 */
+	public Matrix4f[] boneMatrices(Pose pose, Quaternionf originRotation) {
 		Matrix4f[] world = new Matrix4f[this.parents.length];
 		Quaternionf rotation = new Quaternionf();
 		for (int bone = 0; bone < world.length; bone++) {
@@ -91,19 +165,30 @@ public final class UltraModel {
 				pose.sx(bone), pose.sy(bone), pose.sz(bone)
 			);
 			int parent = this.parents[bone];
-			Matrix4f base = parent < 0 ? new Matrix4f(FLIP_Z).translate(this.origin) : world[parent];
+			Matrix4f base = parent < 0 ? new Matrix4f(FLIP_Z).translate(this.origin).rotate(originRotation) : world[parent];
 			world[bone] = new Matrix4f(base).mul(local);
 		}
 		return world;
 	}
 
+	/** The first bone with this name, or -1. */
+	public int bone(String name) {
+		for (int i = 0; i < this.names.length; i++) {
+			if (this.names[i].equals(name)) {
+				return i;
+			}
+		}
+		return -1;
+	}
+
 	/**
 	 * Mesh-space vertices skinned to joints: bones with the bind pose that takes mesh space into theirs. Each
-	 * vertex follows up to {@code influences} joints, by weight.
+	 * vertex follows up to {@code influences} joints, by weight. {@code emissive} draws the glow texture over it,
+	 * tinted by {@code emissiveColor} (ARGB).
 	 */
 	private record Part(
 		Identifier texture, float[] positions, float[] normals, float[] uvs, int[] indices,
-		int[] joints, Matrix4f[] binds, int influences, int[] jointIndices, float[] jointWeights
+		int[] joints, Matrix4f[] binds, int influences, int[] jointIndices, float[] jointWeights, @Nullable RenderType emissive, int emissiveColor
 	) {
 		/** Positions and normals in camera space for the given bone matrices. */
 		float[][] skin(Matrix4f[] world) {
@@ -149,18 +234,18 @@ public final class UltraModel {
 		}
 
 		/** Triangles as quads with a repeated corner: the entity render types draw quads. */
-		void emit(PoseStack.Pose pose, VertexConsumer buffer, float[] positions, float[] normals, int light) {
+		void emit(PoseStack.Pose pose, VertexConsumer buffer, float[] positions, float[] normals, int color, int light) {
 			for (int i = 0; i < this.indices.length; i += 3) {
-				vertex(pose, buffer, positions, normals, this.indices[i], light);
-				vertex(pose, buffer, positions, normals, this.indices[i + 1], light);
-				vertex(pose, buffer, positions, normals, this.indices[i + 2], light);
-				vertex(pose, buffer, positions, normals, this.indices[i + 2], light);
+				vertex(pose, buffer, positions, normals, this.indices[i], color, light);
+				vertex(pose, buffer, positions, normals, this.indices[i + 1], color, light);
+				vertex(pose, buffer, positions, normals, this.indices[i + 2], color, light);
+				vertex(pose, buffer, positions, normals, this.indices[i + 2], color, light);
 			}
 		}
 
-		private void vertex(PoseStack.Pose pose, VertexConsumer buffer, float[] positions, float[] normals, int index, int light) {
+		private void vertex(PoseStack.Pose pose, VertexConsumer buffer, float[] positions, float[] normals, int index, int color, int light) {
 			buffer.addVertex(pose, positions[index * 3], positions[index * 3 + 1], positions[index * 3 + 2])
-				.setColor(0xFFFFFFFF)
+				.setColor(color)
 				.setUv(this.uvs[index * 2], this.uvs[index * 2 + 1])
 				.setOverlay(OverlayTexture.NO_OVERLAY)
 				.setLight(light)
@@ -180,10 +265,12 @@ public final class UltraModel {
 			float[] origin = floats(json.getAsJsonArray("origin"));
 			JsonArray bones = json.getAsJsonArray("bones");
 			int[] parents = new int[bones.size()];
+			String[] names = new String[bones.size()];
 			Pose rest = new Pose(bones.size());
 			for (int i = 0; i < parents.length; i++) {
 				JsonObject bone = bones.get(i).getAsJsonObject();
 				parents[i] = bone.get("parent").getAsInt();
+				names[i] = bone.get("name").getAsString();
 				rest.setBone(i, floats(bone.getAsJsonArray("position")), floats(bone.getAsJsonArray("rotation")), floats(bone.getAsJsonArray("scale")));
 			}
 			List<Part> parts = new ArrayList<>();
@@ -204,15 +291,49 @@ public final class UltraModel {
 					binds,
 					part.get("influences").getAsInt(),
 					ints(part.getAsJsonArray("jointIndices")),
-					floats(part.getAsJsonArray("jointWeights"))
+					floats(part.getAsJsonArray("jointWeights")),
+					part.has("emissive") ? RenderTypes.energySwirl(Identifier.parse(part.get("emissive").getAsString()), 0, 0) : null,
+					part.has("emissiveColor") ? argb(floats(part.getAsJsonArray("emissiveColor"))) : 0xFFFFFFFF
 				));
 			}
+			List<Quad> quads = new ArrayList<>();
+			for (JsonElement element : json.getAsJsonArray("quads")) {
+				JsonObject quad = element.getAsJsonObject();
+				JsonElement texture = quad.get("texture");
+				quads.add(new Quad(quad.get("name").getAsString(), quad.get("bone").getAsInt(), texture.isJsonNull() ? null : Identifier.parse(texture.getAsString())));
+			}
+			List<Canvas> canvases = new ArrayList<>();
+			for (JsonElement element : json.getAsJsonArray("canvases")) {
+				JsonObject canvas = element.getAsJsonObject();
+				List<Image> images = new ArrayList<>();
+				for (JsonElement i : canvas.getAsJsonArray("images")) {
+					JsonObject image = i.getAsJsonObject();
+					images.add(new Image(
+						image.get("name").getAsString(),
+						floats(image.getAsJsonArray("rect")),
+						Identifier.parse(image.get("texture").getAsString()),
+						floats(image.getAsJsonArray("color")),
+						ImageType.valueOf(image.get("type").getAsString().toUpperCase()),
+						floats(image.getAsJsonArray("border")),
+						floats(image.getAsJsonArray("uvBorder")),
+						FillMethod.valueOf(image.get("fillMethod").getAsString().toUpperCase()),
+						image.get("fillOrigin").getAsInt(),
+						image.get("fillClockwise").getAsBoolean(),
+						image.get("fillAmount").getAsFloat()
+					));
+				}
+				canvases.add(new Canvas(canvas.get("bone").getAsInt(), images));
+			}
 			Animator.Data animation = json.has("animator") ? Animator.Data.fromJson(json.getAsJsonObject("animator")) : null;
-			return Optional.of(new UltraModel(new Vector3f(origin), parents, rest, parts, animation));
+			return Optional.of(new UltraModel(new Vector3f(origin), names, parents, rest, parts, quads, canvases, json.getAsJsonObject("scripts"), animation));
 		} catch (IOException | RuntimeException e) {
 			Ultracraft.LOGGER.warn("Couldn't load model {}", id, e);
 			return Optional.empty();
 		}
+	}
+
+	private static int argb(float[] rgb) {
+		return 0xFF000000 | Math.round(rgb[0] * 255) << 16 | Math.round(rgb[1] * 255) << 8 | Math.round(rgb[2] * 255);
 	}
 
 	private static float[] floats(JsonArray array) {

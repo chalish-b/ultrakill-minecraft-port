@@ -132,7 +132,8 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			this.lastHealth = -1;
 		}
 		// Animators run after gameplay code, as Unity's do, so what it set this frame plays this frame.
-		FirstPersonWeapons.INSTANCE.update(dt, viewmodel(this.held), this.held == null ? 0 : this.revolvers.get(this.held).pierceShotCharge, this);
+		FirstPersonWeapons.RevolverState display = this.held == null ? FirstPersonWeapons.RevolverState.NONE : this.revolvers.get(this.held).display(this.coinCharge);
+		FirstPersonWeapons.INSTANCE.update(dt, viewmodel(this.held), display, this);
 	}
 
 	private void updateHeld(Revolver.@Nullable Variant variant) {
@@ -166,6 +167,11 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			default -> {
 			}
 		}
+	}
+
+	@Override
+	public void cylinderClicked() {
+		this.sounds.play("revolver_click", 1, 1);
 	}
 
 	private static FirstPersonWeapons.@Nullable Weapon viewmodel(Revolver.@Nullable Variant variant) {
@@ -229,7 +235,6 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 
 		String sound = variant == Revolver.Variant.PIERCER ? "revolver_shoot.piercer" : "revolver_shoot.marksman";
 		this.sounds.play(sound, 0.55F, this.sounds.randomPitch());
-		this.sounds.play("revolver_click", 1, 1);
 		if (charged) {
 			this.sounds.play("revolver_super", 1, 1);
 		}
@@ -239,6 +244,7 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			animator.setFloat("RandomChance", this.random.nextFloat());
 			animator.setTrigger(charged ? "ChargeShoot" : "Shoot");
 		}
+		FirstPersonWeapons.INSTANCE.turnCylinder(viewmodel(variant));
 
 		Vec3 end = hits.getLast().position();
 		int bodiesLeft = charged ? 3 : 1;
@@ -381,6 +387,7 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 				arm.play("Hook", 0.065);
 			} else {
 				arm.play(arm.getFloat("PunchRandomizer") < 0.5F ? "Jab" : "Jab2", 0.075);
+				FirstPersonWeapons.INSTANCE.punchSuccess(result.position());
 			}
 		}
 		if (result.result() == PunchResultPayload.Result.PARRY) {

@@ -94,23 +94,30 @@ class Rig:
         self.bones = []
         self.index = {}
         self.active = {}
+        self.transforms = {}
         self._walk(transform_of(root_go), -1, True, at_origin)
 
-    def _walk(self, transform, parent, active, at_origin=False):
+    def _walk(self, transform, parent, active, at_origin=False, parent_is_rect=False):
         go = transform.m_GameObject.read()
         # Weapon prefabs are stored with their root inactive; the game activates it on equip.
         active = active and (parent < 0 or go.m_IsActive)
+        is_rect = transform.object_reader.type.name == "RectTransform"
         t, q, s = transform.m_LocalPosition, transform.m_LocalRotation, transform.m_LocalScale
+        position = [t.x, t.y, t.z]
+        if is_rect and not parent_is_rect:
+            # A RectTransform under a plain Transform sits at its anchored position.
+            position[:2] = [transform.m_AnchoredPosition.x, transform.m_AnchoredPosition.y]
         bone = {"name": go.m_Name, "parent": parent,
-                "position": [t.x, t.y, t.z], "rotation": [q.x, q.y, q.z, q.w], "scale": [s.x, s.y, s.z]}
+                "position": position, "rotation": [q.x, q.y, q.z, q.w], "scale": [s.x, s.y, s.z]}
         if at_origin:
             bone.update(position=[0, 0, 0], rotation=[0, 0, 0, 1], scale=[1, 1, 1])
         index = len(self.bones)
         self.bones.append(bone)
         self.index[transform.object_reader.path_id] = index
         self.active[go.object_reader.path_id] = active
+        self.transforms[go.object_reader.path_id] = transform
         for child in transform.m_Children:
-            self._walk(child.deref().read(), index, active)
+            self._walk(child.deref().read(), index, active, parent_is_rect=is_rect)
 
 
 def texture_name(material):
@@ -158,6 +165,7 @@ class Exporter:
             if tex_pptr is None:
                 continue
             texture, tex_file = self.texture(tex_pptr)
+            emissive = self.emissive(renderer.m_Materials[i])
             used = sorted({v for tri in triangles for v in tri})
             remap = {v: n for n, v in enumerate(used)}
             u = uv[used, 0] * scale[0] + offset[0]
@@ -184,11 +192,33 @@ class Exporter:
                 "jointIndices": top_joints.flatten().astype(int).tolist(),
                 "jointWeights": np.round(top_weights, 4).flatten().tolist(),
             })
+            if emissive:
+                parts[-1]["emissive"] = emissive
         return parts
 
+    def emissive(self, material_pptr):
+        """The glow texture of a material that has ULTRAKILL/Master's EMISSIVE keyword, if any."""
+        tree = material_pptr.deref().read_typetree()
+        keywords = tree.get("m_ValidKeywords") or (tree.get("m_ShaderKeywords") or "").split()
+        if "EMISSIVE" not in keywords:
+            return None
+        for key, env in material_pptr.deref().read().m_SavedProperties.m_TexEnvs:
+            if key == "_EmissiveTex" and env.m_Texture.path_id:
+                return self.texture(env.m_Texture)[0]
+        return None
 
-def export_parts(exporter, rig):
+
+# Unity's built-in Quad mesh (in "Library/unity default resources"): 1 x 1, centered, facing -z.
+BUILTIN_QUAD = 10210
+
+
+def export_parts(exporter, rig, glow_colors):
+    """The rig's meshes, and the built-in quads (screens, glows) as their bone and texture.
+
+    `glow_colors` tints the glow of the renderers it names (by component path id).
+    """
     parts = []
+    quads = []
     for go_id, active in rig.active.items():
         if not active:
             continue
@@ -221,7 +251,14 @@ def export_parts(exporter, rig):
                 try:
                     mesh = mesh_filter.m_Mesh.deref().read()
                 except FileNotFoundError:
-                    continue  # Unity's built-in primitives, used for effects
+                    if mesh_filter.m_Mesh.path_id == BUILTIN_QUAD and r.m_Materials and r.m_Materials[0].path_id:
+                        tex_pptr, _, _ = texture_name(r.m_Materials[0].deref().read())
+                        quads.append({
+                            "name": go.m_Name,
+                            "bone": rig.index[transform_of(go).object_reader.path_id],
+                            "texture": exporter.texture(tex_pptr)[0] if tex_pptr else None,
+                        })
+                    continue
                 handler = MeshHandler(mesh)
                 handler.process()
                 joints = [rig.index[transform_of(go).object_reader.path_id]]
@@ -232,8 +269,128 @@ def export_parts(exporter, rig):
                 continue
             for part in exporter.renderer_parts(r, mesh, joints, binds, (indices, weights)):
                 part["name"] = go.m_Name
+                if "emissive" in part and obj.path_id in glow_colors:
+                    part["emissiveColor"] = glow_colors[obj.path_id]
                 parts.append(part)
-    return parts
+    return parts, quads
+
+
+# UnityEngine.UI.Image.Type and FillMethod.
+IMAGE_TYPES = {0: "simple", 1: "sliced", 2: "tiled", 3: "filled"}
+FILL_METHODS = {0: "horizontal", 1: "vertical", 2: "radial90", 3: "radial180", 4: "radial360"}
+
+
+def export_canvases(exporter, rig):
+    """World-space canvases: each Image's rect in its canvas's units, laid out by RectTransform anchors.
+
+    Returns the canvases and, by Image component path id, where each image landed (canvas, index).
+    """
+    canvases = []
+    placed = {}
+    for go_id, active in rig.active.items():
+        if not active:
+            continue
+        go = _objects[go_id].read()
+        canvas = next((c.component.deref() for c in go.m_Component if c.component.deref().type.name == "Canvas"), None)
+        if canvas is None or canvas.read_typetree()["m_RenderMode"] != 2:
+            continue
+        scaler = next((c.component.deref().read_typetree() for c in go.m_Component
+                       if c.component.deref().type.name == "MonoBehaviour" and script_name(c.component.deref()) == "CanvasScaler"), {})
+        reference_ppu = scaler.get("m_ReferencePixelsPerUnit", 100)
+        root = rig.transforms[go_id]
+        size, pivot = root.m_SizeDelta, root.m_Pivot
+        rect = (-pivot.x * size.x, -pivot.y * size.y, (1 - pivot.x) * size.x, (1 - pivot.y) * size.y)
+        images = []
+
+        def layout(transform, parent_rect):
+            x0, y0, x1, y1 = parent_rect
+            w, h = x1 - x0, y1 - y0
+            amin, amax, pos, delta, piv = transform.m_AnchorMin, transform.m_AnchorMax, transform.m_AnchoredPosition, transform.m_SizeDelta, transform.m_Pivot
+            width = (amax.x - amin.x) * w + delta.x
+            height = (amax.y - amin.y) * h + delta.y
+            px = x0 + (amin.x + (amax.x - amin.x) * piv.x) * w + pos.x
+            py = y0 + (amin.y + (amax.y - amin.y) * piv.y) * h + pos.y
+            return (px - piv.x * width, py - piv.y * height, px + (1 - piv.x) * width, py + (1 - piv.y) * height)
+
+        def walk(transform, own_rect):
+            child_go = transform.m_GameObject.read()
+            if not rig.active.get(child_go.object_reader.path_id):
+                return
+            for c in child_go.m_Component:
+                obj = c.component.deref()
+                if obj.type.name != "MonoBehaviour" or script_name(obj) != "Image":
+                    continue
+                tree = obj.read_typetree()
+                image = obj.read()
+                if not tree["m_Enabled"] or not image.m_Sprite.path_id:
+                    continue
+                sprite = image.m_Sprite.deref().read()
+                sprite_tree = image.m_Sprite.deref().read_typetree()
+                # Sliced borders are in sprite pixels; the canvas draws them at its reference pixels per unit.
+                units = reference_ppu / sprite_tree["m_PixelsToUnits"] / tree["m_PixelsPerUnitMultiplier"]
+                border = sprite_tree["m_Border"]
+                color = tree["m_Color"]
+                placed[obj.path_id] = (len(canvases), len(images))
+                images.append({
+                    "name": child_go.m_Name,
+                    "rect": [round(v, 6) for v in own_rect],
+                    "texture": exporter.texture(sprite.m_RD.texture)[0],
+                    "color": [color["r"], color["g"], color["b"], color["a"]],
+                    "type": IMAGE_TYPES[tree["m_Type"]],
+                    "border": [border["x"] * units, border["y"] * units, border["z"] * units, border["w"] * units],
+                    "uvBorder": [border["x"] / sprite_tree["m_Rect"]["width"], border["y"] / sprite_tree["m_Rect"]["height"],
+                                 border["z"] / sprite_tree["m_Rect"]["width"], border["w"] / sprite_tree["m_Rect"]["height"]],
+                    "fillMethod": FILL_METHODS[tree["m_FillMethod"]],
+                    "fillOrigin": tree["m_FillOrigin"],
+                    "fillClockwise": bool(tree["m_FillClockwise"]),
+                    "fillAmount": tree["m_FillAmount"],
+                })
+            for child in transform.m_Children:
+                t = child.deref().read()
+                walk(t, layout(t, own_rect))
+
+        walk(root, rect)
+        canvases.append({"bone": rig.index[root.object_reader.path_id], "images": images})
+    return canvases, placed
+
+
+def color_list(color):
+    return [color.r, color.g, color.b, color.a]
+
+
+def export_scripts(exporter, rig, colors, placed):
+    """Values from ULTRAKILL scripts on the model that the mod's ports of them need."""
+    scripts = {}
+    for go_id, active in rig.active.items():
+        go = _objects[go_id].read()
+        for c in go.m_Component:
+            obj = c.component.deref()
+            if obj.type.name != "MonoBehaviour":
+                continue
+            kind = script_name(obj)
+            if kind == "Revolver":
+                revolver = obj.read()
+                tree = obj.read_typetree()
+                texture = lambda p: exporter.texture(p)[0] if p.path_id else None  # noqa: E731
+                scripts["revolver"] = {
+                    "variation": tree["gunVariation"],
+                    "variationColor": list(colors[tree["gunVariation"]]),
+                    "batteryLow": texture(revolver.batteryLow),
+                    "batteryMid": texture(revolver.batteryMid),
+                    "batteryFull": texture(revolver.batteryFull),
+                    "batteryCharges": [texture(p) for p in revolver.batteryCharges],
+                    "coinPanels": [list(placed[p.path_id]) for p in revolver.coinPanels],
+                }
+            elif kind == "RevolverCylinder" and active:
+                tree = obj.read_typetree()
+                axis = tree["rotationAxis"]
+                scripts["cylinder"] = {
+                    "bone": rig.index[transform_of(go).object_reader.path_id],
+                    "bulletAmount": tree["bulletAmount"],
+                    "rotationAxis": [axis["x"], axis["y"], axis["z"]],
+                    "speed": tree["speed"],
+                }
+    return scripts
 
 
 def find_animator(rig):
@@ -425,9 +582,23 @@ def export_animator(animator, rig):
     }
 
 
-def export_model(exporter, root_go, offset):
+def variation_glow(root_go, colors):
+    """WeaponIcon tints its variationColoredRenderers' glow (_EmissiveColor) with the weapon's variation color."""
+    for c in root_go.m_Component:
+        obj = c.component.deref()
+        if obj.type.name == "MonoBehaviour" and script_name(obj) == "WeaponIcon":
+            icon = obj.read()
+            color = list(colors[icon.weaponDescriptor.deref().read().variationColor])
+            return {r.path_id: color for r in icon.variationColoredRenderers}
+    return {}
+
+
+def export_model(exporter, root_go, offset, colors):
     rig = Rig(root_go, at_origin=offset is None)
-    model = {"origin": list(offset or (0, 0, 0)), "bones": rig.bones, "parts": export_parts(exporter, rig)}
+    parts, quads = export_parts(exporter, rig, variation_glow(root_go, colors))
+    canvases, placed = export_canvases(exporter, rig)
+    model = {"origin": list(offset or (0, 0, 0)), "bones": rig.bones, "parts": parts, "quads": quads,
+             "canvases": canvases, "scripts": export_scripts(exporter, rig, colors, placed)}
     animator = find_animator(rig)
     if animator is not None:
         model["animator"] = export_animator(animator, rig)
@@ -606,12 +777,13 @@ def main():
     colors = variation_colors(env)
     for name, (root, offset) in roots.items():
         export_icon(root, name, colors)
-        model = export_model(exporter, root, offset)
+        model = export_model(exporter, root, offset, colors)
         (OUT / "viewmodels" / f"{name}.json").write_text(json.dumps(model))
         parts = model["parts"]
         clips = [c["name"] for c in model.get("animator", {}).get("clips", [])]
         print(f"{name}: {len(model['bones'])} bones, {len(parts)} parts, {sum(len(p['indices']) // 3 for p in parts)} triangles, "
-              f"clips {clips}")
+              f"quads {[q['name'] for q in model['quads']]}, canvas images {[len(c['images']) for c in model['canvases']]}, "
+              f"scripts {sorted(model['scripts'])}, clips {clips}")
         if args.preview:
             preview(name, model, args.preview)
     print(f"{len(exporter.textures)} textures -> {OUT.relative_to(REPO)}")
