@@ -48,8 +48,7 @@ public final class UltraController {
 
 		LocalPlayer player = minecraft.player;
 		if (player == null || minecraft.level == null) {
-			this.movement = null;
-			this.driven = null;
+			release();
 			return;
 		}
 		if (!shouldDrive(player)) {
@@ -58,6 +57,7 @@ public final class UltraController {
 			return;
 		}
 		if (this.movement == null || this.driven != player) {
+			release();
 			take(minecraft, player);
 		}
 		if (minecraft.isPaused()) {
@@ -99,8 +99,11 @@ public final class UltraController {
 	}
 
 	private void release() {
-		if (this.movement != null && this.driven != null) {
-			this.driven.setDeltaMovement(this.movement.deltaMovement());
+		if (this.movement != null) {
+			this.movement.close();
+			if (this.driven != null) {
+				this.driven.setDeltaMovement(this.movement.deltaMovement());
+			}
 		}
 		this.movement = null;
 		this.driven = null;

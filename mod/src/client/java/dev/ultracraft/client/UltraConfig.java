@@ -39,6 +39,8 @@ public final class UltraConfig {
 	/** Shows the movement state under the speedometer. */
 	public boolean debug = false;
 	public boolean infiniteStamina = false;
+	/** ULTRAKILL's footsteps, matched to the block underfoot, replace Minecraft's. */
+	public boolean ultrakillFootsteps = true;
 
 	public static UltraConfig get() {
 		return instance;

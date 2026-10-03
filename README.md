@@ -8,7 +8,8 @@ ULTRAKILL's movement and arsenal in Minecraft, as a Fabric mod. Private project.
 |---|---|
 | `mod/` | The Fabric mod (Minecraft 26.3, Java 25) |
 | `tools/` | Extraction scripts for ULTRAKILL's code and data |
-| `reference/` | Decompiled ULTRAKILL code, the player prefab as JSON, Minecraft sources. Not committed; rebuild it with `tools/extract.sh` |
+| `reference/` | Decompiled ULTRAKILL code, the player prefab as JSON, Minecraft sources. Not committed |
+| `mod/src/generated/` | ULTRAKILL's sounds, packaged into the mod. Not committed |
 
 ## Setup
 
@@ -19,7 +20,11 @@ Gradle needs `JAVA_HOME` pointing at JDK 25:
 export JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home
 ```
 
-Run the game with the mod:
+Extract from your ULTRAKILL install once (and again after a game update), then run the game with the mod:
+
+```bash
+tools/extract.sh
+```
 
 ```bash
 cd mod && ./gradlew runClient
@@ -41,13 +46,10 @@ on ladders, while flying, gliding or riding.
 All rebindable under Controls → ULTRACRAFT. `/ultracraft` shows the settings, and
 `/ultracraft <setting> <value>` changes one: `speedScale` (1 = ULTRAKILL relative to your body,
 1.944 = one ULTRAKILL unit per block), `stepMode ultrakill|minecraft`, `cameraTilt`, `screenShake`,
-`fovEffects`, `speedometer`, `debug`, `infiniteStamina`.
+`fovEffects`, `speedometer`, `debug`, `infiniteStamina`, `ultrakillFootsteps`.
 
-## Rebuilding reference/
+## Extraction
 
-Rebuild `reference/` (reads the ULTRAKILL install in the CrossOver Steam bottle; set
-`ULTRAKILL_DIR` to use another one):
-
-```bash
-tools/extract.sh
-```
+`tools/extract.sh` reads the ULTRAKILL install in the CrossOver Steam bottle (set `ULTRAKILL_DIR` to
+use another one) and rebuilds `reference/` and `mod/src/generated/`. `tools/extract_sounds.py` redoes
+just the sounds.

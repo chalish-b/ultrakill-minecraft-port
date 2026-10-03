@@ -9,7 +9,9 @@
 		"LivingEntityMixin",
 		"LocalPlayerMixin",
 		"MinecraftMixin",
-		"PlayerTravelMixin"
+		"PlayerStepSoundMixin",
+		"PlayerTravelMixin",
+		"StepSoundMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

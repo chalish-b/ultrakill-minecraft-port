@@ -3,12 +3,15 @@ package dev.ultracraft.client.movement;
 import dev.ultracraft.PlayerShape;
 import dev.ultracraft.UltraPlayer;
 import dev.ultracraft.client.UltraConfig;
+import dev.ultracraft.client.movement.UltraSounds.Channel;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.MoverType;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -62,6 +65,7 @@ public final class UltraMovement {
 	private final LocalPlayer player;
 	final UltraBody body = new UltraBody();
 	final UltraCamera camera = new UltraCamera();
+	private final UltraSounds sounds = new UltraSounds();
 	private UltraInput input = new UltraInput();
 	private double clock;
 	private double accumulator;
@@ -113,6 +117,8 @@ public final class UltraMovement {
 	private boolean shortCollider;
 	private double notJumpingTimer;
 	private double jumpReadyTimer;
+	/** PlayerFootsteps: counts down to the next footstep while walking. */
+	private double footstepTimer = 1;
 
 	// GroundCheck (gc) and SlopeCheck
 	private boolean groundTouching;
@@ -182,6 +188,7 @@ public final class UltraMovement {
 		this.lastJump += dt;
 		groundCheckUpdate(dt);
 		update(dt);
+		footsteps(dt);
 		runTimers(dt);
 		this.camera.lateUpdate(dt, this, defaultFov());
 	}
@@ -423,15 +430,27 @@ public final class UltraMovement {
 			if (upward < -2) {
 				this.fallSpeed = upward;
 			}
+			if (upward < -20) {
+				this.sounds.woosh(Math.abs(this.fallSpeed) / 80, Math.abs(this.fallSpeed) / 120);
+			} else {
+				this.sounds.woosh(0, 0);
+			}
+			if (this.windState > 0) {
+				this.sounds.woosh(Math.min(this.windState, 1), 1);
+			}
 			if (upward < -100) {
 				this.body.velocity = U.projectOnPlane(this.body.velocity, G).add(G.scale(100));
 			}
 		}
 		if (this.falling) {
 			checkLanding();
+		} else {
+			this.sounds.woosh(0, 0);
 		}
 		handleInputs();
-		if (!this.onGround) {
+		if (this.onGround) {
+			this.sounds.wallScrape(null);
+		} else {
 			cling(dt);
 		}
 		tryFloorSnap(dt);
@@ -491,6 +510,7 @@ public final class UltraMovement {
 	private void tryDash() {
 		this.dashedFromGround = this.onGround;
 		if (this.boostCharge < 100) {
+			this.sounds.play("stamina_fail", 1, 1);
 			return;
 		}
 		if (this.sliding) {
@@ -504,6 +524,7 @@ public final class UltraMovement {
 			this.boostCharge -= 100;
 		}
 		this.camera.dodgeDirection = UltraCamera.dodgeIndex(this.dodgeDirection, forward());
+		this.sounds.play(Channel.MAIN, "dodge", 1, 1);
 		if (this.heavyFall) {
 			this.fallSpeed = 0;
 			this.heavyFall = false;
@@ -538,6 +559,15 @@ public final class UltraMovement {
 		if (!this.onGround) {
 			return;
 		}
+		if (this.fallSpeed > -50) {
+			this.sounds.play(Channel.GROUND, "landing", (float)(0.5 + this.fallSpeed * -0.01), this.sounds.randomPitch());
+			footstep(0.5F, true, 0);
+			footstep(0.5F, true, 1);
+		} else {
+			this.sounds.play("landing_heavy", 1, 1);
+			footstep(1, true, 0);
+			footstep(1, true, 1);
+		}
 		if (!this.jumpCooldown) {
 			this.falling = false;
 		}
@@ -548,10 +578,7 @@ public final class UltraMovement {
 
 	/** Sliding down a wall: holding into it while falling slows the fall at first. */
 	private void cling(double dt) {
-		if (!this.onWall || U.isZero(this.inputDir)) {
-			return;
-		}
-		boolean againstWall = raycast(root(), this.inputDir, 1) >= 0;
+		boolean againstWall = this.onWall && raycast(root(), this.inputDir, 1) >= 0;
 		if (!this.sliding && againstWall && !this.heavyFall && upwardSpeed() < -1) {
 			Vec3 right = right();
 			Vec3 forward = forward();
@@ -559,6 +586,9 @@ public final class UltraMovement {
 			double forwards = U.clamp(-1, 1, forward.dot(this.body.velocity));
 			this.body.velocity = right.scale(sideways).add(forward.scale(forwards)).add(G.scale(2 * this.clingFade));
 			this.clingFade = U.moveTowards(this.clingFade, 50, dt * 4);
+			this.sounds.wallScrape(wallSurface());
+		} else {
+			this.sounds.wallScrape(null);
 		}
 	}
 
@@ -574,6 +604,9 @@ public final class UltraMovement {
 			}
 			if (this.onGround || this.onWall) {
 				this.camera.shake(0.1);
+				this.sounds.slide(!this.onGround ? wallSurface() : groundSurface());
+			} else {
+				this.sounds.slide(null);
 			}
 			return;
 		}
@@ -630,6 +663,8 @@ public final class UltraMovement {
 	}
 
 	private void stopSlide() {
+		this.sounds.slide(null);
+		this.sounds.play("slide_stop", 1, 1);
 		this.camera.resetToDefaultPos();
 		this.sliding = false;
 		this.slideEnding = true;
@@ -644,20 +679,28 @@ public final class UltraMovement {
 		this.jumping = true;
 		this.notJumpingTimer = 0.25;
 		this.falling = true;
+		if (this.superJumpChance > 0) {
+			this.sounds.play(Channel.MAIN, "jump", 0.85F, 2);
+		} else {
+			this.sounds.play(Channel.MAIN, "jump", 0.75F, 1);
+		}
 		this.body.velocity = U.projectOnPlane(this.body.velocity, UP);
 		if (this.sliding) {
 			this.body.addForce(UP.scale(force * (this.slowMode ? 1 : 2)));
 			stopSlide();
 		} else if (this.boost && this.jumpTimestamp - this.slideTimestamp > 0.008F * SSJ_MAX_FRAMES) {
 			if (this.enemyStepping) {
+				this.sounds.play("dash_jump", 1, 1);
 				this.windState = 0.5;
 			} else if (this.boostCharge >= 100) {
 				if (!UltraConfig.get().infiniteStamina) {
 					this.boostCharge -= 100;
 				}
+				this.sounds.play("dash_jump", 1, 1);
 			} else {
 				double speed = WALK_SPEED * DT * 2.75;
 				this.body.velocity = new Vec3(this.inputDir.x * speed, 0, this.inputDir.z * speed);
+				this.sounds.play("stamina_fail", 1, 1);
 			}
 			this.body.addForce(UP.scale(force * (this.slowMode ? 0.75 : 1.5)));
 		} else if (this.slowMode) {
@@ -699,6 +742,11 @@ public final class UltraMovement {
 		if (this.heavyFall) {
 			this.slamStorage = true;
 		}
+		this.sounds.play(Channel.MAIN, "jump", 0.75F, 1 + 0.25F * this.currentWallJumps);
+		if (this.currentWallJumps == 3) {
+			this.sounds.play(Channel.GROUND, "wall_jump_final", 0.75F, 1);
+		}
+		this.sounds.play(Channel.FOOTSTEPS, "footstep." + wallSurface(), 0.5F, this.sounds.randomPitch());
 		Vec3 awayFromWall = U.normalized(root().subtract(this.pointOfCollision));
 		if (this.sliding || this.clock - this.slideTimestamp < SSJ_MAX_FRAMES * 0.008F) {
 			Vec3 direction = U.reflect(U.normalized(this.dodgeDirection), awayFromWall);
@@ -757,6 +805,46 @@ public final class UltraMovement {
 				this.jumpCooldown = false;
 			}
 		}
+	}
+
+	/** PlayerFootsteps.Update: a step every third of a second at full walking speed. */
+	private void footsteps(double dt) {
+		if (this.walking) {
+			this.footstepTimer = U.moveTowards(this.footstepTimer, 0, Math.min(this.body.velocity.length(), 15) / 15 * dt * 3);
+		}
+		if (this.footstepTimer <= 0) {
+			footstep(0.25F, false, 0);
+		}
+	}
+
+	private void footstep(float volume, boolean force, int delayTicks) {
+		if (!this.onGround && !force) {
+			return;
+		}
+		this.footstepTimer = 1;
+		if (UltraConfig.get().ultrakillFootsteps) {
+			String surface = this.player.isInWater() ? Surfaces.WET : groundSurface();
+			this.sounds.play(Channel.FOOTSTEPS, "footstep." + surface, volume, this.sounds.randomPitch(), delayTicks);
+		}
+	}
+
+	/** The surface under the player, found like SceneHelper.TryGetSurfaceData: straight down, 3 units. */
+	private String groundSurface() {
+		Vec3 from = this.player.position().add(0, 0.1, 0);
+		BlockHitResult hit = level().clip(new ClipContext(from, from.add(0, -3 * S, 0), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, this.player));
+		return hit.getType() == HitResult.Type.MISS ? Surfaces.GENERIC : Surfaces.of(level().getBlockState(hit.getBlockPos()));
+	}
+
+	/** The surface of the wall the wall check touches. */
+	private String wallSurface() {
+		Vec3 inwards = U.normalized(this.pointOfCollision.subtract(wallCheckCenter())).scale(0.01);
+		BlockState state = level().getBlockState(BlockPos.containing(this.pointOfCollision.add(inwards)));
+		return state.isAir() ? Surfaces.GENERIC : Surfaces.of(state);
+	}
+
+	/** Stops the sounds that keep playing on their own. */
+	public void close() {
+		this.sounds.stopAll();
 	}
 
 	// ---- GroundCheck, WallCheck, ClimbStep ---------------------------------------------------

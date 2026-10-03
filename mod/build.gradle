@@ -10,6 +10,13 @@ repositories {
 	// for more information about repositories.
 }
 
+sourceSets {
+	main {
+		// ULTRAKILL's sounds, extracted from the local install by tools/extract_sounds.py
+		resources.srcDir "src/generated/resources"
+	}
+}
+
 loom {
 	splitEnvironmentSourceSets()
 
