@@ -62,9 +62,23 @@ public final class UltraHealth {
 		return player.getHealth() * HP_PER_HEALTH;
 	}
 
+	/**
+	 * NewMovement.GetHurt from an explosion: until the hurt invincibility it brings runs out, blood from
+	 * explosions doesn't heal (NewMovement.exploded).
+	 */
+	public static void onExplosionHurt(ServerPlayer player, int damage) {
+		state(player).explodedTime = damage >= 50 ? 0.8F : 0.5F;
+	}
+
+	/** Whether blood spilled by an explosion can't heal the player right now. */
+	public static boolean exploded(ServerPlayer player) {
+		return state(player).explodedTime > 0;
+	}
+
 	/** Hard damage wears off once its cooldown runs out (NewMovement.Update, at style rank D). */
 	public static void tick(ServerPlayer player, float dt) {
 		State state = state(player);
+		state.explodedTime = Math.max(state.explodedTime - dt, 0);
 		if (difficulty(player) <= 1) {
 			state.hardDamage = 0;
 			state.hardDamageCooldown = 0;
@@ -89,5 +103,7 @@ public final class UltraHealth {
 	public static final class State {
 		float hardDamage;
 		float hardDamageCooldown;
+		/** Seconds of hurt invincibility left after an explosion hurt the player. */
+		float explodedTime;
 	}
 }

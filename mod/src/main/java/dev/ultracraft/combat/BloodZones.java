@@ -14,7 +14,8 @@ import java.util.List;
 
 /**
  * Fresh blood that heals: each splatter heals the first ULTRAKILL player who stands in it during its first
- * quarter of a second (Bloodsplatter's trigger collider).
+ * quarter of a second (Bloodsplatter's trigger collider). Blood from an explosion is used up without healing a
+ * player that an explosion has just hurt.
  */
 public final class BloodZones {
 	private static final int LIFETIME_TICKS = 5;
@@ -23,8 +24,8 @@ public final class BloodZones {
 	private BloodZones() {
 	}
 
-	public static void add(ServerLevel level, Vec3 position, Gore gore) {
-		Zone zone = new Zone(level, position, gore.radius * PlayerShape.BLOCKS_PER_UNIT, gore.hp);
+	public static void add(ServerLevel level, Vec3 position, Gore gore, boolean fromExplosion) {
+		Zone zone = new Zone(level, position, gore.radius * PlayerShape.BLOCKS_PER_UNIT, gore.hp, fromExplosion);
 		if (!zone.tryHeal()) {
 			ZONES.add(zone);
 		}
@@ -44,13 +45,15 @@ public final class BloodZones {
 		final Vec3 position;
 		final double radius;
 		final float hp;
+		final boolean fromExplosion;
 		int ticksLeft = LIFETIME_TICKS;
 
-		Zone(ServerLevel level, Vec3 position, double radius, float hp) {
+		Zone(ServerLevel level, Vec3 position, double radius, float hp, boolean fromExplosion) {
 			this.level = level;
 			this.position = position;
 			this.radius = radius;
 			this.hp = hp;
+			this.fromExplosion = fromExplosion;
 		}
 
 		boolean tryHeal() {
@@ -59,7 +62,9 @@ public final class BloodZones {
 					continue;
 				}
 				if (distance(player.getBoundingBox(), this.position) <= this.radius) {
-					UltraHealth.heal(player, this.hp);
+					if (!this.fromExplosion || !UltraHealth.exploded(player)) {
+						UltraHealth.heal(player, this.hp);
+					}
 					return true;
 				}
 			}

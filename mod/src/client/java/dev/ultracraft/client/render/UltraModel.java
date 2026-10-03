@@ -29,6 +29,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
 
 /**
  * A model extracted by tools/extract_models.py: a rig of bones with the prefab's local transforms, and
@@ -155,7 +157,15 @@ public final class UltraModel {
 
 	/** Draws the meshes with the given bone matrices, skinned on the CPU, and their glow on top. */
 	public void submit(PoseStack poseStack, SubmitNodeCollector collector, int light, Matrix4f[] world) {
+		submit(poseStack, collector, light, world, Set.of());
+	}
+
+	/** Like {@link #submit(PoseStack, SubmitNodeCollector, int, Matrix4f[])}, leaving out the meshes with these materials. */
+	public void submit(PoseStack poseStack, SubmitNodeCollector collector, int light, Matrix4f[] world, Set<String> exceptMaterials) {
 		for (Part part : this.parts) {
+			if (exceptMaterials.contains(part.material)) {
+				continue;
+			}
 			float[][] skinned = part.skin(world);
 			collector.submitCustomGeometry(poseStack, RenderTypes.entityCutout(part.texture), (p, buffer) -> part.emit(p, buffer, skinned[0], skinned[1], 0xFFFFFFFF, light));
 			if (part.emissive != null) {
@@ -185,6 +195,16 @@ public final class UltraModel {
 		return world;
 	}
 
+	/** The meshes with this material, drawn with their texture in the given render type and color (ARGB). */
+	public void submitMaterial(PoseStack poseStack, SubmitNodeCollector collector, Matrix4f[] world, String material, Function<Identifier, RenderType> type, int color, int light) {
+		for (Part part : this.parts) {
+			if (part.material.equals(material)) {
+				float[][] skinned = part.skin(world);
+				collector.submitCustomGeometry(poseStack, type.apply(part.texture), (p, buffer) -> part.emit(p, buffer, skinned[0], skinned[1], color, light));
+			}
+		}
+	}
+
 	/** A mesh as stored: in its bone's space, Unity's axes. */
 	public record Mesh(Identifier texture, float[] positions, float[] normals, float[] uvs, int[] indices) {
 	}
@@ -211,7 +231,7 @@ public final class UltraModel {
 	 * tinted by {@code emissiveColor} (ARGB).
 	 */
 	private record Part(
-		Identifier texture, float[] positions, float[] normals, float[] uvs, int[] indices,
+		String material, Identifier texture, float[] positions, float[] normals, float[] uvs, int[] indices,
 		int[] joints, Matrix4f[] binds, int influences, int[] jointIndices, float[] jointWeights, @Nullable RenderType emissive, int emissiveColor
 	) {
 		/** Positions and normals in camera space for the given bone matrices. */
@@ -306,6 +326,7 @@ public final class UltraModel {
 					binds[i] = new Matrix4f().set(floats(bindArray.get(i).getAsJsonArray()));
 				}
 				parts.add(new Part(
+					part.get("material").getAsString(),
 					Identifier.parse(part.get("texture").getAsString()),
 					floats(part.getAsJsonArray("positions")),
 					floats(part.getAsJsonArray("normals")),

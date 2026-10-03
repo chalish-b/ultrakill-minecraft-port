@@ -38,11 +38,24 @@ MODELS = {
     "revolver_piercer": ("Revolver Pierce", "Revolver", (0, 0, 0)),
     "revolver_marksman": ("Revolver Ricochet", "Revolver", (0, 0, 0)),
     "revolver_sharpshooter": ("Revolver Twirl", "Revolver", (0, 0, 0)),
+    "shotgun_core_eject": ("Shotgun Grenade", "Shotgun", (0, 0, 0)),
     "feedbacker": ("Arm Blue", "Punch", (0, -0.225, 0)),
     "knuckleblaster": ("Arm Red", "Punch", (0, -0.225, 0)),
     "coin": ("Coin", "Coin", None),
     "shotgun_shell": ("ShotgunShell", "ShotgunShell", None),
     "explosion_wave_knuckleblaster": ("Explosion Wave Knuckleblaster", "RandomPitch", None),
+}
+
+# Models drawn in the world that are only reachable through another prefab's field:
+# name -> (script, the GameObject it's on, the field naming the prefab). Prefabs named from inside another
+# referenced model: name -> (that model, script, field).
+REFERENCED = {
+    "explosion": ("Punch", "Arm Blue", "parriedProjectileHitObject"),
+    "shotgun_muzzle_flash": ("Shotgun", "Shotgun Grenade", "muzzleFlash"),
+    "bullet_spark": ("Projectile", "Shotgun Projectile", "explosionEffect"),
+}
+NESTED = {
+    "explosion_chunk": ("explosion", "Explosion", "explosionChunk"),
 }
 
 # AnimatorControllerParameterType and AnimatorConditionMode values.
@@ -84,6 +97,60 @@ def local_matrix(position, rotation, scale):
 def matrix(m):
     """A serialized Matrix4x4f (eRC fields) as a numpy matrix."""
     return np.array([[getattr(m, f"e{r}{c}") for c in range(4)] for r in range(4)])
+
+
+def activate_controlled(rig, root_go):
+    """An ExplosionController turns on its toActivate objects when it starts, unless simple explosions are on."""
+    for c in root_go.m_Component:
+        obj = c.component.deref()
+        if obj.type.name != "MonoBehaviour" or script_name(obj) != "ExplosionController":
+            continue
+        for target in obj.read().toActivate:
+            if not target.path_id:
+                continue
+
+            def walk(t):
+                rig.active[t.m_GameObject.path_id] = True
+                for child in t.m_Children:
+                    walk(child.deref().read())
+
+            walk(transform_of(target.deref().read()))
+
+
+def referenced_roots(env):
+    """The REFERENCED prefabs, found through the field that names them."""
+    found = {}
+    for obj in env.objects:
+        if obj.type.name != "MonoBehaviour":
+            continue
+        cls = script_name(obj)
+        for model, (script, go_name, field) in REFERENCED.items():
+            if model in found or cls != script:
+                continue
+            component = obj.read()
+            if component.m_GameObject.read().m_Name != go_name:
+                continue
+            found[model] = (prefab(getattr(component, field)), None)
+    for model, (parent, script, field) in NESTED.items():
+        def walk(t):
+            for c in t.m_GameObject.read().m_Component:
+                obj = c.component.deref()
+                if obj.type.name == "MonoBehaviour" and script_name(obj) == script and getattr(obj.read(), field).path_id:
+                    return prefab(getattr(obj.read(), field))
+            for child in t.m_Children:
+                result = walk(child.deref().read())
+                if result is not None:
+                    return result
+            return None
+
+        found[model] = (walk(transform_of(found[parent][0])), None)
+    return found
+
+
+def prefab(pptr):
+    """The GameObject a prefab field names, whether it's typed as the object or as one of its components."""
+    target = pptr.deref().read()
+    return target if target.object_reader.type.name == "GameObject" else target.m_GameObject.read()
 
 
 def transform_of(go):
@@ -235,6 +302,7 @@ def export_parts(exporter, rig, glow_colors):
     parts = []
     quads = []
     sprites = []
+    particles = []
     for go_id, active in rig.active.items():
         if not active:
             continue
@@ -242,6 +310,14 @@ def export_parts(exporter, rig, glow_colors):
         for c in go.m_Component:
             obj = c.component.deref()
             kind = obj.type.name
+            if kind == "ParticleSystemRenderer":
+                r = obj.read()
+                textures = []
+                for material in r.m_Materials:
+                    tex_pptr = texture_name(material.deref().read())[0] if material.path_id else None
+                    textures.append(exporter.texture(tex_pptr)[0] if tex_pptr else None)
+                particles.append({"name": go.m_Name, "bone": rig.index[transform_of(go).object_reader.path_id], "textures": textures})
+                continue
             if kind == "SkinnedMeshRenderer":
                 r = obj.read()
                 if not r.m_Enabled or not r.m_Mesh.path_id:
@@ -307,8 +383,11 @@ def export_parts(exporter, rig, glow_colors):
                 if "emissive" in part and obj.path_id in glow_colors:
                     part["emissiveColor"] = glow_colors[obj.path_id]
                 parts.append(part)
-    return parts, quads, sprites
+    return parts, quads, sprites, particles
 
+
+# A white pixel, for Images that have no sprite.
+BLANK = f"{NAMESPACE}:textures/viewmodel/blank.png"
 
 # UnityEngine.UI.Image.Type and FillMethod.
 IMAGE_TYPES = {0: "simple", 1: "sliced", 2: "tiled", 3: "filled"}
@@ -357,24 +436,32 @@ def export_canvases(exporter, rig):
                     continue
                 tree = obj.read_typetree()
                 image = obj.read()
-                if not tree["m_Enabled"] or not image.m_Sprite.path_id:
+                if not tree["m_Enabled"]:
                     continue
-                sprite = image.m_Sprite.deref().read()
-                sprite_tree = image.m_Sprite.deref().read_typetree()
-                # Sliced borders are in sprite pixels; the canvas draws them at its reference pixels per unit.
-                units = reference_ppu / sprite_tree["m_PixelsToUnits"] / tree["m_PixelsPerUnitMultiplier"]
-                border = sprite_tree["m_Border"]
                 color = tree["m_Color"]
                 placed[obj.path_id] = (len(canvases), len(images))
+                if image.m_Sprite.path_id:
+                    sprite = image.m_Sprite.deref().read()
+                    sprite_tree = image.m_Sprite.deref().read_typetree()
+                    # Sliced borders are in sprite pixels; the canvas draws them at its reference pixels per unit.
+                    units = reference_ppu / sprite_tree["m_PixelsToUnits"] / tree["m_PixelsPerUnitMultiplier"]
+                    border = sprite_tree["m_Border"]
+                    texture = exporter.texture(sprite.m_RD.texture)[0]
+                    border = [border["x"] * units, border["y"] * units, border["z"] * units, border["w"] * units], [
+                        border["x"] / sprite_tree["m_Rect"]["width"], border["y"] / sprite_tree["m_Rect"]["height"],
+                        border["z"] / sprite_tree["m_Rect"]["width"], border["w"] / sprite_tree["m_Rect"]["height"]]
+                else:
+                    # Without a sprite an Image is a plain rectangle in its color.
+                    texture = BLANK
+                    border = [0, 0, 0, 0], [0, 0, 0, 0]
                 images.append({
                     "name": child_go.m_Name,
                     "rect": [round(v, 6) for v in own_rect],
-                    "texture": exporter.texture(sprite.m_RD.texture)[0],
+                    "texture": texture,
                     "color": [color["r"], color["g"], color["b"], color["a"]],
-                    "type": IMAGE_TYPES[tree["m_Type"]],
-                    "border": [border["x"] * units, border["y"] * units, border["z"] * units, border["w"] * units],
-                    "uvBorder": [border["x"] / sprite_tree["m_Rect"]["width"], border["y"] / sprite_tree["m_Rect"]["height"],
-                                 border["z"] / sprite_tree["m_Rect"]["width"], border["w"] / sprite_tree["m_Rect"]["height"]],
+                    "type": IMAGE_TYPES[tree["m_Type"]] if texture else "simple",
+                    "border": border[0],
+                    "uvBorder": border[1],
                     "fillMethod": FILL_METHODS[tree["m_FillMethod"]],
                     "fillOrigin": tree["m_FillOrigin"],
                     "fillClockwise": bool(tree["m_FillClockwise"]),
@@ -662,9 +749,10 @@ def variation_glow(root_go, colors):
 
 def export_model(exporter, root_go, offset, colors):
     rig = Rig(root_go, at_origin=offset is None)
-    parts, quads, sprites = export_parts(exporter, rig, variation_glow(root_go, colors))
+    activate_controlled(rig, root_go)
+    parts, quads, sprites, particles = export_parts(exporter, rig, variation_glow(root_go, colors))
     canvases, placed = export_canvases(exporter, rig)
-    model = {"origin": list(offset or (0, 0, 0)), "bones": rig.bones, "parts": parts, "quads": quads, "sprites": sprites,
+    model = {"origin": list(offset or (0, 0, 0)), "bones": rig.bones, "parts": parts, "quads": quads, "sprites": sprites, "particles": particles,
              "canvases": canvases, "scripts": export_scripts(exporter, rig, colors, placed)}
     animator = find_animator(rig)
     if animator is not None:
@@ -830,8 +918,8 @@ def main():
     args = parser.parse_args()
 
     env = UnityPy.load(*bundles())
-    roots = find_roots(env)
-    missing = set(MODELS) - set(roots)
+    roots = find_roots(env) | referenced_roots(env)
+    missing = (set(MODELS) | set(REFERENCED) | set(NESTED)) - set(roots)
     if missing:
         sys.exit(f"models not found: {sorted(missing)}")
 
@@ -839,6 +927,9 @@ def main():
         if (OUT / folder).exists():
             shutil.rmtree(OUT / folder)
     (OUT / "viewmodels").mkdir(parents=True)
+    (OUT / "textures" / "viewmodel").mkdir(parents=True)
+    from PIL import Image
+    Image.new("RGBA", (1, 1), (255, 255, 255, 255)).save(OUT / "textures" / "viewmodel" / "blank.png")
 
     exporter = Exporter()
     colors = variation_colors(env)

@@ -64,6 +64,10 @@ final class Explosion {
 
 	/** "Explosion Wave Knuckleblaster", the Knuckleblaster's blast: it only hits enemies, for 1 damage. */
 	static final Settings KNUCKLEBLASTER = new Settings(12, 0.1, 0.2236069, 2.5, 12, 10, 1, 1.5, true, Subjects.ENEMIES_ONLY, false, -1);
+	/** "Explosion", the standard explosion's blast: 3.5 to enemies within 6 units (2.3 past half of that) and 35 HP to the player. */
+	static final Settings STANDARD = new Settings(12, 1, 0.2236069, 1, 6, 35, 1, 1, false, Subjects.ALL, false, -1);
+	/** The standard explosion's second sphere: a wider, harmless wave that only pushes enemies. */
+	static final Settings STANDARD_WAVE = new Settings(12, 0.1, 0.2236069, 2.5, 8, 0, 0, 1, false, Subjects.ENEMIES_ONLY, false, -1);
 
 	/** What the explosion does to what it reaches; units per second throughout. */
 	interface Hits {
@@ -85,6 +89,8 @@ final class Explosion {
 	final Quaternionf rotation;
 	/** playerProjectileForceDirection: enemies, the player's projectiles and objects go this way instead of away. */
 	private final @Nullable Vec3 forceDirection;
+	/** From a boosted projectile: it launches the player at a set speed instead. */
+	final boolean boosted;
 	private final Set<Integer> hit = new HashSet<>();
 	private double localScale;
 	private double speed;
@@ -100,10 +106,15 @@ final class Explosion {
 	boolean removed;
 
 	Explosion(Settings settings, Vec3 origin, Quaternionf rotation, @Nullable Vec3 forceDirection) {
+		this(settings, origin, rotation, forceDirection, false);
+	}
+
+	Explosion(Settings settings, Vec3 origin, Quaternionf rotation, @Nullable Vec3 forceDirection, boolean boosted) {
 		this.settings = settings;
 		this.origin = origin;
 		this.rotation = rotation;
 		this.forceDirection = forceDirection;
+		this.boosted = boosted;
 		this.localScale = settings.startScale;
 		this.speed = settings.speed;
 		this.damage = settings.damage;

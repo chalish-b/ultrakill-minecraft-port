@@ -7,6 +7,7 @@ import dev.ultracraft.mixin.AbstractArrowAccessor;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
+import dev.ultracraft.net.HitstopPayload;
 import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.WeaponHitPayload;
@@ -71,6 +72,11 @@ public final class ServerCombat {
 		ServerPlayNetworking.registerGlobalReceiver(CycleVariantPayload.TYPE, (payload, context) -> onCycleVariant(context.player()));
 		ServerPlayNetworking.registerGlobalReceiver(ExplosionHitPayload.TYPE, (payload, context) -> onExplosionHit(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(ExplosionHurtPayload.TYPE, (payload, context) -> onExplosionHurt(context.player(), payload.damage()));
+		ServerPlayNetworking.registerGlobalReceiver(HitstopPayload.TYPE, (payload, context) -> {
+			if (active(context.player())) {
+				hitstop(context.player().level().getServer(), Math.clamp(payload.millis(), 0, PARRY_HITSTOP_MILLIS));
+			}
+		});
 		ServerTickEvents.END_SERVER_TICK.register(ServerCombat::tick);
 	}
 
@@ -85,7 +91,7 @@ public final class ServerCombat {
 		if (target.distanceToSqr(player) > 512 * 512) {
 			return;
 		}
-		damage(player, target, hit.damage(), hit.head(), hit.position(), false);
+		damage(player, target, hit.damage(), hit.head(), hit.position(), false, false);
 	}
 
 	/**
@@ -95,14 +101,14 @@ public final class ServerCombat {
 	 *
 	 * @return the blood it left
 	 */
-	private static Gore damage(ServerPlayer player, LivingEntity target, float damage, boolean head, Vec3 position, boolean tryForExplode) {
+	private static Gore damage(ServerPlayer player, LivingEntity target, float damage, boolean head, Vec3 position, boolean tryForExplode, boolean fromExplosion) {
 		ServerLevel level = player.level();
 		DamageSource source = player.damageSources().playerAttack(player);
 		target.setInvulnerableTime(0);
 		target.hurtServer(level, source, damage * HEALTH_PER_DAMAGE);
 		boolean killed = !target.isAlive();
 		Gore gore = tryForExplode && killed ? Gore.HEAD : Gore.of(head, damage, killed);
-		BloodZones.add(level, position, gore);
+		BloodZones.add(level, position, gore, fromExplosion);
 		return gore;
 	}
 
@@ -122,7 +128,9 @@ public final class ServerCombat {
 		Vec3 push = hit.push();
 		if (entity instanceof LivingEntity target) {
 			Vec3 velocity = target.getDeltaMovement();
-			damage(player, target, hit.damage(), false, target.getBoundingBox().getCenter(), false);
+			if (hit.damage() > 0) {
+				damage(player, target, hit.damage(), false, target.getBoundingBox().getCenter(), false, true);
+			}
 			knockBack(target, velocity, push);
 		} else if (entity instanceof Projectile projectile) {
 			Vec3 velocity = push.normalize().scale(Math.max(projectile.getDeltaMovement().length(), push.length() * S / 20));
@@ -142,6 +150,7 @@ public final class ServerCombat {
 			return;
 		}
 		player.hurtServer(player.level(), player.damageSources().explosion(player, player), damage / UltraHealth.HP_PER_HEALTH);
+		UltraHealth.onExplosionHurt(player, damage);
 	}
 
 	private static void onCycleVariant(ServerPlayer player) {
@@ -227,7 +236,7 @@ public final class ServerCombat {
 			return false;
 		}
 		Vec3 velocity = target.getDeltaMovement();
-		Gore gore = damage(player, target, type.damage, false, hitPoint, type.tryForExplode);
+		Gore gore = damage(player, target, type.damage, false, hitPoint, type.tryForExplode, false);
 		knockBack(target, velocity, look.scale(type.force));
 		hitstop(player.level().getServer(), PUNCH_HITSTOP_MILLIS);
 		ServerPlayNetworking.send(player, new PunchResultPayload(PunchResultPayload.Result.ENEMY, hitPoint, gore));

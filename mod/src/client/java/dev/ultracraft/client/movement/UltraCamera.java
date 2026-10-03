@@ -29,6 +29,13 @@ final class UltraCamera {
 	private double fovRatio = 1;
 	private final RandomSource random = RandomSource.create();
 
+	/** CameraController.StopShake. */
+	void stopShake() {
+		this.cameraShaking = 0;
+		this.shakeRight = 0;
+		this.shakeUp = 0;
+	}
+
 	void shake(double amount) {
 		amount *= UltraConfig.get().screenShake;
 		if (amount != 0 && this.cameraShaking < amount) {

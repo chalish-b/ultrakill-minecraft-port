@@ -132,6 +132,11 @@ public final class UltraMovement {
 	private int rocketJumps;
 	/** A harmless explosion can't launch the player again until this runs out. */
 	private double safeExplosionLaunchCooldown;
+	/**
+	 * NewMovement.exploded: an explosion hurt the player, and no explosion launches them again until the hurt
+	 * invincibility it brought (this many seconds) runs out.
+	 */
+	private double explodedTime;
 	/** PlayerFootsteps: counts down to the next footstep while walking. */
 	private double footstepTimer = 1;
 
@@ -810,15 +815,16 @@ public final class UltraMovement {
 	}
 
 	/**
-	 * Explosion.Collide's push on the player: NewMovement.LaunchFromPoint, away from the explosion. A harmless
-	 * rocket explosion pushes less with every rocket jump in a row, and a harmless explosion can't push again
-	 * for half a second.
+	 * Explosion.Collide's push on the player: NewMovement.LaunchFromPoint, away from the explosion. A boosted
+	 * one (from a boosted projectile) launches at no less than 60 units a second instead. A harmless rocket
+	 * explosion pushes less with every rocket jump in a row, and a harmless explosion can't push again for half a
+	 * second.
 	 *
 	 * @param origin the explosion's centre
 	 * @param harmful whether the explosion also hurts the player
 	 */
-	public void explosionLaunch(Vec3 origin, double pushForceMultiplier, double maxSize, boolean rocketExplosion, boolean harmful) {
-		if (this.safeExplosionLaunchCooldown > 0 && !harmful) {
+	public void explosionLaunch(Vec3 origin, double pushForceMultiplier, double maxSize, boolean rocketExplosion, boolean boosted, boolean harmful) {
+		if (this.explodedTime > 0 || (this.safeExplosionLaunchCooldown > 0 && !harmful)) {
 			return;
 		}
 		double strength = 200;
@@ -829,7 +835,11 @@ public final class UltraMovement {
 		Vec3 root = root();
 		Vec3 offset = origin.subtract(root);
 		Vec3 from = (offset.x * offset.x + offset.z * offset.z) / (S * S) < 0.0625 ? root : origin;
-		launchFromPoint(from, strength * pushForceMultiplier, maxSize);
+		if (boosted) {
+			launchFromPointAtSpeed(from, Math.max(60, this.body.velocity.length()) * pushForceMultiplier);
+		} else {
+			launchFromPoint(from, strength * pushForceMultiplier, maxSize);
+		}
 		if (!harmful) {
 			this.safeExplosionLaunchCooldown = 0.5;
 		}
@@ -849,15 +859,48 @@ public final class UltraMovement {
 		launchImpulse(push);
 	}
 
+	/** NewMovement.LaunchFromPointAtSpeed: away from {@code position} at {@code speed}, and at least upwards by half that. */
+	private void launchFromPointAtSpeed(Vec3 position, double speed) {
+		Vec3 root = root();
+		Vec3 away = root.equals(position) ? G.scale(-1) : root.subtract(position).normalize();
+		Vec3 push = away.scale(speed);
+		double up = -G.dot(push);
+		push = push.subtract(G.scale(Math.max(0, 0.5 * speed - up)));
+		launchImpulse(push, 1, true);
+	}
+
 	/** NewMovement.Launch: an impulse of {@code direction} × 8 on the player's 100 kg body, replacing its velocity. */
 	private void launchImpulse(Vec3 direction) {
+		launchImpulse(direction, 8, false);
+	}
+
+	/**
+	 * NewMovement.Launch: replaces the player's velocity with {@code direction} × {@code multiplier}, as an impulse
+	 * on their 100 kg body or, ignoring mass, as a velocity.
+	 */
+	private void launchImpulse(Vec3 direction, double multiplier, boolean ignoreMass) {
 		if (direction.subtract(G).lengthSqr() < 1.0E-10 && this.onGround) {
 			return;
 		}
 		if (direction.lengthSqr() > 0) {
 			this.body.velocity = Vec3.ZERO;
 		}
-		launch(U.clampMagnitude(direction, 1000).scale(8 / MASS));
+		launch(U.clampMagnitude(direction, 1000).scale(multiplier / (ignoreMass ? 1 : MASS)));
+	}
+
+	/** Whether an explosion has just hurt the player, so another can neither hurt nor launch them yet. */
+	public boolean exploded() {
+		return this.explodedTime > 0;
+	}
+
+	/** NewMovement.GetHurt from an explosion: sets {@link #explodedTime} to the hurt invincibility it brings. */
+	public void hurtByExplosion(int damage) {
+		this.explodedTime = damage >= 50 ? 0.8 : 0.5;
+	}
+
+	/** Adds to the player's velocity, in units per second, without counting as a launch. */
+	public void addVelocity(Vec3 change) {
+		this.body.velocity = this.body.velocity.add(change);
 	}
 
 	/** Unity's Invoke without CancelInvoke: when one is already pending, the earlier one fires first. */
@@ -867,6 +910,7 @@ public final class UltraMovement {
 
 	private void runTimers(double dt) {
 		this.safeExplosionLaunchCooldown = U.moveTowards(this.safeExplosionLaunchCooldown, 0, dt);
+		this.explodedTime = U.moveTowards(this.explodedTime, 0, dt);
 		if (this.notJumpingTimer > 0) {
 			this.notJumpingTimer -= dt;
 			if (this.notJumpingTimer <= 0) {
@@ -1163,6 +1207,10 @@ public final class UltraMovement {
 
 	public void kickFov(double amount) {
 		this.camera.kickFov(amount);
+	}
+
+	public void stopShake() {
+		this.camera.stopShake();
 	}
 
 	public void shake(double amount) {

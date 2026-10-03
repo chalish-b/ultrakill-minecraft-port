@@ -18,6 +18,7 @@ import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.resources.Identifier;
 import net.minecraft.util.LightCoordsUtil;
 import net.minecraft.util.RandomSource;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -28,7 +29,10 @@ import org.joml.Vector3f;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Beams, blood and impacts, explosions' looks, and drawing beams, coins, coin trails and shells in the world. */
+/**
+ * Beams, blood and impacts, muzzle flashes, explosions' looks, and drawing beams, coins, coin trails, pellets and
+ * shells in the world.
+ */
 final class Effects {
 	/**
 	 * The revolver beams' LineRenderers: a strip from the gun to what the shot hit, shaded along its length by
@@ -71,7 +75,10 @@ final class Effects {
 	/** The coin trail's alpha at its head; it fades to nothing at the tail. */
 	private static final float TRAIL_ALPHA = 0.49F;
 
-	/** The blast wave's sphere material (ExplosionShockwave 3): its color, its glow, and its texture's alpha. */
+	/**
+	 * The blast wave's sphere material (ExplosionShockwave 3): its color, its glow, and its texture's alpha, which
+	 * scales both as it adds them.
+	 */
 	private static final float SPHERE_COLOR = 0.17924529F;
 	private static final float SPHERE_EMISSION = 0.4056604F;
 	private static final float SPHERE_TEXTURE_ALPHA = 125 / 255F;
@@ -93,15 +100,73 @@ final class Effects {
 	private record Spark(Vec3 start, Vec3 direction, double size) {
 	}
 
+	/** A pellet's yellow ("Basic Color - Yellow"); a boosted one's material is tinted (1, 0.35, 0). */
+	private static final float[] PELLET = {1, 0.84705883F, 0};
+	private static final float[] PELLET_BOOSTED = {1, 0.84705883F * 0.35F, 0};
+	/** A pellet's trail: half a unit wide, narrowing to nothing, fading out over its 0.1 s; orange once boosted. */
+	private static final double PELLET_TRAIL_WIDTH = 0.504;
+	private static final float[] PELLET_TRAIL = {1, 0.77254903F, 0};
+	private static final float[] PELLET_TRAIL_BOOSTED = {1, 0.35F, 0};
+	/** The pellet ball: Unity's sphere at the projectile's 0.2 scale. */
+	private static final double PELLET_RADIUS = 0.1;
+	/** ShotgunMuzzleFlash: 24 times the sprite, shrinking and fading at 7.5 a second (SpriteController). */
+	private static final double MUZZLE_SCALE = 24;
+	private static final double MUZZLE_FADE = 7.5;
+	/** BulletSpark: five sparks thrown at 1 to 10 units a second, a quarter unit across, falling and fading over half a second. */
+	private static final int BULLET_SPARKS = 5;
+	private static final double BULLET_SPARK_LIFETIME = 0.5;
+	private static final double BULLET_SPARK_SIZE = 0.25;
+	private static final double GRAVITY = 40;
+	private static final float[] BULLET_SPARK_END = {1, 0.84779346F, 0};
+	private static final Identifier SPARK = Identifier.fromNamespaceAndPath("ultracraft", "textures/viewmodel/spark.png");
+
+	private record MuzzleFlash(Vec3 position, Quaternionf rotation, double start) {
+	}
+
+	private record BulletSpark(Vec3 start, Vec3 velocity, double born) {
+	}
+
 	private final List<Beam> beams = new ArrayList<>();
 	private final List<Wave> waves = new ArrayList<>();
+	private final List<ExplosionLook> looks = new ArrayList<>();
+	private final List<MuzzleFlash> muzzleFlashes = new ArrayList<>();
+	private final List<BulletSpark> bulletSparks = new ArrayList<>();
 	private final RandomSource random = RandomSource.create();
 	private double clock;
 
-	void update(double dt) {
+	void update(double dt, Level level, Entity player) {
 		this.clock += dt;
 		this.beams.removeIf(beam -> this.clock - beam.start > beam.style.life);
 		this.waves.removeIf(wave -> wave.explosion.removed && spriteAlpha(wave.explosion) <= 0);
+		for (ExplosionLook look : this.looks) {
+			look.update(dt, level, player);
+		}
+		this.looks.removeIf(ExplosionLook::done);
+		this.muzzleFlashes.removeIf(flash -> (this.clock - flash.start) * MUZZLE_FADE >= 1);
+		this.bulletSparks.removeIf(spark -> this.clock - spark.born > BULLET_SPARK_LIFETIME);
+	}
+
+	/** The standard explosion's look, for its blast and its wave. */
+	void explosion(Explosion blast, Explosion wave) {
+		this.looks.add(new ExplosionLook(blast, wave));
+	}
+
+	/** A muzzle flash at the barrel, facing along {@code rotation} and turned a random whole number of degrees about it. */
+	void muzzleFlash(Vec3 position, Quaternionf rotation) {
+		Quaternionf rolled = new Quaternionf(rotation).rotateZ((float)Math.toRadians(this.random.nextInt(360)));
+		this.muzzleFlashes.add(new MuzzleFlash(position, rolled, this.clock));
+	}
+
+	/** BulletSpark: sparks thrown out of a 0.1 unit sphere where a pellet landed. */
+	void bulletSpark(Vec3 at) {
+		for (int i = 0; i < BULLET_SPARKS; i++) {
+			Vec3 point;
+			do {
+				point = new Vec3(this.random.nextDouble() * 2 - 1, this.random.nextDouble() * 2 - 1, this.random.nextDouble() * 2 - 1);
+			} while (point.lengthSqr() > 1 || point.lengthSqr() == 0);
+			Vec3 start = at.add(point.scale(0.1 * PlayerShape.BLOCKS_PER_UNIT));
+			this.bulletSparks.add(new BulletSpark(start, point.normalize().scale(1 + this.random.nextDouble() * 9), this.clock));
+		}
 	}
 
 	/** "Explosion Wave Knuckleblaster": the explosion's sphere, and its shockwave sprite and sparks. */
@@ -149,7 +214,7 @@ final class Effects {
 		}
 	}
 
-	void render(LevelRenderContext context, List<Coin> coins, List<Shell> shells) {
+	void render(LevelRenderContext context, List<Coin> coins, List<Shell> shells, List<Pellet> pellets) {
 		Minecraft minecraft = Minecraft.getInstance();
 		if (minecraft.level == null) {
 			return;
@@ -174,6 +239,12 @@ final class Effects {
 		for (Wave wave : this.waves) {
 			renderWave(context, camera, wave);
 		}
+		for (ExplosionLook look : this.looks) {
+			look.render(context, camera);
+		}
+		renderPellets(context, camera, pellets);
+		renderMuzzleFlashes(context, camera);
+		renderBulletSparks(context, camera);
 		UltraModel shell = UltraModel.get("shotgun_shell");
 		if (shell != null) {
 			for (Shell s : shells) {
@@ -214,6 +285,135 @@ final class Effects {
 		}
 	}
 
+	/** Each pellet: a small glowing ball and its trail. */
+	private static void renderPellets(LevelRenderContext context, Vec3 camera, List<Pellet> pellets) {
+		if (pellets.isEmpty()) {
+			return;
+		}
+		Quaternionf facing = Minecraft.getInstance().gameRenderer.mainCamera().rotation();
+		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.debugQuads(), (pose, buffer) -> {
+			for (Pellet pellet : pellets) {
+				pelletTrail(pose, buffer, pellet, camera);
+				float[] color = pellet.boosted ? PELLET_BOOSTED : PELLET;
+				// The ball, as a disc facing the camera: an unlit sphere looks the same from every side.
+				Vec3 at = pellet.position.subtract(camera);
+				float radius = (float)(PELLET_RADIUS * PlayerShape.BLOCKS_PER_UNIT);
+				int sides = 8;
+				for (int i = 0; i < sides; i++) {
+					double a0 = Math.PI * 2 * i / sides;
+					double a1 = Math.PI * 2 * (i + 1) / sides;
+					Vector3f p0 = facing.transform(new Vector3f((float)Math.cos(a0) * radius, (float)Math.sin(a0) * radius, 0));
+					Vector3f p1 = facing.transform(new Vector3f((float)Math.cos(a1) * radius, (float)Math.sin(a1) * radius, 0));
+					Vector3f centre = new Vector3f((float)at.x, (float)at.y, (float)at.z);
+					for (Vector3f v : new Vector3f[]{new Vector3f(centre), new Vector3f(centre).add(p0), new Vector3f(centre).add(p1), new Vector3f(centre)}) {
+						buffer.addVertex(pose, v).setColor(color[0], color[1], color[2], 1);
+					}
+				}
+			}
+		});
+	}
+
+	/** A pellet's TrailRenderer: a strip through its recent positions, turned to the camera, narrowing and fading to its tail. */
+	private static void pelletTrail(PoseStack.Pose pose, VertexConsumer buffer, Pellet pellet, Vec3 camera) {
+		List<Vec3> points = new ArrayList<>();
+		List<Double> ages = new ArrayList<>();
+		points.add(pellet.position.subtract(camera));
+		ages.add(0.0);
+		for (Pellet.TrailPoint point : pellet.trail) {
+			if (!point.position().equals(pellet.position)) {
+				points.add(point.position().subtract(camera));
+				ages.add(pellet.age() - point.time());
+			}
+		}
+		if (points.size() < 2) {
+			return;
+		}
+		double[] along = new double[points.size()];
+		for (int i = 1; i < points.size(); i++) {
+			along[i] = along[i - 1] + points.get(i).distanceTo(points.get(i - 1));
+		}
+		double length = along[along.length - 1];
+		if (length <= 0) {
+			return;
+		}
+		float[] color = pellet.boosted ? PELLET_TRAIL_BOOSTED : PELLET_TRAIL;
+		for (int i = 0; i + 1 < points.size(); i++) {
+			for (int j : new int[]{i, i + 1}) {
+				double t = along[j] / length;
+				Vec3 tangent = points.get(Math.min(j + 1, points.size() - 1)).subtract(points.get(Math.max(j - 1, 0)));
+				Vec3 side = tangent.cross(points.get(j)).normalize().scale(PELLET_TRAIL_WIDTH * PlayerShape.BLOCKS_PER_UNIT * (1 - t) / 2);
+				if (!Double.isFinite(side.x)) {
+					side = Vec3.ZERO;
+				}
+				float alpha = (float)Math.max(0, 1 - t);
+				Vec3 a = points.get(j).add(side);
+				Vec3 b = points.get(j).subtract(side);
+				if (j == i) {
+					buffer.addVertex(pose, new Vector3f((float)a.x, (float)a.y, (float)a.z)).setColor(color[0], color[1], color[2], alpha);
+					buffer.addVertex(pose, new Vector3f((float)b.x, (float)b.y, (float)b.z)).setColor(color[0], color[1], color[2], alpha);
+				} else {
+					buffer.addVertex(pose, new Vector3f((float)b.x, (float)b.y, (float)b.z)).setColor(color[0], color[1], color[2], alpha);
+					buffer.addVertex(pose, new Vector3f((float)a.x, (float)a.y, (float)a.z)).setColor(color[0], color[1], color[2], alpha);
+				}
+			}
+		}
+	}
+
+	private void renderMuzzleFlashes(LevelRenderContext context, Vec3 camera) {
+		UltraModel model = UltraModel.get("shotgun_muzzle_flash");
+		if (model == null || model.sprites().isEmpty()) {
+			return;
+		}
+		UltraModel.Sprite sprite = model.sprites().getFirst();
+		PoseStack poseStack = context.poseStack();
+		for (MuzzleFlash flash : this.muzzleFlashes) {
+			double left = 1 - (this.clock - flash.start) * MUZZLE_FADE;
+			poseStack.pushPose();
+			poseStack.translate(flash.position.x - camera.x, flash.position.y - camera.y, flash.position.z - camera.z);
+			poseStack.rotate(flash.rotation);
+			float scale = (float)(MUZZLE_SCALE * left * PlayerShape.BLOCKS_PER_UNIT);
+			poseStack.scale(scale, scale, scale);
+			quad(context, sprite.texture(), sprite.rect(), 1, 1, 1, (float)left);
+			poseStack.popPose();
+		}
+	}
+
+	/** Each spark faces the camera, falls, and turns from white to yellow as it fades. */
+	private void renderBulletSparks(LevelRenderContext context, Vec3 camera) {
+		PoseStack poseStack = context.poseStack();
+		Quaternionf facing = Minecraft.getInstance().gameRenderer.mainCamera().rotation();
+		double units = PlayerShape.BLOCKS_PER_UNIT;
+		for (BulletSpark spark : this.bulletSparks) {
+			double t = this.clock - spark.born;
+			double life = t / BULLET_SPARK_LIFETIME;
+			Vec3 at = spark.start.add(spark.velocity.scale(t * units)).add(0, -0.5 * GRAVITY * t * t * units, 0);
+			poseStack.pushPose();
+			poseStack.translate(at.x - camera.x, at.y - camera.y, at.z - camera.z);
+			poseStack.rotate(facing);
+			float size = (float)(BULLET_SPARK_SIZE * units);
+			poseStack.scale(size, size, size);
+			float green = (float)(1 + (BULLET_SPARK_END[1] - 1) * life);
+			float blue = (float)(1 - life);
+			quad(context, SPARK, new float[]{-0.5F, -0.5F, 0.5F, 0.5F}, 1, green, blue, (float)(1 - life));
+			poseStack.popPose();
+		}
+	}
+
+	/** A sprite's rectangle at the current pose, from both sides, its texture tinted and faded. */
+	static void quad(LevelRenderContext context, Identifier texture, float[] r, float red, float green, float blue, float alpha) {
+		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.text(texture), (pose, buffer) -> {
+			float[][] corners = {{r[0], r[1], 0, 1}, {r[2], r[1], 1, 1}, {r[2], r[3], 1, 0}, {r[0], r[3], 0, 0}};
+			for (int i = 0; i < 4; i++) {
+				float[] c = corners[i];
+				buffer.addVertex(pose, c[0], c[1], 0).setColor(red, green, blue, alpha).setUv(c[2], c[3]).setLight(LightCoordsUtil.FULL_BRIGHT);
+			}
+			for (int i = 3; i >= 0; i--) {
+				float[] c = corners[i];
+				buffer.addVertex(pose, c[0], c[1], 0).setColor(red, green, blue, alpha).setUv(c[2], c[3]).setLight(LightCoordsUtil.FULL_BRIGHT);
+			}
+		});
+	}
+
 	/** The Shockwave sprite's alpha: its color's, fading from when the explosion appeared. */
 	private static double spriteAlpha(Explosion explosion) {
 		return 0.686274528503418 - SPRITE_FADE_SPEED * explosion.age();
@@ -234,7 +434,7 @@ final class Effects {
 			poseStack.pushPose();
 			float scale = (float)explosion.meshScale() * units;
 			poseStack.scale(scale, scale, scale);
-			sphere(context, model.mesh(0), explosion, camera);
+			sphere(context, model.mesh(0), explosion, camera, SPHERE_COLOR * SPHERE_TEXTURE_ALPHA, SPHERE_EMISSION * SPHERE_TEXTURE_ALPHA);
 			poseStack.popPose();
 		}
 		double alpha = spriteAlpha(explosion);
@@ -243,19 +443,7 @@ final class Effects {
 			double scale = model.rest().sx(0) * (model.rest().sx(sprite.bone()) + SPRITE_SCALE_SPEED * explosion.age()) * units;
 			poseStack.pushPose();
 			poseStack.scale((float)scale, (float)scale, (float)scale);
-			float[] r = sprite.rect();
-			float a = (float)alpha;
-			context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.text(sprite.texture()), (pose, buffer) -> {
-				float[][] corners = {{r[0], r[1], 0, 1}, {r[2], r[1], 1, 1}, {r[2], r[3], 1, 0}, {r[0], r[3], 0, 0}};
-				for (int i = 0; i < 4; i++) {
-					float[] c = corners[i];
-					buffer.addVertex(pose, c[0], c[1], 0).setColor(1, 1, 1, a).setUv(c[2], c[3]).setLight(LightCoordsUtil.FULL_BRIGHT);
-				}
-				for (int i = 3; i >= 0; i--) {
-					float[] c = corners[i];
-					buffer.addVertex(pose, c[0], c[1], 0).setColor(1, 1, 1, a).setUv(c[2], c[3]).setLight(LightCoordsUtil.FULL_BRIGHT);
-				}
-			});
+			quad(context, sprite.texture(), sprite.rect(), 1, 1, 1, (float)alpha);
 			poseStack.popPose();
 		}
 		poseStack.popPose();
@@ -271,8 +459,11 @@ final class Effects {
 	/**
 	 * The explosion's sphere. For its first tenth of a second it's plain white, seen from outside only; then it
 	 * shows its material from both sides, adding its texture and glow to what's behind it and fading as it goes.
+	 *
+	 * @param textured how much of its texture it adds
+	 * @param glow how much plain light it adds
 	 */
-	private static void sphere(LevelRenderContext context, UltraModel.Mesh mesh, Explosion explosion, Vec3 camera) {
+	static void sphere(LevelRenderContext context, UltraModel.Mesh mesh, Explosion explosion, Vec3 camera, float textured, float glow) {
 		float[] p = mesh.positions();
 		float[] n = mesh.normals();
 		float[] uv = mesh.uvs();
@@ -303,7 +494,7 @@ final class Effects {
 			return;
 		}
 		float fade = (float)Math.max(explosion.alpha(), 0);
-		float color = SPHERE_COLOR * SPHERE_TEXTURE_ALPHA * fade;
+		float color = textured * fade;
 		context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.energySwirl(mesh.texture(), 0, 0), (pose, buffer) -> {
 			for (int i = 0; i < indices.length; i += 3) {
 				for (int v : new int[]{indices[i], indices[i + 1], indices[i + 2], indices[i + 2]}) {
@@ -316,11 +507,14 @@ final class Effects {
 				}
 			}
 		});
-		float glow = SPHERE_TEXTURE_ALPHA * fade;
+		if (glow <= 0) {
+			return;
+		}
+		float light = glow * fade;
 		context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.lightning(), (pose, buffer) -> {
 			for (int i = 0; i < indices.length; i += 3) {
 				for (int v : new int[]{indices[i], indices[i + 1], indices[i + 2], indices[i + 2], indices[i + 2], indices[i + 2], indices[i + 1], indices[i]}) {
-					buffer.addVertex(pose, p[v * 3], p[v * 3 + 1], -p[v * 3 + 2]).setColor(SPHERE_EMISSION, SPHERE_EMISSION, SPHERE_EMISSION, glow);
+					buffer.addVertex(pose, p[v * 3], p[v * 3 + 1], -p[v * 3 + 2]).setColor(light, light, light, 1F);
 				}
 			}
 		});

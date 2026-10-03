@@ -14,6 +14,7 @@ import dev.ultracraft.combat.Gore;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
+import dev.ultracraft.net.HitstopPayload;
 import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.WeaponHitPayload;
@@ -38,6 +39,7 @@ import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix3f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
+import org.joml.Vector3fc;
 import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
@@ -49,10 +51,11 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the arms' punches and the
- * Knuckleblaster's blast, explosions, weapon charges (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the server, which applies them.
+ * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the shotgun's pellets, the
+ * arms' punches (and boosting pellets with them) and the Knuckleblaster's blast, explosions, weapon charges
+ * (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the server, which applies them.
  */
-public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.Events, Explosion.Hits {
+public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pellet.Hits, FirstPersonWeapons.Events, Explosion.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
@@ -71,6 +74,19 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	private static final double BLAST_DISTANCE = 2 * S;
 	/** Landed shells stay until there are more than this many (GoreZone's maxGibs at the default maxGore). */
 	private static final int MAX_SHELLS = 150;
+	/** Shotgun.Shoot: pellets per shot, and how far each is turned about every axis, in degrees. */
+	private static final int PELLETS = 12;
+	private static final double PELLET_SPREAD = 10;
+	/** A pellet's damage (its Projectile damage of 1, quartered for the player's projectiles). */
+	private static final float PELLET_DAMAGE = 0.25F;
+	/** The shotgun's point-blank zone: enemies within this many units of the aim take this much. */
+	private static final double POINT_BLANK_REACH = 4 * S;
+	private static final float POINT_BLANK_DAMAGE = 4;
+	/** The Projectile Parry Zone in front of the punch: 3 by 3 by 6 units, its centre 3 units ahead. */
+	private static final double PARRY_ZONE_HALF_WIDTH = 1.5 * S;
+	private static final double PARRY_ZONE_HALF_LENGTH = 3 * S;
+	/** The punch's origin (FistControl's "Punch") is this far below the camera. */
+	private static final double PUNCH_DROP = 0.225 * S;
 
 	private final UltraSounds sounds = new UltraSounds();
 	private final Effects effects = new Effects();
@@ -78,9 +94,11 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	private final List<Coin> coins = new ArrayList<>();
 	private final List<Explosion> explosions = new ArrayList<>();
 	private final List<Shell> shells = new ArrayList<>();
+	private final List<Pellet> pellets = new ArrayList<>();
 	private final Revolver.Input input = new Revolver.Input();
 	private final RandomSource random = RandomSource.create();
-	private Revolver.@Nullable Variant held;
+	private final Map<Shotgun.Variant, Shotgun> shotguns = new EnumMap<>(Shotgun.Variant.class);
+	private FirstPersonWeapons.@Nullable Weapon held;
 	private boolean wasFire2;
 	private double coinCharge = 400;
 	private int readyCoins = 4;
@@ -104,6 +122,9 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	private double quietHealLeft;
 
 	private ClientCombat() {
+		for (Shotgun.Variant variant : Shotgun.Variant.values()) {
+			this.shotguns.put(variant, new Shotgun(variant));
+		}
 		for (Revolver.Variant variant : Revolver.Variant.values()) {
 			this.revolvers.put(variant, new Revolver(variant, this.sounds));
 		}
@@ -126,6 +147,7 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			this.coins.clear();
 			this.explosions.clear();
 			this.shells.clear();
+			this.pellets.clear();
 			return;
 		}
 		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
@@ -135,22 +157,23 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 				this.soundsPaused = false;
 				minecraft.getSoundManager().resume();
 			}
+			updateViewmodels(0);
 			return;
 		}
-		this.effects.update(dt);
+		this.effects.update(dt, minecraft.level, player);
 		this.quietHealLeft -= dt;
 		for (Revolver revolver : this.revolvers.values()) {
 			revolver.recharge(dt);
 		}
 		this.coinCharge = Math.min(this.coinCharge + 25 * dt, 400);
 		int coins = (int)(this.coinCharge / 100);
-		if (coins > this.readyCoins && this.held == Revolver.Variant.MARKSMAN) {
+		if (coins > this.readyCoins && this.held == FirstPersonWeapons.Weapon.REVOLVER_MARKSMAN) {
 			this.sounds.play("coin_ready", 1, 1 + (coins - 1) / 2F);
 		}
 		this.readyCoins = coins;
 		this.sharpshooterCharge = Math.min(this.sharpshooterCharge + 15 * dt, 300);
 		int shots = (int)(this.sharpshooterCharge / 100);
-		if (shots > this.readyShots && this.held == Revolver.Variant.SHARPSHOOTER) {
+		if (shots > this.readyShots && this.held == FirstPersonWeapons.Weapon.REVOLVER_SHARPSHOOTER) {
 			this.sounds.play("sharpshooter_ready", 1, 1 + (shots - 1) / 2F);
 		}
 		this.readyShots = shots;
@@ -173,6 +196,10 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		this.coins.removeIf(coin -> coin.removed);
 		this.coins.addAll(this.respawned);
 		this.respawned.clear();
+		for (Pellet pellet : List.copyOf(this.pellets)) {
+			pellet.update(dt, minecraft.level, player, this);
+		}
+		this.pellets.removeIf(pellet -> pellet.removed);
 		for (Explosion explosion : List.copyOf(this.explosions)) {
 			explosion.update(dt, minecraft.level, player, this);
 		}
@@ -186,7 +213,7 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		}
 
 		boolean driving = UltraController.INSTANCE.isDriving(player);
-		updateHeld(driving ? variantOf(player.getMainHandItem()) : null);
+		updateHeld(driving ? weaponOf(player.getMainHandItem()) : null);
 		if (driving) {
 			healFeedback(player);
 			sampleInput(minecraft.options);
@@ -201,52 +228,118 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 					punchWith(FistType.HEAVY);
 				}
 			}
-			if (this.held != null) {
-				this.revolvers.get(this.held).update(dt, this.input, this);
+			Revolver revolver = revolver(this.held);
+			if (revolver != null) {
+				revolver.update(dt, this.input, this);
+			}
+			Shotgun shotgun = shotgun(this.held);
+			if (shotgun != null) {
+				shotgun.update(dt, this.input, this);
 			}
 		} else {
 			this.lastHealth = -1;
 		}
+		for (Shotgun shotgun : this.shotguns.values()) {
+			shotgun.cool(dt);
+		}
 		// Animators run after gameplay code, as Unity's do, so what it set this frame plays this frame.
-		FirstPersonWeapons.RevolverState display = this.held == null
-			? FirstPersonWeapons.RevolverState.NONE
-			: this.revolvers.get(this.held).display(this.held == Revolver.Variant.SHARPSHOOTER ? this.sharpshooterCharge : this.coinCharge);
-		FirstPersonWeapons.INSTANCE.update(dt, viewmodel(this.held), display, this);
+		updateViewmodels(dt);
 	}
 
-	private void updateHeld(Revolver.@Nullable Variant variant) {
-		if (variant == this.held) {
+	/**
+	 * Runs the viewmodels' Animators. During a hitstop they still run, with no time passing, as Unity's do at a
+	 * time scale of 0: an animation started by what caused the hitstop shows on the frozen frame.
+	 */
+	private void updateViewmodels(double dt) {
+		Revolver revolver = revolver(this.held);
+		FirstPersonWeapons.RevolverState display = revolver == null
+			? FirstPersonWeapons.RevolverState.NONE
+			: revolver.display(revolver.variant == Revolver.Variant.SHARPSHOOTER ? this.sharpshooterCharge : this.coinCharge);
+		Shotgun shotgun = shotgun(this.held);
+		FirstPersonWeapons.ShotgunState shotgunDisplay = shotgun == null
+			? FirstPersonWeapons.ShotgunState.NONE
+			: new FirstPersonWeapons.ShotgunState(shotgun.heat());
+		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, this);
+	}
+
+	private void updateHeld(FirstPersonWeapons.@Nullable Weapon weapon) {
+		if (weapon == this.held) {
 			return;
 		}
-		if (this.held != null) {
-			this.revolvers.get(this.held).holster();
+		Revolver revolver = revolver(this.held);
+		if (revolver != null) {
+			revolver.holster();
 		}
-		this.held = variant;
+		Shotgun shotgun = shotgun(this.held);
+		if (shotgun != null) {
+			shotgun.holster();
+		}
+		this.held = weapon;
 		this.wasFire2 = false;
-		FirstPersonWeapons.Weapon weapon = viewmodel(variant);
-		if (variant != null && weapon != null) {
-			this.revolvers.get(variant).equip();
+		if (weapon != null) {
+			revolver = revolver(weapon);
+			if (revolver != null) {
+				revolver.equip();
+			}
+			shotgun = shotgun(weapon);
+			if (shotgun != null) {
+				shotgun.equip();
+			}
 			FirstPersonWeapons.INSTANCE.equip(weapon);
 		}
 	}
 
 	@Override
 	public void weaponEvent(FirstPersonWeapons.Weapon weapon, String function) {
-		if (function.equals("ReadyGun")) {
-			for (Revolver revolver : this.revolvers.values()) {
-				if (viewmodel(revolver.variant) == weapon) {
+		Revolver revolver = revolver(weapon);
+		Shotgun shotgun = shotgun(weapon);
+		switch (function) {
+			case "ReadyGun" -> {
+				if (revolver != null) {
 					revolver.readyGun();
 				}
+				if (shotgun != null) {
+					shotgun.readyGun();
+				}
+			}
+			// Shotgun.ReleaseHeat: the heat sink cools with a hiss.
+			case "ReleaseHeat" -> {
+				if (shotgun != null) {
+					shotgun.releaseHeat();
+					this.sounds.play("shotgun_heat_release", 1, 1);
+				}
+			}
+			case "ClickSound" -> this.sounds.play("shotgun_click", 0.5F, this.sounds.randomPitch(0.95F, 1.05F));
+			default -> {
 			}
 		}
+	}
+
+	private @Nullable Revolver revolver(FirstPersonWeapons.@Nullable Weapon weapon) {
+		if (weapon == null) {
+			return null;
+		}
+		return switch (weapon) {
+			case REVOLVER_PIERCER -> this.revolvers.get(Revolver.Variant.PIERCER);
+			case REVOLVER_MARKSMAN -> this.revolvers.get(Revolver.Variant.MARKSMAN);
+			case REVOLVER_SHARPSHOOTER -> this.revolvers.get(Revolver.Variant.SHARPSHOOTER);
+			default -> null;
+		};
+	}
+
+	private @Nullable Shotgun shotgun(FirstPersonWeapons.@Nullable Weapon weapon) {
+		return weapon == FirstPersonWeapons.Weapon.SHOTGUN_CORE_EJECT ? this.shotguns.get(Shotgun.Variant.CORE_EJECT) : null;
 	}
 
 	@Override
 	public void armEvent(String function) {
 		switch (function) {
 			case "ActiveStart" -> {
-				ClientPlayNetworking.send(new PunchPayload(this.arm));
 				Minecraft minecraft = Minecraft.getInstance();
+				// A boosted pellet takes the punch: it hits nothing else.
+				if (this.arm != FistType.STANDARD || minecraft.player == null || !boostPellet(minecraft.player)) {
+					ClientPlayNetworking.send(new PunchPayload(this.arm));
+				}
 				if (this.arm == FistType.STANDARD && minecraft.level != null && minecraft.player != null) {
 					this.punchActiveLeft = PUNCH_ACTIVE_TIME;
 					punchCoin(minecraft.level, minecraft.player);
@@ -276,14 +369,17 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		};
 	}
 
-	private static Revolver.@Nullable Variant variantOf(ItemStack stack) {
+	private static FirstPersonWeapons.@Nullable Weapon weaponOf(ItemStack stack) {
 		if (stack.is(UltraItems.REVOLVER_PIERCER)) {
-			return Revolver.Variant.PIERCER;
+			return FirstPersonWeapons.Weapon.REVOLVER_PIERCER;
 		}
 		if (stack.is(UltraItems.REVOLVER_MARKSMAN)) {
-			return Revolver.Variant.MARKSMAN;
+			return FirstPersonWeapons.Weapon.REVOLVER_MARKSMAN;
 		}
-		return stack.is(UltraItems.REVOLVER_SHARPSHOOTER) ? Revolver.Variant.SHARPSHOOTER : null;
+		if (stack.is(UltraItems.REVOLVER_SHARPSHOOTER)) {
+			return FirstPersonWeapons.Weapon.REVOLVER_SHARPSHOOTER;
+		}
+		return stack.is(UltraItems.SHOTGUN_CORE_EJECT) ? FirstPersonWeapons.Weapon.SHOTGUN_CORE_EJECT : null;
 	}
 
 	/** Whether the held item is an ULTRAKILL weapon in use, so attacking and using belong to it. */
@@ -794,7 +890,7 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	public void enemy(LivingEntity enemy, float damage, Vec3 push) {
 		ClientPlayNetworking.send(new ExplosionHitPayload(enemy.getId(), damage, push));
 		Minecraft minecraft = Minecraft.getInstance();
-		if (minecraft.level != null) {
+		if (minecraft.level != null && damage > 0) {
 			Gore gore = Gore.of(false, damage, false);
 			this.effects.blood(minecraft.level, enemy.getBoundingBox().getCenter(), gore);
 			this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
@@ -814,11 +910,13 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	@Override
 	public void player(Explosion explosion) {
 		UltraMovement movement = UltraController.INSTANCE.movement();
-		if (movement != null) {
-			Explosion.Settings settings = explosion.settings;
-			movement.explosionLaunch(explosion.origin, settings.pushForceMultiplier(), settings.maxSize(), settings.rocketExplosion(), explosion.harmful());
+		if (movement == null || movement.exploded()) {
+			return;
 		}
+		Explosion.Settings settings = explosion.settings;
+		movement.explosionLaunch(explosion.origin, settings.pushForceMultiplier(), settings.maxSize(), settings.rocketExplosion(), explosion.boosted, explosion.harmful());
 		if (explosion.harmful()) {
+			movement.hurtByExplosion(explosion.playerDamage());
 			ClientPlayNetworking.send(new ExplosionHurtPayload(explosion.playerDamage()));
 		}
 	}
@@ -836,16 +934,10 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			}
 		}
 		if (result.result() == PunchResultPayload.Result.PARRY) {
-			this.sounds.play("parry", 1, 1);
-			this.sounds.play("parry_ricochet", 1, 1);
-			this.hitstopLeft = Math.max(this.hitstopLeft, PARRY_HITSTOP);
-			// TimeController.TrueStop stops the world's sounds and music; the player's own play on.
-			minecraft.getSoundManager().pauseAllExcept(SoundSource.PLAYERS);
-			this.soundsPaused = true;
+			// NewMovement.Parry: the flash, a full heal and full stamina.
+			parryFlash();
 			this.quietHealLeft = 0.5;
-			ScreenFlashes.INSTANCE.parry();
 			if (movement != null) {
-				movement.shake(0.5);
 				movement.fullStamina();
 			}
 		} else {
@@ -862,6 +954,260 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		}
 	}
 
+	/** TimeController.ParryFlash: the parry sounds, the white flash, a quarter-second stop of the world and a camera shake. */
+	private void parryFlash() {
+		this.sounds.play("parry", 1, 1);
+		this.sounds.play("parry_ricochet", 1, 1);
+		this.hitstopLeft = Math.max(this.hitstopLeft, PARRY_HITSTOP);
+		// TimeController.TrueStop stops the world's sounds and music; the player's own play on.
+		Minecraft.getInstance().getSoundManager().pauseAllExcept(SoundSource.PLAYERS);
+		this.soundsPaused = true;
+		ScreenFlashes.INSTANCE.parry();
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (movement != null) {
+			movement.shake(0.5);
+		}
+	}
+
+	// ---- shotgun --------------------------------------------------------------------------------
+
+	/**
+	 * Shotgun.Shoot: twelve pellets out of the camera, each turned up to 10 degrees about every axis; the
+	 * point-blank zone; a small push forwards; the shot sound, a camera shake and a muzzle flash.
+	 */
+	@Override
+	public void shootShotgun(Shotgun.Variant variant) {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (player == null || minecraft.level == null || movement == null) {
+			return;
+		}
+		Vec3 eye = movement.eyePosition();
+		Vec3 look = player.getLookAngle();
+		Vec3 flat = new Vec3(look.x, 0, look.z);
+		if (flat.lengthSqr() > 0) {
+			movement.addVelocity(flat.normalize());
+		}
+		pointBlank(minecraft.level, player, eye, look);
+		Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
+		for (int i = 0; i < PELLETS; i++) {
+			// Transform.Rotate by up to the spread about each axis; turning about its own length changes nothing.
+			double pitch = Math.toRadians(spread(PELLET_SPREAD));
+			double yaw = Math.toRadians(spread(PELLET_SPREAD));
+			Vector3f direction = camera.transform(new Vector3f(
+				(float)(Math.cos(pitch) * Math.sin(yaw)), (float)-Math.sin(pitch), (float)(-Math.cos(pitch) * Math.cos(yaw))
+			));
+			this.pellets.add(new Pellet(eye, new Vec3(direction.x, direction.y, direction.z), Pellet.SPEED + spread(Pellet.SPEED_RANDOMIZER)));
+		}
+		this.sounds.play("shotgun_shoot", 0.45F, this.sounds.randomPitch(0.95F, 1.05F));
+		movement.stopShake();
+		movement.shake(1);
+		FirstPersonWeapons.Weapon weapon = FirstPersonWeapons.Weapon.SHOTGUN_CORE_EJECT;
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon);
+		if (animator != null) {
+			animator.setTrigger("Fire");
+		}
+		FirstPersonWeapons.Frame barrel = FirstPersonWeapons.INSTANCE.weaponBone(weapon, "ShootPoint L");
+		if (barrel != null) {
+			Vec3 cameraPosition = minecraft.gameRenderer.mainCamera().position();
+			Vec3 at = world(camera, barrel.position()).scale(S).add(cameraPosition);
+			this.effects.muzzleFlash(at, new Quaternionf(camera).mul(mirrored(barrel)));
+		}
+	}
+
+	private double spread(double range) {
+		return (this.random.nextDouble() * 2 - 1) * range;
+	}
+
+	/** A viewmodel bone's rotation for drawing a model or sprite on it, which are drawn mirrored into Minecraft's axes. */
+	private static Quaternionf mirrored(FirstPersonWeapons.Frame frame) {
+		return new Matrix3f(frame.right(), frame.up(), frame.forward()).mul(new Matrix3f().scaling(1, 1, -1)).getNormalizedRotation(new Quaternionf());
+	}
+
+	/**
+	 * The shotgun's point-blank zone (Shotgun.Shoot): every enemy body the first 4 units of the aim pass
+	 * through, walls or not, takes 4 damage.
+	 */
+	private void pointBlank(Level level, LocalPlayer player, Vec3 eye, Vec3 look) {
+		Vec3 end = eye.add(look.scale(POINT_BLANK_REACH));
+		for (LivingEntity enemy : level.getEntitiesOfClass(LivingEntity.class, new AABB(eye, end).inflate(1), e -> e != player && e.isAlive() && !e.isSpectator())) {
+			AABB box = enemy.getBoundingBox();
+			Optional<Vec3> entry = box.contains(eye) ? Optional.of(eye) : box.clip(eye, end);
+			entry.ifPresent(at -> shotgunHit(level, enemy, POINT_BLANK_DAMAGE, at));
+		}
+	}
+
+	private void shotgunHit(Level level, LivingEntity enemy, float damage, Vec3 at) {
+		ClientPlayNetworking.send(new WeaponHitPayload(enemy.getId(), damage, false, at));
+		Gore gore = Gore.of(false, damage, false);
+		this.effects.blood(level, at, gore);
+		this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
+	}
+
+	@Override
+	public void enemy(Pellet pellet, LivingEntity enemy) {
+		Level level = Minecraft.getInstance().level;
+		if (level == null) {
+			return;
+		}
+		if (pellet.boosted) {
+			explode(pellet.position, pellet.direction(), true);
+			return;
+		}
+		shotgunHit(level, enemy, PELLET_DAMAGE, pellet.position);
+		bulletSpark(pellet.position);
+	}
+
+	@Override
+	public void wall(Pellet pellet) {
+		if (pellet.boosted) {
+			explode(pellet.position, pellet.direction(), true);
+		} else {
+			bulletSpark(pellet.position);
+		}
+	}
+
+	/** A pellet's hit effect (BulletSpark): sparks, and a ricochet. */
+	private void bulletSpark(Vec3 at) {
+		this.effects.bulletSpark(at);
+		this.sounds.play("bullet_spark", 1, 1);
+	}
+
+	/**
+	 * Punch.ActiveFrame's first frame with the Feedbacker: one of the player's own pellets in reach is boosted.
+	 * That's one the camera is inside, else the first along the aim within 4 units (or in a 0.3 unit box swept
+	 * that far), else the nearest in the Projectile Parry Zone in front of the punch.
+	 *
+	 * @return whether a pellet was boosted
+	 */
+	private boolean boostPellet(LocalPlayer player) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		Level level = Minecraft.getInstance().level;
+		if (movement == null || level == null || this.pellets.isEmpty()) {
+			return false;
+		}
+		Vec3 eye = movement.eyePosition();
+		Vec3 look = player.getLookAngle();
+		Pellet pellet = pelletAt(eye);
+		if (pellet == null) {
+			pellet = pelletAlong(eye, look);
+		}
+		if (pellet == null) {
+			pellet = pelletInParryZone(player, eye, look);
+		}
+		if (pellet == null) {
+			return false;
+		}
+		pellet.boost(parryLookTarget(level, player, eye, look));
+		parryFlash();
+		ClientPlayNetworking.send(new HitstopPayload((int)(PARRY_HITSTOP * 1000)));
+		Animator arm = FirstPersonWeapons.INSTANCE.armAnimator();
+		if (arm != null) {
+			arm.play("Hook", 0.065);
+		}
+		return true;
+	}
+
+	private @Nullable Pellet pelletAt(Vec3 point) {
+		for (Pellet pellet : this.pellets) {
+			if (!pellet.removed && pellet.position.distanceTo(point) <= pellet.radius() + 0.01 * S) {
+				return pellet;
+			}
+		}
+		return null;
+	}
+
+	/** The nearest pellet a ray, or else a 0.3 unit box, swept 4 units along the aim touches. */
+	private @Nullable Pellet pelletAlong(Vec3 eye, Vec3 look) {
+		Vec3 up = cameraUp();
+		Vec3 right = look.cross(up).normalize();
+		for (double half : new double[]{0, 0.3 * S}) {
+			Pellet nearest = null;
+			double best = Double.MAX_VALUE;
+			for (Pellet pellet : this.pellets) {
+				Vec3 offset = pellet.position.subtract(eye);
+				double along = offset.dot(look);
+				double reach = half + pellet.radius();
+				boolean inside = half == 0
+					? offset.subtract(look.scale(along)).length() <= pellet.radius()
+					: Math.abs(offset.dot(right)) <= reach && Math.abs(offset.dot(up)) <= reach;
+				if (!pellet.removed && along >= -pellet.radius() && along <= PUNCH_REACH + pellet.radius() && inside && along < best) {
+					best = along;
+					nearest = pellet;
+				}
+			}
+			if (nearest != null) {
+				return nearest;
+			}
+		}
+		return null;
+	}
+
+	/** ProjectileParryZone.CheckParryZone: the pellet in the zone nearest the punch. */
+	private @Nullable Pellet pelletInParryZone(LocalPlayer player, Vec3 eye, Vec3 look) {
+		Vec3 up = cameraUp();
+		Vec3 right = look.cross(up).normalize();
+		Vec3 punch = eye.subtract(up.scale(PUNCH_DROP));
+		Vec3 centre = punch.add(look.scale(PARRY_ZONE_HALF_LENGTH));
+		Pellet nearest = null;
+		double best = 100 * S;
+		for (Pellet pellet : this.pellets) {
+			Vec3 offset = pellet.position.subtract(centre);
+			double r = pellet.radius();
+			boolean inZone = Math.abs(offset.dot(look)) <= PARRY_ZONE_HALF_LENGTH + r
+				&& Math.abs(offset.dot(right)) <= PARRY_ZONE_HALF_WIDTH + r
+				&& Math.abs(offset.dot(up)) <= PARRY_ZONE_HALF_WIDTH + r;
+			double distance = pellet.position.distanceTo(punch);
+			if (!pellet.removed && inZone && distance < best) {
+				best = distance;
+				nearest = pellet;
+			}
+		}
+		return nearest;
+	}
+
+	private static Vec3 cameraUp() {
+		Vector3fc up = Minecraft.getInstance().gameRenderer.mainCamera().upVector();
+		return new Vec3(up.x(), up.y(), up.z());
+	}
+
+	/** Punch.GetParryLookTarget: the first enemy along the aim, through walls, or far ahead. */
+	private static Vec3 parryLookTarget(Level level, LocalPlayer player, Vec3 eye, Vec3 look) {
+		Vec3 end = eye.add(look.scale(RANGE));
+		Vec3 nearest = null;
+		double best = Double.MAX_VALUE;
+		for (LivingEntity enemy : level.getEntitiesOfClass(LivingEntity.class, new AABB(eye, end).inflate(1), e -> e != player && e.isAlive() && !e.isSpectator())) {
+			Optional<Vec3> entry = enemy.getBoundingBox().clip(eye, end);
+			if (entry.isPresent() && entry.get().distanceToSqr(eye) < best) {
+				best = entry.get().distanceToSqr(eye);
+				nearest = entry.get();
+			}
+		}
+		return nearest != null ? nearest : eye.add(look.scale(1000 * S));
+	}
+
+	/**
+	 * The standard explosion ("Explosion") where something blew up, facing the way it was going: its blast and its
+	 * push wave, its sound and its look.
+	 */
+	private void explode(Vec3 at, @Nullable Vec3 facing, boolean boosted) {
+		Quaternionf rotation = facing == null ? new Quaternionf()
+			: new Quaternionf().lookAlong((float)facing.x, (float)facing.y, (float)facing.z, 0, 1, 0).conjugate();
+		Explosion blast = new Explosion(Explosion.STANDARD, at, rotation, null, boosted);
+		Explosion wave = new Explosion(Explosion.STANDARD_WAVE, at, rotation, null, boosted);
+		this.explosions.add(blast);
+		this.explosions.add(wave);
+		this.effects.explosion(blast, wave);
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (movement != null) {
+			Vec3 camera = Minecraft.getInstance().gameRenderer.mainCamera().position();
+			movement.shake(Math.max(blast.cameraShake(camera), wave.cameraShake(camera)));
+		}
+		// The explosion's RandomPitch: up to a quarter either way.
+		this.sounds.play("explosion", 1, this.sounds.randomPitch(0.75F, 1.25F));
+	}
+
 	// ---- health ---------------------------------------------------------------------------------
 
 	/** NewMovement.GetHealth's sound, when blood heals the player. */
@@ -874,6 +1220,6 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	}
 
 	public void render(LevelRenderContext context) {
-		this.effects.render(context, this.coins, this.shells);
+		this.effects.render(context, this.coins, this.shells, this.pellets);
 	}
 }

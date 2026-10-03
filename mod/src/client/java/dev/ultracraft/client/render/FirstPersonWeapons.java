@@ -13,6 +13,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.SubmitNodeCollector;
 import net.minecraft.client.renderer.rendertype.RenderTypes;
 import net.minecraft.resources.Identifier;
+import net.minecraft.util.LightCoordsUtil;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix3f;
@@ -25,11 +26,12 @@ import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
- * The first-person viewmodels: the held revolver and the current arm (the Feedbacker or the Knuckleblaster),
- * each played by its own Animator. The arm is always there; its idle pose keeps it below the screen until it
- * punches or flips a coin.
+ * The first-person viewmodels: the held revolver or shotgun and the current arm (the Feedbacker or the
+ * Knuckleblaster), each played by its own Animator. The arm is always there; its idle pose keeps it below the
+ * screen until it punches or flips a coin.
  */
 public final class FirstPersonWeapons {
 	public static final FirstPersonWeapons INSTANCE = new FirstPersonWeapons();
@@ -40,15 +42,25 @@ public final class FirstPersonWeapons {
 	private static final float[] YELLOW = {1, 0.92156863F, 0.015686275F, 1};
 	private static final float[] GRAY = {0.5F, 0.5F, 0.5F, 1};
 
+	/** The shotgun's heat sink glow (HeatSinkHeat). */
+	private static final String HEAT_SINK = "HeatSinkHeat";
+	/** HeatSinkHeat's tint; its Legacy Particles/Additive shader adds twice the tint, by its alpha. */
+	private static final float[] HEAT_TINT = {1, 0.24F, 0};
+
 	public enum Weapon {
 		REVOLVER_PIERCER("revolver_piercer"),
 		REVOLVER_MARKSMAN("revolver_marksman"),
-		REVOLVER_SHARPSHOOTER("revolver_sharpshooter");
+		REVOLVER_SHARPSHOOTER("revolver_sharpshooter"),
+		SHOTGUN_CORE_EJECT("shotgun_core_eject");
 
 		final String model;
 
 		Weapon(String model) {
 			this.model = model;
+		}
+
+		boolean revolver() {
+			return this != SHOTGUN_CORE_EJECT;
 		}
 	}
 
@@ -67,6 +79,15 @@ public final class FirstPersonWeapons {
 		boolean spinning, double twirlSpeed, double twirlAngle, double twirlSpriteAlpha
 	) {
 		public static final RevolverState NONE = new RevolverState(0, 100, true, 400, 0, false, 0, 0, 0);
+	}
+
+	/**
+	 * What the held shotgun shows.
+	 *
+	 * @param heat its heat sink's glow, 1 after a shot and fading once the animation releases the heat
+	 */
+	public record ShotgunState(double heat) {
+		public static final ShotgunState NONE = new ShotgunState(0);
 	}
 
 	/** Clip events from the held weapon and from the arm, and the held revolver's cylinder clicking into place. */
@@ -112,6 +133,7 @@ public final class FirstPersonWeapons {
 	private FistType currentArm = FistType.STANDARD;
 	private @Nullable Weapon held;
 	private RevolverState state = RevolverState.NONE;
+	private ShotgunState shotgun = ShotgunState.NONE;
 	/** The arm's parent (FistControl's "Punch"), turned towards what it last hit. */
 	private final Quaternionf armRotation = new Quaternionf();
 	private boolean returnToOrigRot;
@@ -186,12 +208,20 @@ public final class FirstPersonWeapons {
 
 	/** The current arm's bone with this name, as it's posed now. */
 	public @Nullable Frame armBone(String name) {
-		Viewmodel arm = arm();
-		int bone = arm == null ? -1 : arm.model.bone(name);
+		return frame(arm(), this.armRotation, name);
+	}
+
+	/** The held weapon's bone with this name, as it's posed now. */
+	public @Nullable Frame weaponBone(Weapon weapon, String name) {
+		return frame(weapon(weapon), new Quaternionf(), name);
+	}
+
+	private static @Nullable Frame frame(@Nullable Viewmodel viewmodel, Quaternionf rotation, String name) {
+		int bone = viewmodel == null ? -1 : viewmodel.model.bone(name);
 		if (bone < 0) {
 			return null;
 		}
-		Matrix4f matrix = arm.model.boneMatrices(arm.pose, this.armRotation)[bone];
+		Matrix4f matrix = viewmodel.model.boneMatrices(viewmodel.pose, rotation)[bone];
 		return new Frame(
 			matrix.getTranslation(new Vector3f()),
 			matrix.getColumn(0, new Vector3f()).normalize(),
@@ -243,14 +273,17 @@ public final class FirstPersonWeapons {
 	/**
 	 * Runs the held weapon's and the arm's Animators, and the scripts that move them after.
 	 */
-	public void update(double dt, @Nullable Weapon held, RevolverState state, Events events) {
+	public void update(double dt, @Nullable Weapon held, RevolverState state, ShotgunState shotgun, Events events) {
 		this.held = held;
 		this.state = state;
+		this.shotgun = shotgun;
 		if (held != null) {
 			Viewmodel weapon = weapon(held);
 			if (weapon != null) {
-				weapon.animator.setBool("Spinning", state.spinning());
-				weapon.animator.setFloat("TwirlSpeed", (float)state.twirlSpeed());
+				if (held.revolver()) {
+					weapon.animator.setBool("Spinning", state.spinning());
+					weapon.animator.setFloat("TwirlSpeed", (float)state.twirlSpeed());
+				}
 				weapon.update(dt, function -> events.weaponEvent(held, function));
 				twirl(weapon, state.twirlAngle());
 				if (weapon.cylinder != null && weapon.cylinder.update(dt, state.cylinderSpin(), weapon.pose)) {
@@ -310,11 +343,34 @@ public final class FirstPersonWeapons {
 			arm.model.submit(poseStack, collector, light, arm.model.boneMatrices(arm.pose, this.armRotation));
 		}
 		Viewmodel weapon = this.held == null ? null : weapon(this.held);
-		if (weapon != null) {
+		if (weapon != null && this.held.revolver()) {
 			submitRevolver(poseStack, collector, light, weapon);
+		} else if (weapon != null) {
+			submitShotgun(poseStack, collector, light, weapon);
 		}
 		poseStack.popPose();
 		return this.held != null;
+	}
+
+	/** The shotgun, with its heat sink glowing after a shot, and its meter. */
+	private void submitShotgun(PoseStack poseStack, SubmitNodeCollector collector, int light, Viewmodel weapon) {
+		Matrix4f[] world = weapon.model.boneMatrices(weapon.pose, new Quaternionf());
+		weapon.model.submit(poseStack, collector, light, world, Set.of(HEAT_SINK));
+		float heat = (float)Math.clamp(this.shotgun.heat(), 0, 1);
+		if (heat > 0) {
+			int color = 0xFF000000 | channel(2 * HEAT_TINT[0] * heat) << 16 | channel(2 * HEAT_TINT[1] * heat) << 8 | channel(2 * HEAT_TINT[2] * heat);
+			weapon.model.submitMaterial(poseStack, collector, world, HEAT_SINK, texture -> RenderTypes.energySwirl(texture, 0, 0), color, LightCoordsUtil.FULL_BRIGHT);
+		}
+		for (UltraModel.Canvas canvas : weapon.model.canvases()) {
+			for (int i = 0; i < canvas.images().size(); i++) {
+				UltraModel.Image image = canvas.images().get(i);
+				ModelOverlays.image(poseStack, collector, RenderTypes.text(image.texture()), world[canvas.bone()], image, image.color(), image.fillAmount(), i);
+			}
+		}
+	}
+
+	private static int channel(float value) {
+		return Math.round(Math.clamp(value, 0, 1) * 255);
 	}
 
 	private void submitRevolver(PoseStack poseStack, SubmitNodeCollector collector, int light, Viewmodel weapon) {

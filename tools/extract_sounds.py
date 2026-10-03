@@ -203,6 +203,15 @@ def combat(env, x):
     x.add_source("fist_reload", next(components(punch.shellEjector.deref().read().m_GameObject.read(), "AudioSource")))
     x.add_source("shell_impact", next(components(punch.shell.deref().read(), "AudioSource")))
 
+    shotgun = find_class(env, "Shotgun", "Shotgun Grenade", variation=0)
+    x.add_clip("shotgun_shoot", shotgun.shootSound)
+    x.add_clip("shotgun_click", shotgun.clickSound)
+    x.add_clip("shotgun_click_charge", shotgun.clickChargeSound)
+    x.add_source("shotgun_heat_release", next(components(shotgun.heatSinkSMR.deref().read().m_GameObject.read(), "AudioSource")))
+    pellet = next(s for s in components(shotgun.bullet.deref().read(), "MonoBehaviour") if hasattr(s, "playerBullet"))
+    x.add_source("bullet_spark", next(components(pellet.explosionEffect.deref().read(), "AudioSource")))
+    x.add_source("explosion", next(components(punch.parriedProjectileHitObject.deref().read(), "AudioSource")))
+
     movement = find_script(env, "walkSpeed", "jumpSound")
     x.add_source("hurt", source_ref(movement.hurtScreen.deref().read().m_GameObject))
     x.add_source("heal", source_ref(movement.hpFlash.deref().read().m_GameObject))
