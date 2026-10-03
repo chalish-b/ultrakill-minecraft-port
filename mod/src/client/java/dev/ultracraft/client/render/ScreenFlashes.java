@@ -34,7 +34,8 @@ public final class ScreenFlashes {
 			graphics.fill(0, 0, graphics.guiWidth(), graphics.guiHeight(), alpha << 24 | 0x33FF55);
 		}
 		if (this.parry > 0) {
-			graphics.fill(0, 0, graphics.guiWidth(), graphics.guiHeight(), 0xE0FFFFFF);
+			int alpha = (int)(this.parry / PARRY_TIME * 110);
+			graphics.fill(0, 0, graphics.guiWidth(), graphics.guiHeight(), alpha << 24 | 0xFFFFFF);
 		}
 	}
 }

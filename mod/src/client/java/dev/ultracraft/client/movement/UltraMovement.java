@@ -239,6 +239,9 @@ public final class UltraMovement {
 			climbStep(contact);
 		}
 		updateTriggers();
+		// Minecraft's own ground flag (mining speed, the server's fall checks) follows ULTRAKILL's ground
+		// check: a step with gravity off moves nothing vertically, which Minecraft would read as airborne.
+		this.player.setOnGround(this.groundTouching);
 	}
 
 	private void fixedUpdate() {
@@ -613,7 +616,7 @@ public final class UltraMovement {
 			if (this.slideSafety > 0) {
 				this.slideSafety -= dt * 5;
 			}
-			if (this.onGround || this.onWall) {
+			if (this.sliding && (this.onGround || this.onWall)) {
 				this.camera.shake(0.1);
 				this.sounds.slide(!this.onGround ? wallSurface() : groundSurface());
 			} else {

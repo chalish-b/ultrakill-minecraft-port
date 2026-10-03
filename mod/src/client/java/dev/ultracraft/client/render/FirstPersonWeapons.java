@@ -46,7 +46,7 @@ public final class FirstPersonWeapons {
 		this.held = held;
 		this.charge = charge;
 		this.equip = Math.min(this.equip + dt / EQUIP_TIME, 1);
-		this.recoil *= Math.exp(-10 * dt);
+		this.recoil *= Math.exp(-8 * dt);
 		this.punch = Math.min(this.punch + dt / PUNCH_TIME, 1);
 	}
 
@@ -92,13 +92,13 @@ public final class FirstPersonWeapons {
 		Vec3 pivot = model.center();
 		double shown = 1 - Math.pow(1 - this.equip, 3);
 		poseStack.pushPose();
-		poseStack.translate(0, -0.6 * (1 - shown) + 0.04 * this.recoil, 0.12 * this.recoil);
+		poseStack.translate(0, -0.6 * (1 - shown) + 0.12 * this.recoil, 0.35 * this.recoil);
 		if (this.charge > 0) {
 			double shake = this.charge / 250 * 0.05;
 			poseStack.translate(this.random.nextDouble() * 2 * shake - shake, this.random.nextDouble() * 2 * shake - shake, this.random.nextDouble() * 2 * shake - shake);
 		}
 		poseStack.translate(pivot.x, pivot.y, pivot.z);
-		poseStack.rotate(Axis.XP.rotationDegrees((float)(6 * this.recoil - 30 * (1 - shown))));
+		poseStack.rotate(Axis.XP.rotationDegrees((float)(20 * this.recoil - 30 * (1 - shown))));
 		poseStack.translate(-pivot.x, -pivot.y, -pivot.z);
 		model.submit(poseStack, collector, light);
 		poseStack.popPose();
