@@ -9,6 +9,7 @@ import dev.ultracraft.client.movement.UltraSounds;
 import dev.ultracraft.client.render.FirstPersonWeapons;
 import dev.ultracraft.client.render.ScreenFlashes;
 import dev.ultracraft.client.render.animation.Animator;
+import dev.ultracraft.combat.FistType;
 import dev.ultracraft.combat.Gore;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.PunchPayload;
@@ -17,6 +18,7 @@ import dev.ultracraft.net.WeaponHitPayload;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Options;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.sounds.SoundSource;
@@ -40,15 +42,18 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the Feedbacker punch,
- * weapon charges (WeaponCharges) and the hitstop after a parry. Hits go to the server, which applies them.
+ * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the arms' punches,
+ * weapon charges (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the server, which applies them.
  */
 public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.Events {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
 	private static final double COIN_TARGET_RANGE = 64;
-	private static final double HITSTOP = 0.25;
+	/** TimeController.TrueStop after a parry. */
+	private static final double PARRY_HITSTOP = 0.25;
+	/** TimeController.HitStop after a punch lands. */
+	private static final double PUNCH_HITSTOP = 0.1;
 	/** A split shot goes on from its coin the second time this long after the first (ReflectRevolver). */
 	private static final double SPLIT_DELAY = 0.05;
 	/** Punch.ActiveFrame looks this far ahead for coins. */
@@ -73,11 +78,15 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	private final List<Coin> respawned = new ArrayList<>();
 	private boolean alreadyHitCoin;
 	private double punchActiveLeft;
+	/** FistControl's current arm. */
+	private FistType arm = FistType.STANDARD;
 	private double punchStamina = 2;
 	/** Punch.ready: cleared by a punch, set again by its animation's ReadyToPunch event. */
 	private boolean punchReady = true;
 	private double fistCooldown;
 	private double hitstopLeft;
+	/** Whether the hitstop is a parry's, which stops the world's sounds. */
+	private boolean soundsPaused;
 	private float lastHealth = -1;
 	private double quietHealLeft;
 
@@ -107,7 +116,8 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
 		if (this.hitstopLeft > 0) {
 			this.hitstopLeft -= dt;
-			if (this.hitstopLeft <= 0) {
+			if (this.hitstopLeft <= 0 && this.soundsPaused) {
+				this.soundsPaused = false;
 				minecraft.getSoundManager().resume();
 			}
 			return;
@@ -154,8 +164,16 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		if (driving) {
 			healFeedback(player);
 			sampleInput(minecraft.options);
-			if (consumePunch() && this.punchReady && this.fistCooldown <= 0 && this.punchStamina >= 1) {
-				punch();
+			// FistControl.Update: each arm's punch key switches to that arm and punches with it.
+			boolean feedbacker = consumeClicks(UltraKeys.PUNCH);
+			boolean knuckleblaster = consumeClicks(UltraKeys.PUNCH_KNUCKLEBLASTER);
+			if (this.fistCooldown <= 0 && this.punchStamina >= 1) {
+				if (feedbacker) {
+					punchWith(FistType.STANDARD);
+				}
+				if (knuckleblaster) {
+					punchWith(FistType.HEAVY);
+				}
 			}
 			if (this.held != null) {
 				this.revolvers.get(this.held).update(dt, this.input, this);
@@ -201,10 +219,10 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	public void armEvent(String function) {
 		switch (function) {
 			case "ActiveStart" -> {
-				ClientPlayNetworking.send(new PunchPayload());
-				this.punchActiveLeft = PUNCH_ACTIVE_TIME;
+				ClientPlayNetworking.send(new PunchPayload(this.arm));
 				Minecraft minecraft = Minecraft.getInstance();
-				if (minecraft.level != null && minecraft.player != null) {
+				if (this.arm == FistType.STANDARD && minecraft.level != null && minecraft.player != null) {
+					this.punchActiveLeft = PUNCH_ACTIVE_TIME;
 					punchCoin(minecraft.level, minecraft.player);
 				}
 			}
@@ -263,9 +281,9 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		this.wasFire2 = fire2;
 	}
 
-	private static boolean consumePunch() {
+	private static boolean consumeClicks(KeyMapping key) {
 		boolean pressed = false;
-		while (UltraKeys.PUNCH.consumeClick()) {
+		while (key.consumeClick()) {
 			pressed = true;
 		}
 		return pressed;
@@ -640,15 +658,38 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			.orElse(null);
 	}
 
-	// ---- Feedbacker ---------------------------------------------------------------------------
+	// ---- arms ----------------------------------------------------------------------------------
+
+	/** FistControl.ForceArm, then Punch.PunchStart. */
+	private void punchWith(FistType type) {
+		if (type != this.arm) {
+			changeArm(type);
+		}
+		punchStart();
+	}
+
+	/**
+	 * FistControl.ArmChange: the other arm takes over, ready to punch (Punch.OnEnable), with at most a tenth of a
+	 * second of cooldown left.
+	 */
+	private void changeArm(FistType type) {
+		this.arm = type;
+		this.punchReady = true;
+		this.punchActiveLeft = 0;
+		this.fistCooldown = Math.min(this.fistCooldown, 0.1);
+		FirstPersonWeapons.INSTANCE.changeArm(type);
+	}
 
 	/** Punch.PunchStart: the hit itself goes out on the animation's ActiveStart event. */
-	private void punch() {
+	private void punchStart() {
+		if (!this.punchReady) {
+			return;
+		}
 		this.punchReady = false;
 		this.alreadyHitCoin = false;
-		this.fistCooldown = 0.5;
-		this.punchStamina -= 1;
-		this.sounds.play("punch_swoosh", 1, 1);
+		this.fistCooldown = this.arm.cooldownCost * 0.25;
+		this.punchStamina -= this.arm.cooldownCost / 2;
+		this.sounds.play("punch_swoosh." + this.arm.arm, 1, this.sounds.randomPitch());
 		Animator arm = FirstPersonWeapons.INSTANCE.armAnimator();
 		if (arm != null) {
 			arm.setFloat("PunchRandomizer", this.random.nextFloat());
@@ -671,9 +712,10 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		if (result.result() == PunchResultPayload.Result.PARRY) {
 			this.sounds.play("parry", 1, 1);
 			this.sounds.play("parry_ricochet", 1, 1);
-			this.hitstopLeft = HITSTOP;
+			this.hitstopLeft = Math.max(this.hitstopLeft, PARRY_HITSTOP);
 			// TimeController.TrueStop stops the world's sounds and music; the player's own play on.
 			minecraft.getSoundManager().pauseAllExcept(SoundSource.PLAYERS);
+			this.soundsPaused = true;
 			this.quietHealLeft = 0.5;
 			ScreenFlashes.INSTANCE.parry();
 			if (movement != null) {
@@ -681,10 +723,16 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 				movement.fullStamina();
 			}
 		} else {
-			this.sounds.play("punch_hit", 1, 1);
-			if (minecraft.level != null) {
-				this.effects.blood(minecraft.level, result.position(), Gore.BODY);
+			// Punch.PunchSuccess
+			this.sounds.play("punch_hit." + this.arm.arm, 1, 1);
+			this.hitstopLeft = Math.max(this.hitstopLeft, PUNCH_HITSTOP);
+			if (movement != null) {
+				movement.shake(0.5 * this.arm.screenShakeMultiplier);
 			}
+			if (minecraft.level != null) {
+				this.effects.blood(minecraft.level, result.position(), result.gore());
+			}
+			this.sounds.play("gore." + result.gore().name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
 		}
 	}
 

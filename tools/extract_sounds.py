@@ -193,9 +193,10 @@ def combat(env, x):
     for event, go_name in [("gore.head", "BS Head"), ("gore.limb", "BS Limb"), ("gore.body", "BS Body"), ("gore.small", "BS Body Small")]:
         x.add_source(event, source_ref(find_class(env, "Bloodsplatter", go_name).m_GameObject))
 
-    punch = find_class(env, "Punch", "Arm Blue")
-    x.add_source("punch_swoosh", next(components(punch.m_GameObject.read(), "AudioSource")))
-    x.add_source("punch_hit", source_ref(punch.normalHit))
+    for arm, go_name in [("feedbacker", "Arm Blue"), ("knuckleblaster", "Arm Red")]:
+        punch = find_class(env, "Punch", go_name)
+        x.add_source(f"punch_swoosh.{arm}", next(components(punch.m_GameObject.read(), "AudioSource")))
+        x.add_source(f"punch_hit.{arm}", source_ref(punch.heavyHit))
     x.add_source("parry_hit", source_ref(punch.specialHit))
 
     movement = find_script(env, "walkSpeed", "jumpSound")

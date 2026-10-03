@@ -39,6 +39,7 @@ MODELS = {
     "revolver_marksman": ("Revolver Ricochet", "Revolver", (0, 0, 0)),
     "revolver_sharpshooter": ("Revolver Twirl", "Revolver", (0, 0, 0)),
     "feedbacker": ("Arm Blue", "Punch", (0, -0.225, 0)),
+    "knuckleblaster": ("Arm Red", "Punch", (0, -0.225, 0)),
     "coin": ("Coin", "Coin", None),
 }
 

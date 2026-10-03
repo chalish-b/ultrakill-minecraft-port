@@ -14,7 +14,6 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.ServerTickRateManager;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.util.Mth;
 import net.minecraft.util.Util;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
@@ -48,10 +47,12 @@ public final class ServerCombat {
 	private static final double PUNCH_RADIUS = 1 * S;
 	/** How long a punch can still connect after it's thrown, like the animation's active frames. */
 	private static final int PUNCH_ACTIVE_TICKS = 4;
-	private static final float PUNCH_DAMAGE = 1;
-	private static final long HITSTOP_MILLIS = 250;
+	/** TimeController.TrueStop after a parry. */
+	private static final long PARRY_HITSTOP_MILLIS = 250;
+	/** TimeController.HitStop after a punch lands. */
+	private static final long PUNCH_HITSTOP_MILLIS = 100;
 
-	private static final Map<UUID, Integer> PUNCHES = new HashMap<>();
+	private static final Map<UUID, ActivePunch> PUNCHES = new HashMap<>();
 	private static boolean hitstopFroze;
 	private static long hitstopEnd;
 
@@ -60,7 +61,7 @@ public final class ServerCombat {
 
 	public static void init() {
 		ServerPlayNetworking.registerGlobalReceiver(WeaponHitPayload.TYPE, (payload, context) -> onWeaponHit(context.player(), payload));
-		ServerPlayNetworking.registerGlobalReceiver(PunchPayload.TYPE, (payload, context) -> onPunch(context.player()));
+		ServerPlayNetworking.registerGlobalReceiver(PunchPayload.TYPE, (payload, context) -> onPunch(context.player(), payload.fist()));
 		ServerPlayNetworking.registerGlobalReceiver(CycleVariantPayload.TYPE, (payload, context) -> onCycleVariant(context.player()));
 		ServerTickEvents.END_SERVER_TICK.register(ServerCombat::tick);
 	}
@@ -76,16 +77,25 @@ public final class ServerCombat {
 		if (target.distanceToSqr(player) > 512 * 512) {
 			return;
 		}
-		damage(player, target, hit.damage(), hit.head(), hit.position());
+		damage(player, target, hit.damage(), hit.head(), hit.position(), false);
 	}
 
-	/** EnemyIdentifier.DeliverDamage: no invulnerability frames, and the blood it spills heals. */
-	private static void damage(ServerPlayer player, LivingEntity target, float damage, boolean head, Vec3 position) {
+	/**
+	 * EnemyIdentifier.DeliverDamage: no invulnerability frames, and the blood it spills heals. With
+	 * tryForExplode, an enemy it kills bursts (EnemyIdentifier.Explode): its head and limbs come off, leaving the
+	 * head's blood.
+	 *
+	 * @return the blood it left
+	 */
+	private static Gore damage(ServerPlayer player, LivingEntity target, float damage, boolean head, Vec3 position, boolean tryForExplode) {
 		ServerLevel level = player.level();
 		DamageSource source = player.damageSources().playerAttack(player);
 		target.setInvulnerableTime(0);
 		target.hurtServer(level, source, damage * HEALTH_PER_DAMAGE);
-		BloodZones.add(level, position, Gore.of(head, damage, !target.isAlive()));
+		boolean killed = !target.isAlive();
+		Gore gore = tryForExplode && killed ? Gore.HEAD : Gore.of(head, damage, killed);
+		BloodZones.add(level, position, gore);
+		return gore;
 	}
 
 	private static void onCycleVariant(ServerPlayer player) {
@@ -96,23 +106,35 @@ public final class ServerCombat {
 		}
 	}
 
-	private static void onPunch(ServerPlayer player) {
+	private static void onPunch(ServerPlayer player, FistType type) {
 		if (!active(player)) {
 			return;
 		}
-		if (!tryPunch(player)) {
-			PUNCHES.put(player.getUUID(), PUNCH_ACTIVE_TICKS);
+		if (!tryPunch(player, type)) {
+			PUNCHES.put(player.getUUID(), new ActivePunch(type, PUNCH_ACTIVE_TICKS));
+		}
+	}
+
+	/** A punch still looking for something to hit. */
+	private static final class ActivePunch {
+		final FistType type;
+		int ticksLeft;
+
+		ActivePunch(FistType type, int ticksLeft) {
+			this.type = type;
+			this.ticksLeft = ticksLeft;
 		}
 	}
 
 	private static void tick(MinecraftServer server) {
-		for (Iterator<Map.Entry<UUID, Integer>> it = PUNCHES.entrySet().iterator(); it.hasNext(); ) {
-			Map.Entry<UUID, Integer> punch = it.next();
-			ServerPlayer player = server.getPlayerList().getPlayer(punch.getKey());
-			if (player == null || !active(player) || tryPunch(player) || punch.getValue() <= 1) {
+		for (Iterator<Map.Entry<UUID, ActivePunch>> it = PUNCHES.entrySet().iterator(); it.hasNext(); ) {
+			Map.Entry<UUID, ActivePunch> entry = it.next();
+			ActivePunch punch = entry.getValue();
+			ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
+			if (player == null || !active(player) || tryPunch(player, punch.type) || punch.ticksLeft <= 1) {
 				it.remove();
 			} else {
-				punch.setValue(punch.getValue() - 1);
+				punch.ticksLeft--;
 			}
 		}
 		for (ServerPlayer player : server.getPlayerList().getPlayers()) {
@@ -127,16 +149,19 @@ public final class ServerCombat {
 		}
 	}
 
-	/** One active frame of a punch: parries a projectile in reach, or else hits an enemy. */
-	private static boolean tryPunch(ServerPlayer player) {
+	/** One active frame of a punch: the Feedbacker parries a projectile in reach; otherwise it hits an enemy. */
+	private static boolean tryPunch(ServerPlayer player, FistType type) {
 		Vec3 eye = player.getEyePosition();
-		Vec3 end = eye.add(player.getLookAngle().scale(PUNCH_REACH));
+		Vec3 look = player.getLookAngle();
+		Vec3 end = eye.add(look.scale(PUNCH_REACH));
 		AABB area = new AABB(eye, end).inflate(PUNCH_RADIUS + 1);
 
-		for (Projectile projectile : player.level().getEntitiesOfClass(Projectile.class, area, p -> p.isAlive() && p.getOwner() != player)) {
-			if (reaches(projectile.getBoundingBox().inflate(PUNCH_RADIUS), eye, end)) {
-				parry(player, projectile);
-				return true;
+		if (type == FistType.STANDARD) {
+			for (Projectile projectile : player.level().getEntitiesOfClass(Projectile.class, area, p -> p.isAlive() && p.getOwner() != player)) {
+				if (reaches(projectile.getBoundingBox().inflate(PUNCH_RADIUS), eye, end)) {
+					parry(player, projectile);
+					return true;
+				}
 			}
 		}
 
@@ -155,11 +180,28 @@ public final class ServerCombat {
 		if (target == null) {
 			return false;
 		}
-		damage(player, target, PUNCH_DAMAGE, false, hitPoint);
-		float yaw = player.getYRot() * Mth.DEG_TO_RAD;
-		target.knockback(0.6, Mth.sin(yaw), -Mth.cos(yaw), player.damageSources().playerAttack(player), PUNCH_DAMAGE);
-		ServerPlayNetworking.send(player, new PunchResultPayload(PunchResultPayload.Result.ENEMY, hitPoint));
+		Vec3 velocity = target.getDeltaMovement();
+		Gore gore = damage(player, target, type.damage, false, hitPoint, type.tryForExplode);
+		knockBack(target, velocity, look.scale(type.force));
+		hitstop(player.level().getServer(), PUNCH_HITSTOP_MILLIS);
+		ServerPlayNetworking.send(player, new PunchResultPayload(PunchResultPayload.Result.ENEMY, hitPoint, gore));
 		return true;
+	}
+
+	/**
+	 * Enemy.KnockBack, in place of Minecraft's knockback from the hit: the enemy stops falling, rises a little if
+	 * it's in the air, and is sent along the punch.
+	 *
+	 * @param velocity the enemy's velocity before the hit
+	 * @param force units per second
+	 */
+	private static void knockBack(LivingEntity target, Vec3 velocity, Vec3 force) {
+		double y = Math.max(velocity.y, 0);
+		if (!target.onGround()) {
+			y += 1 * S / 20;
+		}
+		target.setDeltaMovement(new Vec3(velocity.x, y, velocity.z).add(force.scale(S / 20)));
+		target.needsSync = true;
 	}
 
 	private static boolean reaches(AABB box, Vec3 from, Vec3 to) {
@@ -174,19 +216,19 @@ public final class ServerCombat {
 			arrow.setBaseDamage(((AbstractArrowAccessor)arrow).ultracraft$getBaseDamage() * 2.5);
 		}
 		UltraHealth.heal(player, UltraHealth.MAX_HP);
-		hitstop(player.level().getServer());
-		ServerPlayNetworking.send(player, new PunchResultPayload(PunchResultPayload.Result.PARRY, projectile.position()));
+		hitstop(player.level().getServer(), PARRY_HITSTOP_MILLIS);
+		ServerPlayNetworking.send(player, new PunchResultPayload(PunchResultPayload.Result.PARRY, projectile.position(), Gore.BODY));
 	}
 
-	/** TimeController.TrueStop: the world stops for a quarter of a second. */
-	private static void hitstop(MinecraftServer server) {
+	/** TimeController's HitStop and TrueStop: the world stops for a moment. */
+	private static void hitstop(MinecraftServer server, long millis) {
 		ServerTickRateManager rates = server.tickRateManager();
 		if (!rates.isFrozen()) {
 			rates.setFrozen(true);
 			hitstopFroze = true;
 		}
 		if (hitstopFroze) {
-			hitstopEnd = Util.getMillis() + HITSTOP_MILLIS;
+			hitstopEnd = Math.max(hitstopEnd, Util.getMillis() + millis);
 		}
 	}
 }

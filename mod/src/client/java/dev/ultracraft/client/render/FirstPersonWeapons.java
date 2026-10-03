@@ -5,6 +5,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mojang.blaze3d.vertex.PoseStack;
 import dev.ultracraft.PlayerShape;
+import dev.ultracraft.combat.FistType;
 import dev.ultracraft.client.render.animation.Animator;
 import dev.ultracraft.client.render.animation.Pose;
 import net.minecraft.client.Camera;
@@ -26,8 +27,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The first-person viewmodels: the held revolver and the Feedbacker arm, each played by its own Animator. The
- * arm is always there; its idle pose keeps it below the screen until it punches or flips a coin.
+ * The first-person viewmodels: the held revolver and the current arm (the Feedbacker or the Knuckleblaster),
+ * each played by its own Animator. The arm is always there; its idle pose keeps it below the screen until it
+ * punches or flips a coin.
  */
 public final class FirstPersonWeapons {
 	public static final FirstPersonWeapons INSTANCE = new FirstPersonWeapons();
@@ -105,7 +107,9 @@ public final class FirstPersonWeapons {
 
 	private final RandomSource random = RandomSource.create();
 	private final Map<Weapon, Viewmodel> weapons = new EnumMap<>(Weapon.class);
-	private @Nullable Viewmodel arm;
+	private final Map<FistType, Viewmodel> arms = new EnumMap<>(FistType.class);
+	/** FistControl's current arm: the only one enabled. */
+	private FistType currentArm = FistType.STANDARD;
 	private @Nullable Weapon held;
 	private RevolverState state = RevolverState.NONE;
 	/** The arm's parent (FistControl's "Punch"), turned towards what it last hit. */
@@ -127,10 +131,14 @@ public final class FirstPersonWeapons {
 	}
 
 	private @Nullable Viewmodel arm() {
-		if (this.arm == null) {
-			this.arm = Viewmodel.load("feedbacker");
+		Viewmodel viewmodel = this.arms.get(this.currentArm);
+		if (viewmodel == null) {
+			viewmodel = Viewmodel.load(this.currentArm.arm);
+			if (viewmodel != null) {
+				this.arms.put(this.currentArm, viewmodel);
+			}
 		}
-		return this.arm;
+		return viewmodel;
 	}
 
 	/** The held weapon's Animator. */
@@ -139,7 +147,7 @@ public final class FirstPersonWeapons {
 		return viewmodel == null ? null : viewmodel.animator;
 	}
 
-	/** The Feedbacker's Animator. */
+	/** The current arm's Animator. */
 	public @Nullable Animator armAnimator() {
 		Viewmodel viewmodel = arm();
 		return viewmodel == null ? null : viewmodel.animator;
@@ -151,6 +159,22 @@ public final class FirstPersonWeapons {
 		if (animator != null) {
 			animator.reset();
 		}
+	}
+
+	/**
+	 * FistControl.ArmChange: the other arm is enabled, so its Animator starts over, and Punch.OnEnable's
+	 * ReadyToPunch brings the arm's parent back from where the last punch turned it.
+	 */
+	public void changeArm(FistType arm) {
+		if (arm == this.currentArm) {
+			return;
+		}
+		this.currentArm = arm;
+		Animator animator = armAnimator();
+		if (animator != null) {
+			animator.reset();
+		}
+		this.returnToOrigRot = true;
 	}
 
 	/** RevolverCylinder.DoTurn, after a shot. */
@@ -170,8 +194,8 @@ public final class FirstPersonWeapons {
 		Quaternionf toCamera = new Quaternionf(camera.rotation()).conjugate();
 		Vector3f target = unity(toCamera.transform(point.subtract(camera.position()).toVector3f())).div((float)PlayerShape.BLOCKS_PER_UNIT);
 		Vector3f up = unity(toCamera.transform(new Vector3f(0, 1, 0)));
-		UltraModel model = UltraModel.get("feedbacker");
-		Vector3f origin = model == null ? new Vector3f() : model.origin();
+		Viewmodel arm = arm();
+		Vector3f origin = arm == null ? new Vector3f() : arm.model.origin();
 		lookRotation(target.sub(origin), up, this.armRotation);
 		if (RevolverCylinder.angle(this.armRotation, new Quaternionf()) > 45) {
 			Vector3f euler = this.armRotation.getEulerAnglesYXZ(new Vector3f());

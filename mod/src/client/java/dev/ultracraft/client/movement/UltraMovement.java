@@ -1104,6 +1104,11 @@ public final class UltraMovement {
 		this.camera.shake(amount);
 	}
 
+	/** The screen shake, every frame the game isn't paused, hitstops included. */
+	public void updateShake(double dt) {
+		this.camera.updateShake(dt);
+	}
+
 	/** NewMovement.FullStamina. */
 	public void fullStamina() {
 		this.boostCharge = 300;

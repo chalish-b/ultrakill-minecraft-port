@@ -63,8 +63,8 @@ final class UltraCamera {
 		return U.eq(dodgeDirection, forward.scale(-1)) ? 1 : 2;
 	}
 
-	void lateUpdate(double dt, UltraMovement movement, double defaultFov) {
-		UltraConfig config = UltraConfig.get();
+	/** CameraController.Update's shake. It runs on real time, so it plays out during a hitstop too. */
+	void updateShake(double dt) {
 		if (this.cameraShaking > 0) {
 			if (this.cameraShaking > 1) {
 				this.shakeRight = this.random.nextInt(3) - 1;
@@ -74,7 +74,14 @@ final class UltraCamera {
 				this.shakeUp = this.cameraShaking * (this.random.nextDouble() * 2 - 1);
 			}
 			this.cameraShaking -= dt * 3;
+		} else {
+			this.shakeRight = 0;
+			this.shakeUp = 0;
 		}
+	}
+
+	void lateUpdate(double dt, UltraMovement movement, double defaultFov) {
+		UltraConfig config = UltraConfig.get();
 
 		if (dt > 0) {
 			this.tilt = U.smoothDampAngle(this.tilt, 0, this.tiltVelocity, 0.5, dt);
@@ -107,8 +114,6 @@ final class UltraCamera {
 			this.localPos = this.defaultPos;
 			return;
 		}
-		this.shakeRight = 0;
-		this.shakeUp = 0;
 		if (movement.walking && movement.standing && this.defaultPos == this.defaultTarget) {
 			double speed = Math.min(movement.body.velocity.length(), 15) / 15;
 			this.localPos = U.moveTowards(this.localPos, this.bobTarget, dt * 0.5 * speed);

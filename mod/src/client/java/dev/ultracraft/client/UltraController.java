@@ -61,8 +61,11 @@ public final class UltraController {
 				release();
 				take(minecraft, player);
 			}
-			if (!minecraft.isPaused() && !ClientCombat.INSTANCE.inHitstop()) {
-				drive(minecraft, player, dt);
+			if (!minecraft.isPaused()) {
+				this.movement.updateShake(dt);
+				if (!ClientCombat.INSTANCE.inHitstop()) {
+					drive(minecraft, player, dt);
+				}
 			}
 		}
 		if (!minecraft.isPaused()) {
