@@ -211,6 +211,12 @@ def combat(env, x):
     pellet = next(s for s in components(shotgun.bullet.deref().read(), "MonoBehaviour") if hasattr(s, "playerBullet"))
     x.add_source("bullet_spark", next(components(pellet.explosionEffect.deref().read(), "AudioSource")))
     x.add_source("explosion", next(components(punch.parriedProjectileHitObject.deref().read(), "AudioSource")))
+    x.add_clip("shotgun_smack", shotgun.smackSound)
+    charge = next(components(shotgun.chargeSoundBubble.deref().read(), "AudioSource"))
+    x.add_clip("shotgun_charge", charge.m_audioClip, charge.m_Volume)
+    x.add_clip("shotgun_core_throw", next(components(shotgun.grenadeSoundBubble.deref().read(), "AudioSource")).m_audioClip)
+    core = next(s for s in components(shotgun.grenade.deref().read(), "MonoBehaviour") if hasattr(s, "superExplosion"))
+    x.add_source("explosion_super", next(components(core.superExplosion.deref().read(), "AudioSource")))
 
     movement = find_script(env, "walkSpeed", "jumpSound")
     x.add_source("hurt", source_ref(movement.hurtScreen.deref().read().m_GameObject))

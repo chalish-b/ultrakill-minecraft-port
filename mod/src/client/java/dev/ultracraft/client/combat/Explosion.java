@@ -1,6 +1,9 @@
 package dev.ultracraft.client.combat;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import dev.ultracraft.PlayerShape;
+import dev.ultracraft.client.render.UltraModel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ExperienceOrb;
@@ -15,7 +18,9 @@ import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
 import org.jspecify.annotations.Nullable;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -54,20 +59,47 @@ final class Explosion {
 	 * @param halved whether the damage starts out already reduced, so it doesn't drop again
 	 * @param rocketExplosion whether a harmless one pushes the player less with every rocket jump in a row
 	 * @param playerDamageOverride the player's damage in place of {@code damage}, or -1
+	 * @param touchShake how much a Screenshaker on the sphere shakes the camera when the sphere reaches the
+	 *     player, or 0
 	 */
 	record Settings(
 		double scale, double startScale, double colliderRadius, double speed, double maxSize, int damage,
 		double enemyDamageMultiplier, double pushForceMultiplier, boolean halved, Subjects canHit,
-		boolean rocketExplosion, int playerDamageOverride
+		boolean rocketExplosion, int playerDamageOverride, double touchShake
 	) {
+		/** An Explosion on an extracted prefab, scaled by the bones above it. */
+		static Settings of(UltraModel model, JsonObject explosion) {
+			int bone = explosion.get("bone").getAsInt();
+			double scale = 1;
+			for (int b = model.parent(bone); b >= 0; b = model.parent(b)) {
+				scale *= model.rest().sx(b);
+			}
+			double touchShake = 0;
+			for (JsonElement shaker : model.scripts("screenshaker")) {
+				if (shaker.getAsJsonObject().get("bone").getAsInt() == bone) {
+					touchShake = shaker.getAsJsonObject().get("amount").getAsDouble();
+				}
+			}
+			return new Settings(
+				scale, model.rest().sx(bone), explosion.get("colliderRadius").getAsDouble(), explosion.get("speed").getAsDouble(),
+				explosion.get("maxSize").getAsDouble(), explosion.get("damage").getAsInt(), explosion.get("enemyDamageMultiplier").getAsDouble(),
+				explosion.get("pushForceMultiplier").getAsDouble(), explosion.get("halved").getAsInt() != 0,
+				Subjects.values()[explosion.get("canHit").getAsInt()], false, -1, touchShake
+			);
+		}
 	}
 
-	/** "Explosion Wave Knuckleblaster", the Knuckleblaster's blast: it only hits enemies, for 1 damage. */
-	static final Settings KNUCKLEBLASTER = new Settings(12, 0.1, 0.2236069, 2.5, 12, 10, 1, 1.5, true, Subjects.ENEMIES_ONLY, false, -1);
-	/** "Explosion", the standard explosion's blast: 3.5 to enemies within 6 units (2.3 past half of that) and 35 HP to the player. */
-	static final Settings STANDARD = new Settings(12, 1, 0.2236069, 1, 6, 35, 1, 1, false, Subjects.ALL, false, -1);
-	/** The standard explosion's second sphere: a wider, harmless wave that only pushes enemies. */
-	static final Settings STANDARD_WAVE = new Settings(12, 0.1, 0.2236069, 2.5, 8, 0, 0, 1, false, Subjects.ENEMIES_ONLY, false, -1);
+	/** The Explosions of an extracted prefab, in its model's order; none if it hasn't been extracted. */
+	static List<Settings> prefab(String name) {
+		UltraModel model = UltraModel.get(name);
+		List<Settings> settings = new ArrayList<>();
+		if (model != null) {
+			for (JsonElement explosion : model.scripts("explosions")) {
+				settings.add(Settings.of(model, explosion.getAsJsonObject()));
+			}
+		}
+		return settings;
+	}
 
 	/** What the explosion does to what it reaches; units per second throughout. */
 	interface Hits {
@@ -80,6 +112,12 @@ final class Explosion {
 		void object(Entity object, Vec3 velocity);
 
 		void player(Explosion explosion);
+
+		/** The sphere reached the player, whether or not it can hit them. */
+		void touched(Explosion explosion);
+
+		/** The player's cores, which an explosion with a set direction throws that way. */
+		List<Core> cores();
 	}
 
 	final Settings settings;
@@ -92,6 +130,7 @@ final class Explosion {
 	/** From a boosted projectile: it launches the player at a set speed instead. */
 	final boolean boosted;
 	private final Set<Integer> hit = new HashSet<>();
+	private final Set<Core> hitCores = new HashSet<>();
 	private double localScale;
 	private double speed;
 	private int damage;
@@ -137,6 +176,11 @@ final class Explosion {
 	/** The sphere's radius, in units. */
 	double radius() {
 		return this.settings.scale * this.localScale * this.settings.colliderRadius;
+	}
+
+	/** The sphere object's own scale. */
+	double localScale() {
+		return this.localScale;
 	}
 
 	/** The sphere's scale from the prefab root down: what its mesh is drawn at. */
@@ -187,6 +231,13 @@ final class Explosion {
 
 	/** Explosion.Collide, for everything the sphere has newly reached. */
 	private void collide(Level level, LocalPlayer player, Hits hits, double radius) {
+		for (Core core : hits.cores()) {
+			if (!core.removed && this.forceDirection != null && !this.hitCores.contains(core) && core.position.distanceTo(this.origin) <= radius + Core.RADIUS * S) {
+				// Cores ignore explosions' pushes, but not a set direction: it sets their velocity.
+				this.hitCores.add(core);
+				core.launch(this.forceDirection.scale(100));
+			}
+		}
 		AABB area = new AABB(this.origin, this.origin).inflate(radius);
 		for (Entity entity : level.getEntities((Entity)null, area, e -> !e.isSpectator())) {
 			if (this.hit.contains(entity.getId()) || !touches(entity.getBoundingBox(), radius)) {
@@ -194,6 +245,7 @@ final class Explosion {
 			}
 			if (entity == player) {
 				this.hit.add(entity.getId());
+				hits.touched(this);
 				if (!this.hitPlayer && this.settings.canHit != Subjects.ENEMIES_ONLY) {
 					this.hitPlayer = true;
 					hits.player(this);

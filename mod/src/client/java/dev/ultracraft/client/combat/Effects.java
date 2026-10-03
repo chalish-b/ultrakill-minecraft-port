@@ -9,6 +9,7 @@ import dev.ultracraft.client.render.UltraModel;
 import dev.ultracraft.combat.Gore;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.renderer.rendertype.RenderTypes;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.core.BlockPos;
@@ -25,6 +26,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
+import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -119,6 +121,13 @@ final class Effects {
 	private static final double GRAVITY = 40;
 	private static final float[] BULLET_SPARK_END = {1, 0.84779346F, 0};
 	private static final Identifier SPARK = Identifier.fromNamespaceAndPath("ultracraft", "textures/viewmodel/spark.png");
+	/** A core's trail: half a unit wide, yellow, fading out over a quarter of a second. */
+	private static final double CORE_TRAIL_WIDTH = 0.524;
+	private static final float[] CORE_TRAIL = {1, 0.8509804F, 0};
+	/** A core's glow: the flash sprite at 24 times, on the core's 0.5 scale, blinking at 50 alpha a second. */
+	private static final double CORE_GLOW_SCALE = 12;
+	private static final double CORE_GLOW_BLINK = 50;
+	private @Nullable RenderType coreGlow;
 
 	private record MuzzleFlash(Vec3 position, Quaternionf rotation, double start) {
 	}
@@ -146,9 +155,8 @@ final class Effects {
 		this.bulletSparks.removeIf(spark -> this.clock - spark.born > BULLET_SPARK_LIFETIME);
 	}
 
-	/** The standard explosion's look, for its blast and its wave. */
-	void explosion(Explosion blast, Explosion wave) {
-		this.looks.add(new ExplosionLook(blast, wave));
+	void explosion(ExplosionLook look) {
+		this.looks.add(look);
 	}
 
 	/** A muzzle flash at the barrel, facing along {@code rotation} and turned a random whole number of degrees about it. */
@@ -214,7 +222,7 @@ final class Effects {
 		}
 	}
 
-	void render(LevelRenderContext context, List<Coin> coins, List<Shell> shells, List<Pellet> pellets) {
+	void render(LevelRenderContext context, List<Coin> coins, List<Shell> shells, List<Pellet> pellets, List<Core> cores) {
 		Minecraft minecraft = Minecraft.getInstance();
 		if (minecraft.level == null) {
 			return;
@@ -243,6 +251,7 @@ final class Effects {
 			look.render(context, camera);
 		}
 		renderPellets(context, camera, pellets);
+		renderCores(context, camera, cores);
 		renderMuzzleFlashes(context, camera);
 		renderBulletSparks(context, camera);
 		UltraModel shell = UltraModel.get("shotgun_shell");
@@ -313,16 +322,22 @@ final class Effects {
 		});
 	}
 
-	/** A pellet's TrailRenderer: a strip through its recent positions, turned to the camera, narrowing and fading to its tail. */
 	private static void pelletTrail(PoseStack.Pose pose, VertexConsumer buffer, Pellet pellet, Vec3 camera) {
+		trail(pose, buffer, pellet.position, pellet.trail, camera, PELLET_TRAIL_WIDTH, pellet.boosted ? PELLET_TRAIL_BOOSTED : PELLET_TRAIL);
+	}
+
+	/**
+	 * A TrailRenderer: a strip through recent positions, turned to the camera, narrowing to nothing and fading
+	 * out from its head to its tail.
+	 *
+	 * @param width units, at the head
+	 */
+	private static void trail(PoseStack.Pose pose, VertexConsumer buffer, Vec3 head, Iterable<Pellet.TrailPoint> trail, Vec3 camera, double width, float[] color) {
 		List<Vec3> points = new ArrayList<>();
-		List<Double> ages = new ArrayList<>();
-		points.add(pellet.position.subtract(camera));
-		ages.add(0.0);
-		for (Pellet.TrailPoint point : pellet.trail) {
-			if (!point.position().equals(pellet.position)) {
+		points.add(head.subtract(camera));
+		for (Pellet.TrailPoint point : trail) {
+			if (!point.position().equals(head)) {
 				points.add(point.position().subtract(camera));
-				ages.add(pellet.age() - point.time());
 			}
 		}
 		if (points.size() < 2) {
@@ -336,12 +351,11 @@ final class Effects {
 		if (length <= 0) {
 			return;
 		}
-		float[] color = pellet.boosted ? PELLET_TRAIL_BOOSTED : PELLET_TRAIL;
 		for (int i = 0; i + 1 < points.size(); i++) {
 			for (int j : new int[]{i, i + 1}) {
 				double t = along[j] / length;
 				Vec3 tangent = points.get(Math.min(j + 1, points.size() - 1)).subtract(points.get(Math.max(j - 1, 0)));
-				Vec3 side = tangent.cross(points.get(j)).normalize().scale(PELLET_TRAIL_WIDTH * PlayerShape.BLOCKS_PER_UNIT * (1 - t) / 2);
+				Vec3 side = tangent.cross(points.get(j)).normalize().scale(width * PlayerShape.BLOCKS_PER_UNIT * (1 - t) / 2);
 				if (!Double.isFinite(side.x)) {
 					side = Vec3.ZERO;
 				}
@@ -356,6 +370,46 @@ final class Effects {
 					buffer.addVertex(pose, new Vector3f((float)a.x, (float)a.y, (float)a.z)).setColor(color[0], color[1], color[2], alpha);
 				}
 			}
+		}
+	}
+
+	/**
+	 * Each core: its model, lit by its own glow; its trail; and its glow, a camera-facing flash that blinks out
+	 * and back 25 times a second (SpriteController, blinking at 50 a second), adding its color.
+	 */
+	private void renderCores(LevelRenderContext context, Vec3 camera, List<Core> cores) {
+		UltraModel model = UltraModel.get("core");
+		if (model == null || cores.isEmpty()) {
+			return;
+		}
+		PoseStack poseStack = context.poseStack();
+		float units = (float)PlayerShape.BLOCKS_PER_UNIT;
+		context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.debugQuads(), (pose, buffer) -> {
+			for (Core core : cores) {
+				trail(pose, buffer, core.position, core.trail, camera, CORE_TRAIL_WIDTH, CORE_TRAIL);
+			}
+		});
+		if (this.coreGlow == null && !model.sprites().isEmpty()) {
+			this.coreGlow = RenderTypes.energySwirl(model.sprites().getFirst().texture(), 0, 0);
+		}
+		for (Core core : cores) {
+			poseStack.pushPose();
+			poseStack.translate(core.position.x - camera.x, core.position.y - camera.y, core.position.z - camera.z);
+			poseStack.pushPose();
+			poseStack.rotate(core.rotation);
+			poseStack.scale(units, units, units);
+			model.submit(poseStack, context.submitNodeCollector(), LightCoordsUtil.FULL_BRIGHT);
+			poseStack.popPose();
+			if (this.coreGlow != null) {
+				UltraModel.Sprite glow = model.sprites().getFirst();
+				float blink = (float)Math.abs(1 - (core.age() * CORE_GLOW_BLINK) % 2);
+				poseStack.rotate(Minecraft.getInstance().gameRenderer.mainCamera().rotation());
+				float scale = (float)(CORE_GLOW_SCALE * units);
+				poseStack.scale(scale, scale, scale);
+				float[] c = glow.color();
+				quad(context, this.coreGlow, glow.rect(), c[0] * blink, c[1] * blink, c[2] * blink, 1);
+			}
+			poseStack.popPose();
 		}
 	}
 
@@ -401,15 +455,22 @@ final class Effects {
 
 	/** A sprite's rectangle at the current pose, from both sides, its texture tinted and faded. */
 	static void quad(LevelRenderContext context, Identifier texture, float[] r, float red, float green, float blue, float alpha) {
-		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.text(texture), (pose, buffer) -> {
+		quad(context, RenderTypes.text(texture), r, red, green, blue, alpha);
+	}
+
+	/** Like {@link #quad(LevelRenderContext, Identifier, float[], float, float, float, float)}, in a render type that takes a texture. */
+	static void quad(LevelRenderContext context, RenderType type, float[] r, float red, float green, float blue, float alpha) {
+		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), type, (pose, buffer) -> {
 			float[][] corners = {{r[0], r[1], 0, 1}, {r[2], r[1], 1, 1}, {r[2], r[3], 1, 0}, {r[0], r[3], 0, 0}};
 			for (int i = 0; i < 4; i++) {
 				float[] c = corners[i];
-				buffer.addVertex(pose, c[0], c[1], 0).setColor(red, green, blue, alpha).setUv(c[2], c[3]).setLight(LightCoordsUtil.FULL_BRIGHT);
+				buffer.addVertex(pose, c[0], c[1], 0).setColor(red, green, blue, alpha).setUv(c[2], c[3])
+					.setOverlay(OverlayTexture.NO_OVERLAY).setLight(LightCoordsUtil.FULL_BRIGHT).setNormal(pose, 0, 0, 1);
 			}
 			for (int i = 3; i >= 0; i--) {
 				float[] c = corners[i];
-				buffer.addVertex(pose, c[0], c[1], 0).setColor(red, green, blue, alpha).setUv(c[2], c[3]).setLight(LightCoordsUtil.FULL_BRIGHT);
+				buffer.addVertex(pose, c[0], c[1], 0).setColor(red, green, blue, alpha).setUv(c[2], c[3])
+					.setOverlay(OverlayTexture.NO_OVERLAY).setLight(LightCoordsUtil.FULL_BRIGHT).setNormal(pose, 0, 0, 1);
 			}
 		});
 	}

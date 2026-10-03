@@ -85,10 +85,20 @@ public final class FirstPersonWeapons {
 	 * What the held shotgun shows.
 	 *
 	 * @param heat its heat sink's glow, 1 after a shot and fading once the animation releases the heat
+	 * @param meter its meter's Slider value, 0 to 60
+	 * @param charge how far a core is charged, 0 to 1: the meter reddens with it
+	 * @param reloadingCore the meter is black while a core's throw reloads
+	 * @param jitter how far the gun shakes from its place, in units
 	 */
-	public record ShotgunState(double heat) {
-		public static final ShotgunState NONE = new ShotgunState(0);
+	public record ShotgunState(double heat, double meter, double charge, boolean reloadingCore, Vec3 jitter) {
+		public static final ShotgunState NONE = new ShotgunState(0, 60, 0, false, Vec3.ZERO);
 	}
+
+	/** The shotgun's meter Slider: 0 to 60, filling from the right, its fill 10 units wider than its share. */
+	private static final double METER_MAX = 60;
+	private static final float METER_FILL_EXTRA = 10;
+	/** The color a charging core's meter reddens towards. */
+	private static final float[] METER_CHARGED = {1, 0.25F, 0.25F, 1};
 
 	/** Clip events from the held weapon and from the arm, and the held revolver's cylinder clicking into place. */
 	public interface Events {
@@ -352,8 +362,11 @@ public final class FirstPersonWeapons {
 		return this.held != null;
 	}
 
-	/** The shotgun, with its heat sink glowing after a shot, and its meter. */
+	/** The shotgun, with its heat sink glowing after a shot, and its meter. Charging a core shakes it. */
 	private void submitShotgun(PoseStack poseStack, SubmitNodeCollector collector, int light, Viewmodel weapon) {
+		Vec3 jitter = this.shotgun.jitter();
+		poseStack.pushPose();
+		poseStack.translate(jitter.x, jitter.y, -jitter.z);
 		Matrix4f[] world = weapon.model.boneMatrices(weapon.pose, new Quaternionf());
 		weapon.model.submit(poseStack, collector, light, world, Set.of(HEAT_SINK));
 		float heat = (float)Math.clamp(this.shotgun.heat(), 0, 1);
@@ -364,9 +377,36 @@ public final class FirstPersonWeapons {
 		for (UltraModel.Canvas canvas : weapon.model.canvases()) {
 			for (int i = 0; i < canvas.images().size(); i++) {
 				UltraModel.Image image = canvas.images().get(i);
-				ModelOverlays.image(poseStack, collector, RenderTypes.text(image.texture()), world[canvas.bone()], image, image.color(), image.fillAmount(), i);
+				float[] color = image.color();
+				if (image.name().equals("Fill")) {
+					color = meterColor(image.color());
+					image = meterFill(image);
+				}
+				ModelOverlays.image(poseStack, collector, RenderTypes.text(image.texture()), world[canvas.bone()], image, color, image.fillAmount(), i);
 			}
 		}
+		poseStack.popPose();
+	}
+
+	/** Shotgun.UpdateMeter's color: the variant's, reddening with a core's charge, or black while its throw reloads. */
+	private float[] meterColor(float[] variation) {
+		if (this.shotgun.reloadingCore()) {
+			return new float[]{0, 0, 0, 1};
+		}
+		float t = (float)this.shotgun.charge();
+		float[] color = new float[4];
+		for (int c = 0; c < 4; c++) {
+			color[c] = variation[c] + (METER_CHARGED[c] - variation[c]) * t;
+		}
+		return color;
+	}
+
+	/** The Slider's fill at the meter's value: it keeps its right edge and spans its share of the width. */
+	private UltraModel.Image meterFill(UltraModel.Image full) {
+		float[] r = full.rect();
+		float share = (float)(this.shotgun.meter() / METER_MAX);
+		float width = (r[2] - r[0] - METER_FILL_EXTRA) * share + METER_FILL_EXTRA;
+		return full.withRect(new float[]{r[2] - width, r[1], r[2], r[3]});
 	}
 
 	private static int channel(float value) {

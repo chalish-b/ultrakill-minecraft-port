@@ -34,6 +34,12 @@ public final class Pose {
 		System.arraycopy(scale, 0, this.scale, bone * 3, 3);
 	}
 
+	public void setScale(int bone, float x, float y, float z) {
+		this.scale[bone * 3] = x;
+		this.scale[bone * 3 + 1] = y;
+		this.scale[bone * 3 + 2] = z;
+	}
+
 	public void setRotation(int bone, float x, float y, float z, float w) {
 		this.rotation[bone * 4] = x;
 		this.rotation[bone * 4 + 1] = y;

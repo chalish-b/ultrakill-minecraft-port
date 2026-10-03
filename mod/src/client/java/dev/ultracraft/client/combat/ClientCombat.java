@@ -8,6 +8,7 @@ import dev.ultracraft.client.movement.UltraMovement;
 import dev.ultracraft.client.movement.UltraSounds;
 import dev.ultracraft.client.render.FirstPersonWeapons;
 import dev.ultracraft.client.render.ScreenFlashes;
+import dev.ultracraft.client.render.UltraModel;
 import dev.ultracraft.client.render.animation.Animator;
 import dev.ultracraft.combat.FistType;
 import dev.ultracraft.combat.Gore;
@@ -55,7 +56,7 @@ import java.util.Optional;
  * arms' punches (and boosting pellets with them) and the Knuckleblaster's blast, explosions, weapon charges
  * (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the server, which applies them.
  */
-public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pellet.Hits, FirstPersonWeapons.Events, Explosion.Hits {
+public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events, Explosion.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
@@ -72,6 +73,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	private static final double PUNCH_ACTIVE_TIME = 6 * 0.008;
 	/** The Knuckleblaster's blast goes off this far ahead of the camera, or just short of a wall (Punch.BlastCheck). */
 	private static final double BLAST_DISTANCE = 2 * S;
+	/** Coins look for cores this close to the player. */
+	private static final double CORE_TARGET_RANGE = 100 * S;
+	/** TimeController.HitStop when a core hits an enemy. */
+	private static final double CORE_HITSTOP = 0.05;
 	/** Landed shells stay until there are more than this many (GoreZone's maxGibs at the default maxGore). */
 	private static final int MAX_SHELLS = 150;
 	/** Shotgun.Shoot: pellets per shot, and how far each is turned about every axis, in degrees. */
@@ -95,6 +100,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	private final List<Explosion> explosions = new ArrayList<>();
 	private final List<Shell> shells = new ArrayList<>();
 	private final List<Pellet> pellets = new ArrayList<>();
+	private final List<Core> cores = new ArrayList<>();
 	private final Revolver.Input input = new Revolver.Input();
 	private final RandomSource random = RandomSource.create();
 	private final Map<Shotgun.Variant, Shotgun> shotguns = new EnumMap<>(Shotgun.Variant.class);
@@ -123,7 +129,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 
 	private ClientCombat() {
 		for (Shotgun.Variant variant : Shotgun.Variant.values()) {
-			this.shotguns.put(variant, new Shotgun(variant));
+			this.shotguns.put(variant, new Shotgun(variant, this.sounds));
 		}
 		for (Revolver.Variant variant : Revolver.Variant.values()) {
 			this.revolvers.put(variant, new Revolver(variant, this.sounds));
@@ -148,6 +154,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			this.explosions.clear();
 			this.shells.clear();
 			this.pellets.clear();
+			this.cores.clear();
 			return;
 		}
 		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
@@ -200,6 +207,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			pellet.update(dt, minecraft.level, player, this);
 		}
 		this.pellets.removeIf(pellet -> pellet.removed);
+		for (Core core : List.copyOf(this.cores)) {
+			if (!core.removed) {
+				core.update(dt, minecraft.level, player, this);
+			}
+		}
+		this.cores.removeIf(core -> core.removed);
 		for (Explosion explosion : List.copyOf(this.explosions)) {
 			explosion.update(dt, minecraft.level, player, this);
 		}
@@ -258,7 +271,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		Shotgun shotgun = shotgun(this.held);
 		FirstPersonWeapons.ShotgunState shotgunDisplay = shotgun == null
 			? FirstPersonWeapons.ShotgunState.NONE
-			: new FirstPersonWeapons.ShotgunState(shotgun.heat());
+			: new FirstPersonWeapons.ShotgunState(shotgun.heat(), shotgun.meter(), shotgun.charge(), shotgun.reloadingCore(), shotgun.jitter());
 		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, this);
 	}
 
@@ -309,7 +322,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 					this.sounds.play("shotgun_heat_release", 1, 1);
 				}
 			}
-			case "ClickSound" -> this.sounds.play("shotgun_click", 0.5F, this.sounds.randomPitch(0.95F, 1.05F));
+			case "ClickSound" -> {
+				boolean tinted = shotgun != null && shotgun.meterTinted();
+				this.sounds.play(tinted ? "shotgun_click_charge" : "shotgun_click", 0.5F, this.sounds.randomPitch(0.95F, 1.05F));
+			}
+			// Shotgun.Smack, as the reload knocks the next core in.
+			case "Smack" -> this.sounds.play("shotgun_smack", 0.75F, this.sounds.randomPitch(2, 2.2F));
 			default -> {
 			}
 		}
@@ -446,7 +464,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			sharpshooterBeam(minecraft.level, player, eye, look, muzzle(eye, look, player), ricochets);
 			return;
 		}
-		List<Hitscan.Hit> hits = Hitscan.cast(minecraft.level, player, eye, look, RANGE, this.coins);
+		List<Hitscan.Hit> hits = Hitscan.cast(minecraft.level, player, eye, look, RANGE, this.coins, this.cores);
 		Vec3 end = hits.getLast().position();
 		int bodiesLeft = charged ? 3 : 1;
 		for (Hitscan.Hit hit : hits) {
@@ -467,6 +485,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 				hit.coin().hit(hit.coin().power, new HashSet<>(), charged ? Effects.BeamStyle.SUPER : Effects.BeamStyle.COIN);
 				end = hit.position();
 				break;
+			} else if (hit.kind() == Hitscan.Kind.CORE) {
+				coreShot(hit.core());
+				if (!charged) {
+					end = hit.position();
+					break;
+				}
 			} else {
 				if (hit.kind() == Hitscan.Kind.BLOCK) {
 					this.effects.impact(minecraft.level, hit.position());
@@ -490,10 +514,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	 * ricochets left, a wall sends it on 0.1 s later, reflected and aimed at the nearest enemy near its path.
 	 */
 	private void sharpshooterBeam(Level level, LocalPlayer player, Vec3 from, Vec3 direction, Vec3 drawFrom, int ricochets) {
-		List<Hitscan.Hit> hits = Hitscan.cast(level, player, from, direction, RANGE, this.coins);
+		List<Hitscan.Hit> hits = Hitscan.cast(level, player, from, direction, RANGE, this.coins, this.cores);
 		Vec3 end = hits.getLast().position();
 		for (Hitscan.Hit hit : hits) {
-			if (hit.kind() == Hitscan.Kind.ENTITY) {
+			if (hit.kind() == Hitscan.Kind.CORE) {
+				coreShot(hit.core());
+			} else if (hit.kind() == Hitscan.Kind.ENTITY) {
 				damage(level, hit.entity(), hit.head() ? 2 : 1, hit.head(), hit.position());
 				UltraMovement movement = UltraController.INSTANCE.movement();
 				if (movement != null) {
@@ -678,6 +704,23 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			return;
 		}
 
+		// After coins, a core the coin can see within 100 units of the player: it makes a super explosion. The
+		// coin's own beam is only drawn, so the core just goes off; a piercing shot the coin passes on is a real
+		// shot at the core, with the parry flash a revolver shot on a core brings.
+		Core core = this.cores.stream()
+			.filter(c -> !c.removed && c.position.distanceTo(player.position()) < CORE_TARGET_RANGE && Hitscan.clear(level, player, coin.position, c.position))
+			.min(Comparator.comparingDouble(c -> c.position.distanceToSqr(coin.position)))
+			.orElse(null);
+		if (core != null) {
+			this.effects.beam(coin.position, core.position, coin.beam);
+			if (coin.beam == Effects.BeamStyle.COIN) {
+				superExplode(core);
+			} else {
+				coreShot(core);
+			}
+			return;
+		}
+
 		LivingEntity target = coinTarget(coin, level, player);
 		if (target != null) {
 			Vec3 head = target.getEyePosition();
@@ -841,8 +884,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		if (wall.getType() != HitResult.Type.MISS) {
 			position = wall.getLocation().subtract(look.scale(0.1 * S));
 		}
+		List<Explosion.Settings> blast = Explosion.prefab("explosion_wave_knuckleblaster");
+		if (blast.isEmpty()) {
+			return;
+		}
 		Quaternionf rotation = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
-		Explosion explosion = new Explosion(Explosion.KNUCKLEBLASTER, position, rotation, look);
+		Explosion explosion = new Explosion(blast.getFirst(), position, rotation, look);
 		this.explosions.add(explosion);
 		this.effects.wave(explosion);
 		movement.shake(explosion.cameraShake(eye));
@@ -1008,12 +1055,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		if (animator != null) {
 			animator.setTrigger("Fire");
 		}
-		FirstPersonWeapons.Frame barrel = FirstPersonWeapons.INSTANCE.weaponBone(weapon, "ShootPoint L");
-		if (barrel != null) {
-			Vec3 cameraPosition = minecraft.gameRenderer.mainCamera().position();
-			Vec3 at = world(camera, barrel.position()).scale(S).add(cameraPosition);
-			this.effects.muzzleFlash(at, new Quaternionf(camera).mul(mirrored(barrel)));
-		}
+		muzzleFlash(weapon);
 	}
 
 	private double spread(double range) {
@@ -1052,7 +1094,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			return;
 		}
 		if (pellet.boosted) {
-			explode(pellet.position, pellet.direction(), true);
+			explode(EXPLOSION, pellet.position, pellet.direction(), true);
 			return;
 		}
 		shotgunHit(level, enemy, PELLET_DAMAGE, pellet.position);
@@ -1062,7 +1104,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	@Override
 	public void wall(Pellet pellet) {
 		if (pellet.boosted) {
-			explode(pellet.position, pellet.direction(), true);
+			explode(EXPLOSION, pellet.position, pellet.direction(), true);
 		} else {
 			bulletSpark(pellet.position);
 		}
@@ -1187,25 +1229,125 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		return nearest != null ? nearest : eye.add(look.scale(1000 * S));
 	}
 
+	/** "Explosion": the standard explosion, where a core or a boosted projectile blew up. */
+	static final String EXPLOSION = "explosion";
+	/** "Explosion Super": a core shot with a revolver. */
+	static final String EXPLOSION_SUPER = "explosion_super";
+
 	/**
-	 * The standard explosion ("Explosion") where something blew up, facing the way it was going: its blast and its
-	 * push wave, its sound and its look.
+	 * An explosion prefab where something blew up, facing the way it was going (or the world's way): its
+	 * Explosions, each shaking the camera, its sound and its look.
 	 */
-	private void explode(Vec3 at, @Nullable Vec3 facing, boolean boosted) {
+	private void explode(String prefab, Vec3 at, @Nullable Vec3 facing, boolean boosted) {
+		UltraModel model = UltraModel.get(prefab);
+		if (model == null) {
+			return;
+		}
 		Quaternionf rotation = facing == null ? new Quaternionf()
 			: new Quaternionf().lookAlong((float)facing.x, (float)facing.y, (float)facing.z, 0, 1, 0).conjugate();
-		Explosion blast = new Explosion(Explosion.STANDARD, at, rotation, null, boosted);
-		Explosion wave = new Explosion(Explosion.STANDARD_WAVE, at, rotation, null, boosted);
-		this.explosions.add(blast);
-		this.explosions.add(wave);
-		this.effects.explosion(blast, wave);
+		List<Explosion> parts = new ArrayList<>();
+		for (Explosion.Settings settings : Explosion.prefab(prefab)) {
+			parts.add(new Explosion(settings, at, rotation, null, boosted));
+		}
+		this.explosions.addAll(parts);
+		this.effects.explosion(new ExplosionLook(model, parts, at, rotation));
 		UltraMovement movement = UltraController.INSTANCE.movement();
 		if (movement != null) {
 			Vec3 camera = Minecraft.getInstance().gameRenderer.mainCamera().position();
-			movement.shake(Math.max(blast.cameraShake(camera), wave.cameraShake(camera)));
+			double shake = 0;
+			for (Explosion explosion : parts) {
+				shake = Math.max(shake, explosion.cameraShake(camera));
+			}
+			movement.shake(shake);
 		}
 		// The explosion's RandomPitch: up to a quarter either way.
-		this.sounds.play("explosion", 1, this.sounds.randomPitch(0.75F, 1.25F));
+		this.sounds.play(prefab, 1, this.sounds.randomPitch(0.75F, 1.25F));
+	}
+
+	/**
+	 * Shotgun.ShootSinks: a core out of the camera along the aim, tilted up by the charge, at 10 to 70 units a
+	 * second and tumbling; the throw sounds (the core's quieter, the gun's louder, the harder it's thrown), a
+	 * camera shake and a muzzle flash.
+	 */
+	@Override
+	public void throwCore(Shotgun.Variant variant, double force) {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (player == null || movement == null) {
+			return;
+		}
+		Vec3 eye = movement.eyePosition();
+		Vec3 look = player.getLookAngle();
+		Vec3 aim = look.add(0, force * 0.002, 0);
+		Quaternionf tumble = new Quaternionf().rotateXYZ(this.random.nextFloat() * 6.2831855F, this.random.nextFloat() * 6.2831855F, this.random.nextFloat() * 6.2831855F);
+		Vector3f spin;
+		do {
+			spin = new Vector3f(this.random.nextFloat() * 2 - 1, this.random.nextFloat() * 2 - 1, this.random.nextFloat() * 2 - 1);
+		} while (spin.lengthSquared() > 1);
+		this.cores.add(new Core(eye.add(look.scale(0.5 * S)), aim.scale(force + 10), tumble, spin.mul((float)(force * 3))));
+		double share = force / Shotgun.MAX_FORCE;
+		this.sounds.play("shotgun_core_throw", (float)(0.45 * Math.sqrt(1 - share * share)), this.sounds.randomPitch(0.95F, 1.05F));
+		this.sounds.play("shotgun_shoot", (float)(0.45 * share), this.sounds.randomPitch(0.75F, 0.85F));
+		movement.shake(1);
+		FirstPersonWeapons.Weapon weapon = FirstPersonWeapons.Weapon.SHOTGUN_CORE_EJECT;
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon);
+		if (animator != null) {
+			animator.setTrigger("Secondary Fire");
+		}
+		muzzleFlash(weapon);
+	}
+
+	private void muzzleFlash(FirstPersonWeapons.Weapon weapon) {
+		Minecraft minecraft = Minecraft.getInstance();
+		FirstPersonWeapons.Frame barrel = FirstPersonWeapons.INSTANCE.weaponBone(weapon, "ShootPoint L");
+		if (barrel != null) {
+			Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
+			Vec3 at = world(camera, barrel.position()).scale(S).add(minecraft.gameRenderer.mainCamera().position());
+			this.effects.muzzleFlash(at, new Quaternionf(camera).mul(mirrored(barrel)));
+		}
+	}
+
+	/** Grenade.Collision: a core that touches a wall or an enemy explodes; an enemy gets a moment's hitstop. */
+	@Override
+	public void coreLanded(Core core, boolean enemy) {
+		if (enemy) {
+			this.hitstopLeft = Math.max(this.hitstopLeft, CORE_HITSTOP);
+			ClientPlayNetworking.send(new HitstopPayload((int)(CORE_HITSTOP * 1000)));
+		}
+		explode(EXPLOSION, core.position, null, false);
+	}
+
+	/** RevolverBeam on a core: the parry flash, and a super explosion. */
+	private void coreShot(Core core) {
+		if (core.removed) {
+			return;
+		}
+		parryFlash();
+		ClientPlayNetworking.send(new HitstopPayload((int)(PARRY_HITSTOP * 1000)));
+		superExplode(core);
+	}
+
+	/** A revolver shot (or a coin's) on a core: it makes a super explosion. */
+	private void superExplode(Core core) {
+		if (core.removed) {
+			return;
+		}
+		core.removed = true;
+		explode(EXPLOSION_SUPER, core.position, null, false);
+	}
+
+	@Override
+	public List<Core> cores() {
+		return this.cores;
+	}
+
+	@Override
+	public void touched(Explosion explosion) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (movement != null && explosion.settings.touchShake() > 0) {
+			movement.shake(explosion.settings.touchShake());
+		}
 	}
 
 	// ---- health ---------------------------------------------------------------------------------
@@ -1220,6 +1362,6 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	}
 
 	public void render(LevelRenderContext context) {
-		this.effects.render(context, this.coins, this.shells, this.pellets);
+		this.effects.render(context, this.coins, this.shells, this.pellets, this.cores);
 	}
 }

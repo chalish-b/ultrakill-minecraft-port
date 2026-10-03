@@ -24,6 +24,8 @@ final class Hitscan {
 	enum Kind {
 		ENTITY,
 		COIN,
+		/** One of the player's cores, by the trigger sphere around it. */
+		CORE,
 		BLOCK,
 		/** The ray reached its range without hitting a block. */
 		END
@@ -32,10 +34,16 @@ final class Hitscan {
 	/**
 	 * @param face the side of the block a {@link Kind#BLOCK} hit struck
 	 */
-	record Hit(Kind kind, Vec3 position, double distance, @Nullable LivingEntity entity, @Nullable Coin coin, boolean head, @Nullable Direction face) {
+	record Hit(
+		Kind kind, Vec3 position, double distance, @Nullable LivingEntity entity, @Nullable Coin coin, @Nullable Core core, boolean head, @Nullable Direction face
+	) {
 	}
 
 	static List<Hit> cast(Level level, Entity shooter, Vec3 from, Vec3 direction, double range, List<Coin> coins) {
+		return cast(level, shooter, from, direction, range, coins, List.of());
+	}
+
+	static List<Hit> cast(Level level, Entity shooter, Vec3 from, Vec3 direction, double range, List<Coin> coins, List<Core> cores) {
 		Vec3 to = from.add(direction.scale(range));
 		BlockHitResult block = level.clip(new ClipContext(from, to, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, shooter));
 		boolean blocked = block.getType() != HitResult.Type.MISS;
@@ -45,7 +53,7 @@ final class Hitscan {
 		for (Entity entity : level.getEntities(shooter, new AABB(from, end).inflate(1), e -> e instanceof LivingEntity living && living.isAlive() && !e.isSpectator())) {
 			AABB box = entity.getBoundingBox().inflate(entity.getPickRadius());
 			Optional<Vec3> clip = box.contains(from) ? Optional.of(from) : box.clip(from, end);
-			clip.ifPresent(point -> hits.add(new Hit(Kind.ENTITY, point, point.distanceTo(from), (LivingEntity)entity, null, isHead(entity, point), null)));
+			clip.ifPresent(point -> hits.add(new Hit(Kind.ENTITY, point, point.distanceTo(from), (LivingEntity)entity, null, null, isHead(entity, point), null)));
 		}
 		for (Coin coin : coins) {
 			if (!coin.hittable()) {
@@ -57,11 +65,28 @@ final class Hitscan {
 			}
 			Vec3 nearest = from.add(direction.scale(along));
 			if (nearest.distanceTo(coin.position) <= Coin.HIT_RADIUS) {
-				hits.add(new Hit(Kind.COIN, nearest, along, null, coin, false, null));
+				hits.add(new Hit(Kind.COIN, nearest, along, null, coin, null, false, null));
 			}
 		}
+		for (Core core : cores) {
+			if (core.removed) {
+				continue;
+			}
+			Vec3 offset = core.position.subtract(from);
+			double along = offset.dot(direction);
+			double off = offset.subtract(direction.scale(along)).length();
+			if (off > Core.HIT_RADIUS) {
+				continue;
+			}
+			double entry = along - Math.sqrt(Core.HIT_RADIUS * Core.HIT_RADIUS - off * off);
+			if (entry < 0 && offset.length() > Core.HIT_RADIUS || entry > from.distanceTo(end)) {
+				continue;
+			}
+			double at = Math.max(entry, 0);
+			hits.add(new Hit(Kind.CORE, from.add(direction.scale(at)), at, null, null, core, false, null));
+		}
 		hits.sort(Comparator.comparingDouble(Hit::distance));
-		hits.add(new Hit(blocked ? Kind.BLOCK : Kind.END, end, from.distanceTo(end), null, null, false, blocked ? block.getDirection() : null));
+		hits.add(new Hit(blocked ? Kind.BLOCK : Kind.END, end, from.distanceTo(end), null, null, null, false, blocked ? block.getDirection() : null));
 		return hits;
 	}
 

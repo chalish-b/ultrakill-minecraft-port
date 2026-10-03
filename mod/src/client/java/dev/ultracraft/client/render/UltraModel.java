@@ -59,6 +59,10 @@ public final class UltraModel {
 		String name, float[] rect, Identifier texture, float[] color, ImageType type, float[] border, float[] uvBorder,
 		FillMethod fillMethod, int fillOrigin, boolean fillClockwise, float fillAmount
 	) {
+		/** The same image laid out over another rect, as a Slider moves its fill. */
+		public Image withRect(float[] rect) {
+			return new Image(this.name, rect, this.texture, this.color, this.type, this.border, this.uvBorder, this.fillMethod, this.fillOrigin, this.fillClockwise, this.fillAmount);
+		}
 	}
 
 	public enum FillMethod {
@@ -96,11 +100,12 @@ public final class UltraModel {
 	private final List<Sprite> sprites;
 	private final List<Canvas> canvases;
 	private final JsonObject scripts;
+	private final JsonArray particles;
 	private final Animator.@Nullable Data animation;
 
 	private UltraModel(
 		Vector3f origin, String[] names, int[] parents, Pose rest, List<Part> parts, List<Quad> quads, List<Sprite> sprites, List<Canvas> canvases,
-		JsonObject scripts, Animator.@Nullable Data animation
+		JsonObject scripts, JsonArray particles, Animator.@Nullable Data animation
 	) {
 		this.origin = origin;
 		this.names = names;
@@ -111,6 +116,7 @@ public final class UltraModel {
 		this.sprites = sprites;
 		this.canvases = canvases;
 		this.scripts = scripts;
+		this.particles = particles;
 		this.animation = animation;
 	}
 
@@ -149,6 +155,25 @@ public final class UltraModel {
 	/** The values extracted from an ULTRAKILL script on the model ("revolver", "cylinder"), if it has one. */
 	public @Nullable JsonObject script(String name) {
 		return this.scripts.has(name) ? this.scripts.getAsJsonObject(name) : null;
+	}
+
+	/** The values of every script of a kind on the model (Explosion, ScaleNFade and the like), each with its bone; empty if none. */
+	public JsonArray scripts(String kind) {
+		return this.scripts.has(kind) ? this.scripts.getAsJsonArray(kind) : new JsonArray();
+	}
+
+	/** The model's particle systems' settings, each with its bone and its materials. */
+	public JsonArray particles() {
+		return this.particles;
+	}
+
+	/** The bone's parent, or -1 for the root. */
+	public int parent(int bone) {
+		return this.parents[bone];
+	}
+
+	public int bones() {
+		return this.parents.length;
 	}
 
 	public void submit(PoseStack poseStack, SubmitNodeCollector collector, int light) {
@@ -209,6 +234,20 @@ public final class UltraModel {
 	public record Mesh(Identifier texture, float[] positions, float[] normals, float[] uvs, int[] indices) {
 	}
 
+	public int meshCount() {
+		return this.parts.size();
+	}
+
+	/** The bone the {@code index}th mesh is on (a mesh that isn't skinned follows one bone). */
+	public int meshBone(int index) {
+		return this.parts.get(index).joints[0];
+	}
+
+	/** The {@code index}th mesh's material: its colors, keywords, blending and texture's mean alpha. */
+	public JsonObject meshMaterial(int index) {
+		return this.parts.get(index).materialValues;
+	}
+
 	/** The {@code index}th mesh, for drawing it some other way than {@link #submit}. */
 	public Mesh mesh(int index) {
 		Part part = this.parts.get(index);
@@ -231,7 +270,7 @@ public final class UltraModel {
 	 * tinted by {@code emissiveColor} (ARGB).
 	 */
 	private record Part(
-		String material, Identifier texture, float[] positions, float[] normals, float[] uvs, int[] indices,
+		String material, JsonObject materialValues, Identifier texture, float[] positions, float[] normals, float[] uvs, int[] indices,
 		int[] joints, Matrix4f[] binds, int influences, int[] jointIndices, float[] jointWeights, @Nullable RenderType emissive, int emissiveColor
 	) {
 		/** Positions and normals in camera space for the given bone matrices. */
@@ -327,6 +366,7 @@ public final class UltraModel {
 				}
 				parts.add(new Part(
 					part.get("material").getAsString(),
+					part.has("materialValues") ? part.getAsJsonObject("materialValues") : new JsonObject(),
 					Identifier.parse(part.get("texture").getAsString()),
 					floats(part.getAsJsonArray("positions")),
 					floats(part.getAsJsonArray("normals")),
@@ -381,7 +421,8 @@ public final class UltraModel {
 				canvases.add(new Canvas(canvas.get("bone").getAsInt(), images));
 			}
 			Animator.Data animation = json.has("animator") ? Animator.Data.fromJson(json.getAsJsonObject("animator")) : null;
-			return Optional.of(new UltraModel(new Vector3f(origin), names, parents, rest, parts, quads, sprites, canvases, json.getAsJsonObject("scripts"), animation));
+			return Optional.of(new UltraModel(new Vector3f(origin), names, parents, rest, parts, quads, sprites, canvases, json.getAsJsonObject("scripts"),
+				json.has("particles") ? json.getAsJsonArray("particles") : new JsonArray(), animation));
 		} catch (IOException | RuntimeException e) {
 			Ultracraft.LOGGER.warn("Couldn't load model {}", id, e);
 			return Optional.empty();

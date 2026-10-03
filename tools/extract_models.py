@@ -43,6 +43,7 @@ MODELS = {
     "knuckleblaster": ("Arm Red", "Punch", (0, -0.225, 0)),
     "coin": ("Coin", "Coin", None),
     "shotgun_shell": ("ShotgunShell", "ShotgunShell", None),
+    "core": ("Grenade", "Grenade", None),
     "explosion_wave_knuckleblaster": ("Explosion Wave Knuckleblaster", "RandomPitch", None),
 }
 
@@ -53,6 +54,7 @@ REFERENCED = {
     "explosion": ("Punch", "Arm Blue", "parriedProjectileHitObject"),
     "shotgun_muzzle_flash": ("Shotgun", "Shotgun Grenade", "muzzleFlash"),
     "bullet_spark": ("Projectile", "Shotgun Projectile", "explosionEffect"),
+    "explosion_super": ("Grenade", "Grenade", "superExplosion"),
 }
 NESTED = {
     "explosion_chunk": ("explosion", "Explosion", "explosionChunk"),
@@ -191,6 +193,72 @@ class Rig:
             self._walk(child.deref().read(), index, active, parent_is_rect=is_rect)
 
 
+def material_values(material_pptr, texture_path):
+    """What the mod needs to draw a material its own way: its colors, keywords and blending, and its texture's mean alpha."""
+    from PIL import Image
+    tree = material_pptr.deref().read_typetree()
+    props = tree["m_SavedProperties"]
+    colors = {k: [v["r"], v["g"], v["b"], v["a"]] for k, v in props["m_Colors"] if k in ("_Color", "_EmissionColor", "_TintColor")}
+    floats = {k: v for k, v in props["m_Floats"] if k in ("_SrcBlend", "_DstBlend", "_BlendMode", "_Mode", "_Cull", "_CullMode")}
+    alpha = np.array(Image.open(texture_path).convert("RGBA"))[..., 3].mean() / 255
+    return {"colors": colors, "floats": floats, "keywords": tree.get("m_ValidKeywords") or [], "textureAlpha": round(float(alpha), 4)}
+
+
+def curve_value(curve):
+    """A ParticleSystem MinMaxCurve: a constant, a range between two constants, or a curve's keys times its scalar."""
+    state = curve["minMaxState"]
+    if state == 0:
+        return {"constant": curve["scalar"]}
+    if state == 3:
+        return {"min": curve["minScalar"], "max": curve["scalar"]}
+    return {"scalar": curve["scalar"], "keys": [[k["time"], k["value"]] for k in curve["maxCurve"]["m_Curve"]]}
+
+
+def gradient_value(gradient):
+    return {
+        "colors": [[gradient[f"ctime{i}"] / 65535, gradient[f"key{i}"]["r"], gradient[f"key{i}"]["g"], gradient[f"key{i}"]["b"]] for i in range(gradient["m_NumColorKeys"])],
+        "alphas": [[gradient[f"atime{i}"] / 65535, gradient[f"key{i}"]["a"]] for i in range(gradient["m_NumAlphaKeys"])],
+    }
+
+
+def color_value(color):
+    """A ParticleSystem MinMaxGradient: a color, a gradient, or a range between two colors."""
+    state = color["minMaxState"]
+    rgba = lambda c: [c["r"], c["g"], c["b"], c["a"]]  # noqa: E731
+    if state == 0:
+        return {"color": rgba(color["maxColor"])}
+    if state == 2:
+        return {"min": rgba(color["minColor"]), "max": rgba(color["maxColor"])}
+    return {"gradient": gradient_value(color["maxGradient"])}
+
+
+def particle_values(system):
+    """A ParticleSystem's settings, as far as the mod's particles go."""
+    t = system.read_typetree()
+    main, emission, shape = t["InitialModule"], t["EmissionModule"], t["ShapeModule"]
+    values = {
+        "duration": t["lengthInSec"], "looping": bool(t["looping"]), "scalingMode": t["scalingMode"],
+        "lifetime": curve_value(main["startLifetime"]), "speed": curve_value(main["startSpeed"]),
+        "size": curve_value(main["startSize"]), "color": color_value(main["startColor"]),
+        "gravity": curve_value(main["gravityModifier"]), "rotation": curve_value(main["startRotation"]),
+        "rate": curve_value(emission["rateOverTime"]),
+        "bursts": [[b["time"], curve_value(b["countCurve"])] for b in emission["m_Bursts"]],
+        "shape": {"type": shape["type"], "radius": shape["radius"]["value"], "angle": shape["angle"],
+                  "thickness": shape["radiusThickness"]} if shape["enabled"] else None,
+    }
+    if t["SizeModule"]["enabled"]:
+        values["sizeOverLifetime"] = curve_value(t["SizeModule"]["curve"])
+    if t["ColorModule"]["enabled"]:
+        values["colorOverLifetime"] = color_value(t["ColorModule"]["gradient"])
+    trail = t["TrailModule"]
+    if trail["enabled"]:
+        values["trail"] = {"ratio": trail["ratio"], "lifetime": curve_value(trail["lifetime"]),
+                           "widthOverTrail": curve_value(trail["widthOverTrail"]),
+                           "colorOverLifetime": color_value(trail["colorOverLifetime"]),
+                           "sizeAffectsWidth": bool(trail["sizeAffectsWidth"])}
+    return values
+
+
 def texture_name(material):
     for key, env in material.m_SavedProperties.m_TexEnvs:
         if key == "_MainTex" and env.m_Texture.path_id:
@@ -262,6 +330,7 @@ class Exporter:
                 "texture": texture,
                 "textureFile": tex_file,
                 "material": material.m_Name,
+                "materialValues": material_values(renderer.m_Materials[i], self.textures[tex_file]),
                 "positions": np.round(positions[used], 5).flatten().tolist(),
                 "normals": np.round(normals[used], 4).flatten().tolist(),
                 "uvs": np.round(np.stack([u, v], axis=1), 5).flatten().tolist(),
@@ -277,6 +346,21 @@ class Exporter:
             if emissive:
                 parts[-1]["emissive"] = emissive
         return parts
+
+    def particle_textures(self, renderer):
+        """Each of a particle renderer's materials' textures (the particles', then the trails'), or None."""
+        textures = []
+        for material in renderer.m_Materials:
+            tex_pptr = texture_name(material.deref().read())[0] if material.path_id else None
+            textures.append(self.texture(tex_pptr)[0] if tex_pptr else None)
+        return textures
+
+    def particle_materials(self, renderer):
+        values = []
+        for material in renderer.m_Materials:
+            tex_pptr = texture_name(material.deref().read())[0] if material.path_id else None
+            values.append(material_values(material, self.textures[self.texture(tex_pptr)[1]]) if tex_pptr else None)
+        return values
 
     def emissive(self, material_pptr):
         """The glow texture of a material that has ULTRAKILL/Master's EMISSIVE keyword, if any."""
@@ -312,11 +396,15 @@ def export_parts(exporter, rig, glow_colors):
             kind = obj.type.name
             if kind == "ParticleSystemRenderer":
                 r = obj.read()
-                textures = []
-                for material in r.m_Materials:
-                    tex_pptr = texture_name(material.deref().read())[0] if material.path_id else None
-                    textures.append(exporter.texture(tex_pptr)[0] if tex_pptr else None)
-                particles.append({"name": go.m_Name, "bone": rig.index[transform_of(go).object_reader.path_id], "textures": textures})
+                system = next(x.component.deref() for x in go.m_Component if x.component.deref().type.name == "ParticleSystem")
+                particles.append({
+                    "name": go.m_Name,
+                    "bone": rig.index[transform_of(go).object_reader.path_id],
+                    "textures": exporter.particle_textures(r),
+                    "materials": exporter.particle_materials(r),
+                    "renderMode": obj.read_typetree()["m_RenderMode"],
+                    **particle_values(system),
+                })
                 continue
             if kind == "SkinnedMeshRenderer":
                 r = obj.read()
@@ -535,6 +623,24 @@ def export_scripts(exporter, rig, colors, placed):
                 }
             elif kind == "Coin":
                 scripts["coin"] = {"flash": coin_flash(exporter, obj.read().flash.deref().read())}
+            elif kind == "Explosion" and active:
+                tree = obj.read_typetree()
+                collider = next((x.component.deref().read() for x in go.m_Component if x.component.deref().type.name == "SphereCollider"), None)
+                scripts.setdefault("explosions", []).append({
+                    "bone": rig.index[transform_of(go).object_reader.path_id],
+                    "colliderRadius": collider.m_Radius if collider else 0,
+                    "chunks": bool(obj.read().explosionChunk.path_id) and not tree["lowQuality"],
+                    **{k: tree[k] for k in ("speed", "maxSize", "damage", "enemyDamageMultiplier", "pushForceMultiplier",
+                                            "halved", "canHit", "lowQuality", "unblockable", "ignite")},
+                })
+            elif kind in ("ScaleNFade", "SpriteController", "Screenshaker", "AlwaysLookAtCamera") and active:
+                tree = obj.read_typetree()
+                keys = {"ScaleNFade": ("scale", "fade", "ft", "scaleSpeed", "fadeSpeed"),
+                        "SpriteController": ("randomRotation", "blinking", "fadeSpeed", "shrinkSpeed"),
+                        "Screenshaker": ("amount", "oneTime"),
+                        "AlwaysLookAtCamera": ()}[kind]
+                entry = {"bone": rig.index[transform_of(go).object_reader.path_id], **{k: tree[k] for k in keys}}
+                scripts.setdefault(kind[0].lower() + kind[1:], []).append(entry)
             elif kind == "RevolverCylinder" and active:
                 tree = obj.read_typetree()
                 axis = tree["rotationAxis"]
