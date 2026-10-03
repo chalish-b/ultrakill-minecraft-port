@@ -1,0 +1,5 @@
+# Decompiled code, extracted game data and generated sources. Rebuilt by tools/extract.sh.
+reference/
+
+.DS_Store
+__pycache__/

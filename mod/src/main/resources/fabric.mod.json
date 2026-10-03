@@ -1,0 +1,32 @@
+{
+	"schemaVersion": 1,
+	"id": "ultracraft",
+	"version": "${version}",
+	"name": "ULTRACRAFT",
+	"description": "ULTRAKILL's movement and arsenal in Minecraft.",
+	"authors": [],
+	"license": "All-Rights-Reserved",
+	"icon": "assets/ultracraft/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"dev.ultracraft.Ultracraft"
+		],
+		"client": [
+			"dev.ultracraft.client.UltracraftClient"
+		]
+	},
+	"mixins": [
+		"ultracraft.mixins.json",
+		{
+			"config": "ultracraft.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
