@@ -25,6 +25,26 @@ Run the game with the mod:
 cd mod && ./gradlew runClient
 ```
 
+## Playing
+
+Singleplayer. ULTRAKILL movement is on by default and switches to Minecraft's in deep water, lava,
+on ladders, while flying, gliding or riding.
+
+| Key | |
+|---|---|
+| U | Toggle ULTRAKILL movement |
+| Shift | Dash |
+| Ctrl | Slide (on the ground) / slam (in the air) |
+| Space | Jump, wall jump (3 before landing) |
+| Left Alt | Sneak |
+
+All rebindable under Controls → ULTRACRAFT. `/ultracraft` shows the settings, and
+`/ultracraft <setting> <value>` changes one: `speedScale` (1 = ULTRAKILL relative to your body,
+1.944 = one ULTRAKILL unit per block), `stepMode ultrakill|minecraft`, `cameraTilt`, `screenShake`,
+`fovEffects`, `speedometer`, `debug`, `infiniteStamina`.
+
+## Rebuilding reference/
+
 Rebuild `reference/` (reads the ULTRAKILL install in the CrossOver Steam bottle; set
 `ULTRAKILL_DIR` to use another one):
 

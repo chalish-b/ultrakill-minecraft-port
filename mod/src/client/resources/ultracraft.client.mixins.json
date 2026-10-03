@@ -3,7 +3,13 @@
 	"package": "dev.ultracraft.client.mixin",
 	"compatibilityLevel": "JAVA_25",
 	"client": [
-		
+		"CameraMixin",
+		"GameRendererMixin",
+		"KeyboardInputMixin",
+		"LivingEntityMixin",
+		"LocalPlayerMixin",
+		"MinecraftMixin",
+		"PlayerTravelMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

@@ -1,7 +1,9 @@
 package dev.ultracraft;
 
+import dev.ultracraft.net.UltraStatePayload;
 import net.fabricmc.api.ModInitializer;
-
+import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.resources.Identifier;
 
 import org.slf4j.Logger;
@@ -17,11 +19,10 @@ public class Ultracraft implements ModInitializer {
 
 	@Override
 	public void onInitialize() {
-		// This code runs as soon as Minecraft is in a mod-load-ready state.
-		// However, some things (like resources) may still be uninitialized.
-		// Proceed with mild caution.
-
-		LOGGER.info("ULTRACRAFT loaded");
+		PayloadTypeRegistry.serverboundPlay().register(UltraStatePayload.TYPE, UltraStatePayload.CODEC);
+		ServerPlayNetworking.registerGlobalReceiver(UltraStatePayload.TYPE, (payload, context) ->
+			((UltraPlayer)context.player()).ultracraft$setUltraState(payload.active(), payload.crouched())
+		);
 	}
 
 	public static Identifier id(String path) {
