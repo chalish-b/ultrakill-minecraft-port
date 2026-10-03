@@ -62,6 +62,15 @@ public final class UltraMovement {
 	private static final double CLIMB_FORWARD = 0.6;
 	private static final double CLIMB_COOLDOWN = 0.1;
 
+	/** Jumps and landings are quieter than ULTRAKILL's, which stand out against Minecraft's sounds. */
+	private static final float JUMP_VOLUME = 0.5F;
+	private static final float LANDING_VOLUME = 0.5F;
+	/**
+	 * Landings slower than this (about a 2.5-block drop) sound like a footstep. Minecraft's terrain is full
+	 * of one- and two-block drops, where ULTRAKILL's landing sound would play every few steps.
+	 */
+	private static final double SOFT_LANDING_SPEED = -20;
+
 	private final LocalPlayer player;
 	final UltraBody body = new UltraBody();
 	final UltraCamera camera = new UltraCamera();
@@ -559,12 +568,14 @@ public final class UltraMovement {
 		if (!this.onGround) {
 			return;
 		}
-		if (this.fallSpeed > -50) {
-			this.sounds.play(Channel.GROUND, "landing", (float)(0.5 + this.fallSpeed * -0.01), this.sounds.randomPitch());
+		if (this.fallSpeed > SOFT_LANDING_SPEED) {
+			footstep(0.25F, true, 0);
+		} else if (this.fallSpeed > -50) {
+			this.sounds.play(Channel.GROUND, "landing", (float)(0.5 + this.fallSpeed * -0.01) * LANDING_VOLUME, this.sounds.randomPitch());
 			footstep(0.5F, true, 0);
 			footstep(0.5F, true, 1);
 		} else {
-			this.sounds.play("landing_heavy", 1, 1);
+			this.sounds.play("landing_heavy", LANDING_VOLUME, 1);
 			footstep(1, true, 0);
 			footstep(1, true, 1);
 		}
@@ -680,9 +691,9 @@ public final class UltraMovement {
 		this.notJumpingTimer = 0.25;
 		this.falling = true;
 		if (this.superJumpChance > 0) {
-			this.sounds.play(Channel.MAIN, "jump", 0.85F, 2);
+			this.sounds.play(Channel.MAIN, "jump", 0.85F * JUMP_VOLUME, 2);
 		} else {
-			this.sounds.play(Channel.MAIN, "jump", 0.75F, 1);
+			this.sounds.play(Channel.MAIN, "jump", 0.75F * JUMP_VOLUME, 1);
 		}
 		this.body.velocity = U.projectOnPlane(this.body.velocity, UP);
 		if (this.sliding) {
@@ -742,7 +753,7 @@ public final class UltraMovement {
 		if (this.heavyFall) {
 			this.slamStorage = true;
 		}
-		this.sounds.play(Channel.MAIN, "jump", 0.75F, 1 + 0.25F * this.currentWallJumps);
+		this.sounds.play(Channel.MAIN, "jump", 0.75F * JUMP_VOLUME, 1 + 0.25F * this.currentWallJumps);
 		if (this.currentWallJumps == 3) {
 			this.sounds.play(Channel.GROUND, "wall_jump_final", 0.75F, 1);
 		}
