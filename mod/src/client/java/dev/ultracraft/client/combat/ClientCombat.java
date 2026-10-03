@@ -8,6 +8,7 @@ import dev.ultracraft.client.movement.UltraMovement;
 import dev.ultracraft.client.movement.UltraSounds;
 import dev.ultracraft.client.render.FirstPersonWeapons;
 import dev.ultracraft.client.render.ScreenFlashes;
+import dev.ultracraft.client.render.animation.Animator;
 import dev.ultracraft.combat.Gore;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.PunchPayload;
@@ -40,7 +41,7 @@ import java.util.Map;
  * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the Feedbacker punch,
  * weapon charges (WeaponCharges) and the hitstop after a parry. Hits go to the server, which applies them.
  */
-public final class ClientCombat implements Revolver.Actions {
+public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.Events {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
@@ -58,6 +59,8 @@ public final class ClientCombat implements Revolver.Actions {
 	private double coinCharge = 400;
 	private int readyCoins = 4;
 	private double punchStamina = 2;
+	/** Punch.ready: cleared by a punch, set again by its animation's ReadyToPunch event. */
+	private boolean punchReady = true;
 	private double fistCooldown;
 	private double hitstopLeft;
 	private float lastHealth = -1;
@@ -102,7 +105,7 @@ public final class ClientCombat implements Revolver.Actions {
 		}
 		this.readyCoins = coins;
 		this.punchStamina = Math.min(this.punchStamina + 1.25 * dt, 2);
-		this.fistCooldown = Math.max(this.fistCooldown - dt, 0);
+		this.fistCooldown = Math.max(this.fistCooldown - 2 * dt, 0);
 		for (Coin coin : this.coins) {
 			coin.update(dt, minecraft.level, player);
 			if (coin.shot && !coin.removed) {
@@ -116,19 +119,20 @@ public final class ClientCombat implements Revolver.Actions {
 
 		boolean driving = UltraController.INSTANCE.isDriving(player);
 		updateHeld(driving ? variantOf(player.getMainHandItem()) : null);
-		FirstPersonWeapons.INSTANCE.update(dt, viewmodel(this.held), this.held == null ? 0 : this.revolvers.get(this.held).pierceShotCharge);
-		if (!driving) {
+		if (driving) {
+			healFeedback(player);
+			sampleInput(minecraft.options);
+			if (consumePunch() && this.punchReady && this.fistCooldown <= 0 && this.punchStamina >= 1) {
+				punch();
+			}
+			if (this.held != null) {
+				this.revolvers.get(this.held).update(dt, this.input, this);
+			}
+		} else {
 			this.lastHealth = -1;
-			return;
 		}
-		healFeedback(player);
-		sampleInput(minecraft.options);
-		if (consumePunch() && this.fistCooldown <= 0 && this.punchStamina >= 1) {
-			punch();
-		}
-		if (this.held != null) {
-			this.revolvers.get(this.held).update(dt, this.input, this);
-		}
+		// Animators run after gameplay code, as Unity's do, so what it set this frame plays this frame.
+		FirstPersonWeapons.INSTANCE.update(dt, viewmodel(this.held), this.held == null ? 0 : this.revolvers.get(this.held).pierceShotCharge, this);
 	}
 
 	private void updateHeld(Revolver.@Nullable Variant variant) {
@@ -140,8 +144,27 @@ public final class ClientCombat implements Revolver.Actions {
 		}
 		this.held = variant;
 		this.wasFire2 = false;
-		if (variant != null) {
-			FirstPersonWeapons.INSTANCE.equip();
+		FirstPersonWeapons.Weapon weapon = viewmodel(variant);
+		if (variant != null && weapon != null) {
+			this.revolvers.get(variant).equip();
+			FirstPersonWeapons.INSTANCE.equip(weapon);
+		}
+	}
+
+	@Override
+	public void weaponEvent(FirstPersonWeapons.Weapon weapon, String function) {
+		if (function.equals("ReadyGun")) {
+			this.revolvers.get(weapon == FirstPersonWeapons.Weapon.REVOLVER_PIERCER ? Revolver.Variant.PIERCER : Revolver.Variant.MARKSMAN).readyGun();
+		}
+	}
+
+	@Override
+	public void armEvent(String function) {
+		switch (function) {
+			case "ActiveStart" -> ClientPlayNetworking.send(new PunchPayload());
+			case "ReadyToPunch" -> this.punchReady = true;
+			default -> {
+			}
 		}
 	}
 
@@ -211,7 +234,11 @@ public final class ClientCombat implements Revolver.Actions {
 			this.sounds.play("revolver_super", 1, 1);
 		}
 		movement.kickFov(charged ? 1 / 20.0 : 1 / 40.0);
-		FirstPersonWeapons.INSTANCE.recoil(charged);
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(viewmodel(variant));
+		if (animator != null) {
+			animator.setFloat("RandomChance", this.random.nextFloat());
+			animator.setTrigger(charged ? "ChargeShoot" : "Shoot");
+		}
 
 		Vec3 end = hits.getLast().position();
 		int bodiesLeft = charged ? 3 : 1;
@@ -270,6 +297,11 @@ public final class ClientCombat implements Revolver.Actions {
 		Vec3 velocity = player.getLookAngle().scale(20).add(0, 15, 0).add(movement.velocity());
 		this.coins.add(new Coin(movement.eyePosition().add(0, -0.5 * S, 0), velocity, player.getYRot(), player.getXRot()));
 		this.sounds.play("coin_throw", 1, 1);
+		// Punch.CoinFlip
+		Animator arm = FirstPersonWeapons.INSTANCE.armAnimator();
+		if (arm != null && this.punchReady) {
+			arm.setTrigger("CoinFlip");
+		}
 	}
 
 	@Override
@@ -327,17 +359,30 @@ public final class ClientCombat implements Revolver.Actions {
 
 	// ---- Feedbacker ---------------------------------------------------------------------------
 
+	/** Punch.PunchStart: the hit itself goes out on the animation's ActiveStart event. */
 	private void punch() {
+		this.punchReady = false;
 		this.fistCooldown = 0.5;
 		this.punchStamina -= 1;
 		this.sounds.play("punch_swoosh", 1, 1);
-		FirstPersonWeapons.INSTANCE.punch();
-		ClientPlayNetworking.send(new PunchPayload());
+		Animator arm = FirstPersonWeapons.INSTANCE.armAnimator();
+		if (arm != null) {
+			arm.setFloat("PunchRandomizer", this.random.nextFloat());
+			arm.setTrigger("Punch");
+		}
 	}
 
 	private void onPunchResult(PunchResultPayload result) {
 		Minecraft minecraft = Minecraft.getInstance();
 		UltraMovement movement = UltraController.INSTANCE.movement();
+		Animator arm = FirstPersonWeapons.INSTANCE.armAnimator();
+		if (arm != null) {
+			if (result.result() == PunchResultPayload.Result.PARRY) {
+				arm.play("Hook", 0.065);
+			} else {
+				arm.play(arm.getFloat("PunchRandomizer") < 0.5F ? "Jab" : "Jab2", 0.075);
+			}
+		}
 		if (result.result() == PunchResultPayload.Result.PARRY) {
 			this.sounds.play("parry", 1, 1);
 			this.sounds.play("parry_ricochet", 1, 1);

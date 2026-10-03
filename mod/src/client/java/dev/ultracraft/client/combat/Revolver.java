@@ -23,16 +23,14 @@ final class Revolver {
 		void spendCoin();
 	}
 
-	/** The Shoot animation's ReadyGun event comes about this long after the shot. */
-	private static final double GUN_READY_DELAY = 0.25;
-
 	final Variant variant;
 	private final UltraSounds sounds;
 	private final UltraSounds.Loop chargeLoop;
 	private final UltraSounds.Loop rechargeLoop;
 	private boolean shootReady = true;
 	private double shootCharge = 100;
-	private double gunReadyTimer;
+	/** Set by the PickUp and Shoot animations' ReadyGun event. */
+	private boolean gunReady;
 	private boolean pierceReady = true;
 	private double pierceCharge = 100;
 	/** How far the piercer's shot is charged, 0 to 100. */
@@ -55,9 +53,6 @@ final class Revolver {
 				this.shootReady = true;
 			}
 		}
-		if (this.gunReadyTimer > 0) {
-			this.gunReadyTimer -= dt;
-		}
 		if (!this.pierceReady) {
 			double rate = this.variant == Variant.PIERCER ? 40 : 480;
 			this.pierceCharge += rate * dt;
@@ -74,9 +69,8 @@ final class Revolver {
 
 	/** Revolver.Update's firing logic, while held. */
 	void update(double dt, Input input, Actions actions) {
-		boolean gunReady = this.gunReadyTimer <= 0;
 		if (this.variant == Variant.PIERCER) {
-			if (gunReady) {
+			if (this.gunReady) {
 				double rate = 175;
 				if ((input.fire2Released || input.fire1Held) && this.shootReady && this.pierceShotCharge == 100) {
 					shoot(actions, true);
@@ -103,7 +97,7 @@ final class Revolver {
 			actions.throwCoin();
 			this.pierceCharge = 0;
 			this.pierceReady = false;
-		} else if (gunReady && input.fire1Held && this.shootReady) {
+		} else if (this.gunReady && input.fire1Held && this.shootReady) {
 			shoot(actions, false);
 		}
 	}
@@ -111,7 +105,7 @@ final class Revolver {
 	private void shoot(Actions actions, boolean charged) {
 		this.shootReady = false;
 		this.shootCharge = 0;
-		this.gunReadyTimer = GUN_READY_DELAY;
+		this.gunReady = false;
 		if (charged) {
 			this.pierceShotCharge = 0;
 			this.pierceReady = false;
@@ -120,6 +114,17 @@ final class Revolver {
 			this.chargeLoop.stop();
 		}
 		actions.shoot(this.variant, charged);
+	}
+
+	/** Drawn (Revolver.OnEnable): not ready to fire until its PickUp animation says so. */
+	void equip() {
+		this.shootCharge = 100;
+		this.gunReady = false;
+	}
+
+	/** The ReadyGun animation event. */
+	void readyGun() {
+		this.gunReady = true;
 	}
 
 	/** Put away: its sounds stop and any charge is lost. */
