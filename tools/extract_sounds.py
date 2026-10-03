@@ -179,7 +179,11 @@ def combat(env, x):
     hit = coin.coinHitSound.deref().read()
     x.add_source("coin_hit", named_source(hit, hit.m_Name))
     x.add_source("coin_hit_flip", named_source(hit, "Audio Source"))
-    x.add_source("coin_flash", source_ref(coin.flash))
+    # The flash's RandomPitch and the charge's SoundPitchDip set their pitch; the mod does too.
+    flash = source_ref(coin.flash)
+    x.add_clip("coin_flash", flash.m_audioClip, flash.m_Volume)
+    charge = source_ref(coin.chargeEffect)
+    x.add_clip("coin_charge", charge.m_audioClip, charge.m_Volume)
     x.add_source("coin_break", source_ref(coin.coinBreak))
 
     beam = next(s for s in components(piercer.revolverBeam.deref().read(), "MonoBehaviour") if hasattr(s, "enemyHitSound"))

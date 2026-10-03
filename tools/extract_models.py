@@ -386,6 +386,29 @@ def export_canvases(exporter, rig):
     return canvases, placed
 
 
+def coin_flash(exporter, flash_go):
+    """The coin's flash (Coin.flash): a sprite facing the camera, with its size in the flash's space."""
+    scale = 1.0
+
+    def find(go, scale):
+        transform = transform_of(go)
+        scale *= transform.m_LocalScale.x
+        for c in go.m_Component:
+            obj = c.component.deref()
+            if obj.type.name == "SpriteRenderer":
+                renderer = obj.read()
+                sprite = renderer.m_Sprite.deref().read_typetree()
+                size = sprite["m_Rect"]["width"] / sprite["m_PixelsToUnits"] * scale
+                return {"texture": exporter.sprite(renderer.m_Sprite), "size": size, "alpha": obj.read_typetree()["m_Color"]["a"]}
+        for child in transform.m_Children:
+            found = find(child.deref().read().m_GameObject.read(), scale)
+            if found:
+                return found
+        return None
+
+    return find(flash_go, scale)
+
+
 def go_name_of(component_pptr):
     """The name of the GameObject a referenced component sits on, or None."""
     return component_pptr.deref().read().m_GameObject.read().m_Name if component_pptr.path_id else None
@@ -420,6 +443,8 @@ def export_scripts(exporter, rig, colors, placed):
                     "twirlBone": rig.index[revolver.twirlBone.path_id] if revolver.twirlBone.path_id else None,
                     "twirlSprite": go_name_of(revolver.twirlSprite),
                 }
+            elif kind == "Coin":
+                scripts["coin"] = {"flash": coin_flash(exporter, obj.read().flash.deref().read())}
             elif kind == "RevolverCylinder" and active:
                 tree = obj.read_typetree()
                 axis = tree["rotationAxis"]

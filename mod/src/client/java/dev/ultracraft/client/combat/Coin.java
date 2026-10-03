@@ -2,6 +2,7 @@ package dev.ultracraft.client.combat;
 
 import dev.ultracraft.PlayerShape;
 import dev.ultracraft.client.UltraConfig;
+import dev.ultracraft.client.movement.UltraSounds;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
@@ -16,7 +17,8 @@ import java.util.Set;
 
 /**
  * A marksman coin (Coin): thrown, hittable once it's been in the air for a moment, and when shot it sends the
- * shot on to the next coin or to an enemy's head.
+ * shot on to the next coin or to an enemy's head. It flashes briefly at the top of its arc and charges up later;
+ * then it can be punched, and a piercer's charged shot splits on it.
  */
 final class Coin {
 	/** The coin's trigger sphere: 1 unit. */
@@ -31,6 +33,15 @@ final class Coin {
 	static final double TRAIL_TIME = 0.5;
 	/** The trail adds a point once the coin is this far from the last one. */
 	private static final double TRAIL_MIN_DISTANCE = 0.1 * PlayerShape.BLOCKS_PER_UNIT;
+	/** TripleTime, TripleTimeEnd and DoubleTime: when the coin flashes, stops flashing, and charges. */
+	private static final double FLASH_START = 0.35;
+	private static final double FLASH_END = 0.417;
+	private static final double CHARGE_START = 1;
+	/** The flash effect is removed after this long (its RemoveOnTime). */
+	static final double FLASH_LIFE = 0.5;
+	/** The charge hum's pitch rises from nothing to this (SoundPitchDip). */
+	private static final double CHARGE_PITCH = 2;
+	private static final double CHARGE_PITCH_SPEED = 5;
 
 	Vec3 position;
 	/** Units per second. */
@@ -42,21 +53,50 @@ final class Coin {
 	float power = 2;
 	/** The enemies this chain of coins has hit already, which it won't target again. */
 	Set<Integer> chainHits = new HashSet<>();
-	/** The beam that hit the coin, which it passes on (Coin's altBeam). */
-	Effects.BeamStyle beam = Effects.BeamStyle.REVOLVER;
+	/**
+	 * The beam the coin passes the shot on with: a piercing shot's own (Coin's altBeam), or for a single-target
+	 * shot the coin's own beam (its refBeam, {@link Effects.BeamStyle#COIN}).
+	 */
+	Effects.BeamStyle beam = Effects.BeamStyle.COIN;
 	/** The coin keeps the camera's rotation from when it was thrown. */
 	final float yaw;
 	final float pitch;
 	/** Trail points, newest first. */
 	final Deque<TrailPoint> trail = new ArrayDeque<>();
 	boolean removed;
+	/** How often a shot passes on from this coin: twice while it flashes or charges, if the shot splits. */
+	int hitTimes = 1;
+	/** Past its flash: it can be punched. */
+	boolean doubled;
+	/** Seconds since the flash appeared, or negative while there is none. */
+	double flashAge = -1;
+	private boolean flashed;
+	private boolean flashEnded;
+	private boolean charged;
+	private double chargeTime;
+	private final UltraSounds sounds;
+	private final UltraSounds.Loop chargeHum;
 
-	Coin(Vec3 position, Vec3 velocity, float yaw, float pitch) {
+	Coin(Vec3 position, Vec3 velocity, float yaw, float pitch, UltraSounds sounds) {
 		this.position = position;
 		this.velocity = velocity;
 		this.yaw = yaw;
 		this.pitch = pitch;
+		this.sounds = sounds;
+		this.chargeHum = sounds.loop();
 		this.trail.addFirst(new TrailPoint(position, 0));
+	}
+
+	/**
+	 * Punchflection's new coin, where the punched one landed: it pops up and starts over, keeping its power and
+	 * whether it can be punched or split.
+	 */
+	Coin respawn(Vec3 position, float power) {
+		Coin coin = new Coin(position, new Vec3(0, 25, 0), 0, 0, this.sounds);
+		coin.power = power;
+		coin.hitTimes = this.hitTimes;
+		coin.doubled = this.doubled;
+		return coin;
 	}
 
 	record TrailPoint(Vec3 position, double time) {
@@ -70,7 +110,7 @@ final class Coin {
 		return !this.shot && !this.removed && this.age >= ARM_TIME;
 	}
 
-	/** Shot by a beam (or another coin): passes it on after a moment. */
+	/** Shot by a beam (or another coin): passes it on after a moment. Its flash and charge timers stop. */
 	void hit(float power, Set<Integer> chainHits, Effects.BeamStyle beam) {
 		this.shot = true;
 		this.power = power;
@@ -79,14 +119,27 @@ final class Coin {
 		this.reflectTimer = REFLECT_DELAY;
 	}
 
+	/** Punched: no more flash or charge. */
+	void punched() {
+		this.shot = true;
+		this.flashAge = -1;
+		this.chargeHum.stop();
+	}
+
+	void remove() {
+		this.removed = true;
+		this.chargeHum.stop();
+	}
+
 	/** Moves the coin, and marks it removed once it expires or comes to rest. */
 	void update(double dt, Level level, Entity thrower) {
 		this.age += dt;
 		if (this.age > LIFETIME) {
-			this.removed = true;
+			remove();
 			return;
 		}
 		updateTrail();
+		updateEffects(dt);
 		if (this.shot) {
 			return;
 		}
@@ -102,10 +155,40 @@ final class Coin {
 		if (this.age >= ARM_TIME && this.velocity.length() < 1) {
 			this.timeToDelete -= dt * 10;
 			if (this.timeToDelete <= 0) {
-				this.removed = true;
+				remove();
 			}
 		} else {
 			this.timeToDelete = 1;
+		}
+	}
+
+	/** TripleTime, TripleTimeEnd and DoubleTime, and the flash and charge effects they bring. */
+	private void updateEffects(double dt) {
+		if (this.flashAge >= 0) {
+			this.flashAge += dt;
+			if (this.flashAge > FLASH_LIFE) {
+				this.flashAge = -1;
+			}
+		}
+		if (!this.shot && !this.flashed && this.age >= FLASH_START) {
+			this.flashed = true;
+			this.hitTimes = 2;
+			this.doubled = true;
+			this.flashAge = 0;
+			this.sounds.play("coin_flash", 1, this.sounds.randomPitch(1.3F, 1.4F));
+		}
+		if (!this.shot && !this.flashEnded && this.age >= FLASH_END) {
+			this.flashEnded = true;
+			this.hitTimes = 1;
+		}
+		if (!this.shot && !this.charged && this.age >= CHARGE_START) {
+			this.charged = true;
+			this.hitTimes = 2;
+			this.flashAge = -1;
+		}
+		if (this.charged && !this.removed) {
+			this.chargeTime += dt;
+			this.chargeHum.update("coin_charge", 1, Math.min(this.chargeTime * CHARGE_PITCH_SPEED, CHARGE_PITCH));
 		}
 	}
 

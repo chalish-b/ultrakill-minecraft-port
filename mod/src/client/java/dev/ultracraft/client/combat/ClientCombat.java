@@ -49,6 +49,12 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	private static final double RANGE = 256;
 	private static final double COIN_TARGET_RANGE = 64;
 	private static final double HITSTOP = 0.25;
+	/** A split shot goes on from its coin the second time this long after the first (ReflectRevolver). */
+	private static final double SPLIT_DELAY = 0.05;
+	/** Punch.ActiveFrame looks this far ahead for coins. */
+	private static final double PUNCH_REACH = 4 * S;
+	/** The punch checks for coins on ActiveStart and the six physics steps after it. */
+	private static final double PUNCH_ACTIVE_TIME = 6 * 0.008;
 
 	private final UltraSounds sounds = new UltraSounds();
 	private final Effects effects = new Effects();
@@ -63,6 +69,10 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	private double sharpshooterCharge = 300;
 	private int readyShots = 3;
 	private final List<Ricochet> ricochets = new ArrayList<>();
+	/** Coins punched this frame pop back up as new ones. */
+	private final List<Coin> respawned = new ArrayList<>();
+	private boolean alreadyHitCoin;
+	private double punchActiveLeft;
 	private double punchStamina = 2;
 	/** Punch.ready: cleared by a punch, set again by its animation's ReadyToPunch event. */
 	private boolean punchReady = true;
@@ -90,6 +100,7 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	public void frame(double dt, Minecraft minecraft) {
 		LocalPlayer player = minecraft.player;
 		if (player == null || minecraft.level == null) {
+			this.coins.forEach(Coin::remove);
 			this.coins.clear();
 			return;
 		}
@@ -121,6 +132,10 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		updateRicochets(dt, minecraft.level, player);
 		this.punchStamina = Math.min(this.punchStamina + 1.25 * dt, 2);
 		this.fistCooldown = Math.max(this.fistCooldown - 2 * dt, 0);
+		if (this.punchActiveLeft > 0) {
+			this.punchActiveLeft -= dt;
+			punchCoin(minecraft.level, player);
+		}
 		for (Coin coin : this.coins) {
 			coin.update(dt, minecraft.level, player);
 			if (coin.shot && !coin.removed) {
@@ -131,6 +146,8 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			}
 		}
 		this.coins.removeIf(coin -> coin.removed);
+		this.coins.addAll(this.respawned);
+		this.respawned.clear();
 
 		boolean driving = UltraController.INSTANCE.isDriving(player);
 		updateHeld(driving ? variantOf(player.getMainHandItem()) : null);
@@ -183,7 +200,14 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	@Override
 	public void armEvent(String function) {
 		switch (function) {
-			case "ActiveStart" -> ClientPlayNetworking.send(new PunchPayload());
+			case "ActiveStart" -> {
+				ClientPlayNetworking.send(new PunchPayload());
+				this.punchActiveLeft = PUNCH_ACTIVE_TIME;
+				Minecraft minecraft = Minecraft.getInstance();
+				if (minecraft.level != null && minecraft.player != null) {
+					punchCoin(minecraft.level, minecraft.player);
+				}
+			}
 			case "ReadyToPunch" -> this.punchReady = true;
 			default -> {
 			}
@@ -298,7 +322,7 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 					break;
 				}
 			} else if (hit.kind() == Hitscan.Kind.COIN) {
-				hit.coin().hit(hit.coin().power, new HashSet<>(), charged ? Effects.BeamStyle.SUPER : Effects.BeamStyle.REVOLVER);
+				hit.coin().hit(hit.coin().power, new HashSet<>(), charged ? Effects.BeamStyle.SUPER : Effects.BeamStyle.COIN);
 				end = hit.position();
 				break;
 			} else {
@@ -462,7 +486,7 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			return;
 		}
 		Vec3 velocity = player.getLookAngle().scale(20).add(0, 15, 0).add(movement.velocity());
-		this.coins.add(new Coin(movement.eyePosition().add(0, -0.5 * S, 0), velocity, player.getYRot(), player.getXRot()));
+		this.coins.add(new Coin(movement.eyePosition().add(0, -0.5 * S, 0), velocity, player.getYRot(), player.getXRot(), this.sounds));
 		this.sounds.play("coin_throw", 1, 1);
 		// Punch.CoinFlip
 		Animator arm = FirstPersonWeapons.INSTANCE.armAnimator();
@@ -481,9 +505,23 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		this.coinCharge -= 100;
 	}
 
-	/** Coin.ReflectRevolver: the shot goes on to the nearest coin, else the nearest enemy's head. */
+	/**
+	 * Coin.ReflectRevolver: the shot goes on to the nearest coin, else the nearest enemy's head. A coin that's
+	 * flashing or charged splits the shot: it goes on a second time, 0.05 s later, to another target. That's any
+	 * shot the coin passes on with its own beam, and the piercer's charged shot; the sharpshooter's doesn't split.
+	 */
 	private void reflect(Coin coin, Level level, LocalPlayer player) {
-		coin.removed = true;
+		boolean split = coin.hitTimes > 1 && (coin.beam == Effects.BeamStyle.COIN || coin.beam == Effects.BeamStyle.SUPER);
+		passOn(coin, level, player);
+		coin.hitTimes--;
+		if (split && coin.hitTimes > 0) {
+			coin.reflectTimer = SPLIT_DELAY;
+		} else {
+			coin.remove();
+		}
+	}
+
+	private void passOn(Coin coin, Level level, LocalPlayer player) {
 		float pitch = coin.power > 2 ? 1 + (coin.power - 2) / 5 : 1;
 		this.sounds.play("coin_hit", 1, pitch);
 		this.sounds.play("coin_hit_flip", 1, 1);
@@ -513,6 +551,84 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		this.effects.beam(coin.position, hit.getLocation(), coin.beam);
 	}
 
+	/**
+	 * Punch.ActiveFrame's coin check: what's straight ahead within 4 units (a ray, then a 1 unit sphere), if it's
+	 * a coin past its flash, gets punched.
+	 */
+	private void punchCoin(Level level, LocalPlayer player) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (this.alreadyHitCoin || movement == null) {
+			return;
+		}
+		Vec3 eye = movement.eyePosition();
+		Vec3 look = player.getLookAngle();
+		double reach = PUNCH_REACH;
+		Coin coin = null;
+		Hitscan.Hit first = Hitscan.cast(level, player, eye, look, reach, this.coins).getFirst();
+		boolean rayHit = first.kind() == Hitscan.Kind.COIN || first.kind() == Hitscan.Kind.ENTITY;
+		if (first.kind() == Hitscan.Kind.COIN) {
+			coin = first.coin();
+		}
+		if (!rayHit) {
+			double nearest = Double.MAX_VALUE;
+			for (Coin c : this.coins) {
+				double along = c.position.subtract(eye).dot(look);
+				double off = c.position.distanceTo(eye.add(look.scale(along)));
+				double radius = Coin.HIT_RADIUS + 1 * S;
+				if (along >= 0 && along <= reach && off <= radius && c.hittable()) {
+					double distance = along - Math.sqrt(radius * radius - off * off);
+					if (distance < nearest) {
+						nearest = distance;
+						coin = c;
+					}
+				}
+			}
+		}
+		if (coin == null || !coin.doubled || !coin.hittable()) {
+			return;
+		}
+		this.alreadyHitCoin = true;
+		Animator arm = FirstPersonWeapons.INSTANCE.armAnimator();
+		if (arm != null) {
+			arm.play("Hook", 0.065);
+		}
+		punchflection(coin, level, player, eye, look);
+	}
+
+	/**
+	 * Coin.Punchflection: the coin strikes the nearest enemy it can see (in the head), or flies along the aim to
+	 * the wall. A new coin with one more power pops up where it landed.
+	 */
+	private void punchflection(Coin coin, Level level, LocalPlayer player, Vec3 eye, Vec3 look) {
+		coin.punched();
+		float pitch = coin.power > 2 ? 1 + (coin.power - 2) / 5 : 1;
+		this.sounds.play("coin_hit", 1, pitch);
+		this.sounds.play("coin_hit_flip", 1, pitch);
+		LivingEntity target = coinTarget(coin, level, player);
+		Vec3 landing = null;
+		float power = coin.power;
+		if (target != null) {
+			Vec3 head = target.getEyePosition();
+			damage(level, target, coin.power * 2, true, head);
+			this.effects.beam(coin.position, head, Effects.BeamStyle.COIN);
+			landing = head;
+			power++;
+		} else {
+			HitResult hit = level.clip(new ClipContext(eye, eye.add(look.scale(RANGE)), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+			this.effects.beam(coin.position, hit.getLocation(), Effects.BeamStyle.COIN);
+			if (hit.getType() != HitResult.Type.MISS) {
+				landing = hit.getLocation().subtract(look.scale(S));
+				if (power < 5) {
+					power++;
+				}
+			}
+		}
+		coin.remove();
+		if (landing != null) {
+			this.respawned.add(coin.respawn(landing, power));
+		}
+	}
+
 	/** The nearest enemy the coin can see the head of, hostile mobs before anything else. */
 	private static @Nullable LivingEntity coinTarget(Coin coin, Level level, LocalPlayer player) {
 		AABB area = new AABB(coin.position, coin.position).inflate(COIN_TARGET_RANGE);
@@ -529,6 +645,7 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	/** Punch.PunchStart: the hit itself goes out on the animation's ActiveStart event. */
 	private void punch() {
 		this.punchReady = false;
+		this.alreadyHitCoin = false;
 		this.fistCooldown = 0.5;
 		this.punchStamina -= 1;
 		this.sounds.play("punch_swoosh", 1, 1);

@@ -1,5 +1,6 @@
 package dev.ultracraft.client.combat;
 
+import com.google.gson.JsonObject;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.math.Axis;
@@ -13,6 +14,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.BlockParticleOption;
 import net.minecraft.core.particles.DustParticleOptions;
 import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.resources.Identifier;
 import net.minecraft.util.LightCoordsUtil;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.Level;
@@ -36,7 +38,12 @@ final class Effects {
 		/** "Revolver Beam Super", the piercer's charged shot: 0.5 units wide, white to blue. */
 		SUPER(0.5, new float[][]{{0, 1, 1, 1}, {1, 0, 0.8344827F, 1}}),
 		/** "Revolver Beam Sharp", the sharpshooter's charged shot: 0.5 units wide, white to red. */
-		SHARP(0.5, new float[][]{{0, 1, 1, 1}, {1, 1, 0.23529413F, 0.23529413F}});
+		SHARP(0.5, new float[][]{{0, 1, 1, 1}, {1, 1, 0.23529413F, 0.23529413F}}),
+		/**
+		 * "ReflectedBeamPoint", the coin's own beam when it passes a shot on or is punched: 0.5 units wide, orange,
+		 * paler in the middle.
+		 */
+		COIN(0.5, new float[][]{{0, 1, 0.80784315F, 0}, {0.5F, 1, 0.9205858F, 0.7028302F}, {1, 1, 0.80784315F, 0}});
 
 		/** Blocks. */
 		final double width;
@@ -141,6 +148,34 @@ final class Effects {
 			model.submit(poseStack, context.submitNodeCollector(), LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(coin.position)));
 			poseStack.popPose();
 		}
+		JsonObject script = model.script("coin");
+		if (script != null && script.has("flash")) {
+			JsonObject flash = script.getAsJsonObject("flash");
+			Identifier texture = Identifier.parse(flash.get("texture").getAsString());
+			double size = flash.get("size").getAsDouble() * PlayerShape.BLOCKS_PER_UNIT;
+			for (Coin coin : coins) {
+				if (!coin.removed && coin.flashAge >= 0) {
+					flash(context, camera, coin, texture, size);
+				}
+			}
+		}
+	}
+
+	/** The coin's flash: a sprite facing the camera that shrinks and fades (SpriteController, both at 1 a second). */
+	private static void flash(LevelRenderContext context, Vec3 camera, Coin coin, Identifier texture, double size) {
+		float left = (float)(1 - coin.flashAge);
+		float half = (float)(size * left / 2);
+		PoseStack poseStack = context.poseStack();
+		poseStack.pushPose();
+		poseStack.translate(coin.position.x - camera.x, coin.position.y - camera.y, coin.position.z - camera.z);
+		poseStack.rotate(Minecraft.getInstance().gameRenderer.mainCamera().rotation());
+		context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.text(texture), (pose, buffer) -> {
+			float[][] corners = {{-half, -half, 0, 1}, {half, -half, 1, 1}, {half, half, 1, 0}, {-half, half, 0, 0}};
+			for (float[] c : corners) {
+				buffer.addVertex(pose, c[0], c[1], 0).setColor(1, 1, 1, left).setUv(c[2], c[3]).setLight(LightCoordsUtil.FULL_BRIGHT);
+			}
+		});
+		poseStack.popPose();
 	}
 
 	/** A flat strip from one end of the beam to the other, turned to face the camera, a piece per color key. */
