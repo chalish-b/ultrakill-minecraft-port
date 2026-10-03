@@ -3,7 +3,9 @@
 	"package": "dev.ultracraft.mixin",
 	"compatibilityLevel": "JAVA_25",
 	"mixins": [
+		"AbstractArrowAccessor",
 		"AvatarMixin",
+		"FoodDataMixin",
 		"PlayerMixin",
 		"ServerGamePacketListenerImplMixin"
 	],

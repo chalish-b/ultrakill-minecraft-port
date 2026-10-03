@@ -1093,6 +1093,19 @@ public final class UltraMovement {
 			.add(up.scale(this.camera.shakeUp() * S));
 	}
 
+	public void kickFov(double amount) {
+		this.camera.kickFov(amount);
+	}
+
+	public void shake(double amount) {
+		this.camera.shake(amount);
+	}
+
+	/** Units per second. */
+	public Vec3 velocity() {
+		return this.body.velocity;
+	}
+
 	public double cameraRoll() {
 		return this.camera.roll();
 	}

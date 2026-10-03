@@ -2,6 +2,7 @@ package dev.ultracraft.client;
 
 import dev.ultracraft.PlayerShape;
 import dev.ultracraft.UltraPlayer;
+import dev.ultracraft.client.combat.ClientCombat;
 import dev.ultracraft.client.movement.UltraInput;
 import dev.ultracraft.client.movement.UltraMovement;
 import dev.ultracraft.net.UltraStatePayload;
@@ -49,21 +50,27 @@ public final class UltraController {
 		LocalPlayer player = minecraft.player;
 		if (player == null || minecraft.level == null) {
 			release();
+			ClientCombat.INSTANCE.frame(dt, minecraft);
 			return;
 		}
 		if (!shouldDrive(player)) {
 			release();
 			sync(player);
-			return;
+		} else {
+			if (this.movement == null || this.driven != player) {
+				release();
+				take(minecraft, player);
+			}
+			if (!minecraft.isPaused() && !ClientCombat.INSTANCE.inHitstop()) {
+				drive(minecraft, player, dt);
+			}
 		}
-		if (this.movement == null || this.driven != player) {
-			release();
-			take(minecraft, player);
+		if (!minecraft.isPaused()) {
+			ClientCombat.INSTANCE.frame(dt, minecraft);
 		}
-		if (minecraft.isPaused()) {
-			return;
-		}
+	}
 
+	private void drive(Minecraft minecraft, LocalPlayer player, double dt) {
 		this.clock += dt;
 		this.movement.syncExternal(this.lastDeltaMovement);
 		this.input.sample(minecraft.options);

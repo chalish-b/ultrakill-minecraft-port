@@ -1,7 +1,7 @@
 # /// script
 # dependencies = ["UnityPy", "soundfile"]
 # ///
-"""Extracts ULTRAKILL's movement sounds into the mod's generated resources (mod/src/generated/resources).
+"""Extracts ULTRAKILL's movement and combat sounds into the mod's generated resources (mod/src/generated/resources).
 
     uv run tools/extract_sounds.py
 
@@ -111,15 +111,97 @@ def backing(obj, name):
     return getattr(obj, f"<{name}>k__BackingField")
 
 
+def find_class(env, class_name, go_name, **fields):
+    """The `class_name` script on the GameObject called `go_name` whose serialized fields match `fields`."""
+    for obj in env.objects:
+        if obj.type.name != "MonoBehaviour":
+            continue
+        try:
+            if obj.read().m_Script.read().m_ClassName != class_name:
+                continue
+            script = obj.read()
+        except Exception:
+            continue
+        if script.m_GameObject.read().m_Name != go_name:
+            continue
+        tree = obj.read_typetree()
+        if all(tree.get(k) == v for k, v in fields.items()):
+            return script
+    raise LookupError(f"no {class_name} on {go_name}")
+
+
+def named_source(go, name):
+    """The AudioSource on the object called `name` in a prefab hierarchy."""
+    def walk(g):
+        if g.m_Name == name:
+            yield from components(g, "AudioSource")
+        for c in children(g):
+            yield from walk(c)
+    return next(walk(go))
+
+
+def source_ref(pptr):
+    """An AudioSource referenced directly or through its GameObject."""
+    obj = pptr.deref()
+    if obj.type.name == "AudioSource":
+        return obj.read()
+    return next(audio_sources(obj.read()))
+
+
+def combat(env, x):
+    piercer = find_class(env, "Revolver", "Revolver Pierce", altVersion=0)
+    marksman = find_class(env, "Revolver", "Revolver Ricochet", altVersion=0)
+    piercer_go, marksman_go = piercer.m_GameObject.read(), marksman.m_GameObject.read()
+    x.add_clip("revolver_shoot.piercer", piercer.gunShots[0])
+    x.add_clip("revolver_shoot.marksman", marksman.gunShots[0])
+    x.add_source("revolver_super", source_ref(piercer.superGunSound))
+    x.add_clip("revolver_charge", named_source(piercer_go, "ChargeEffect").m_audioClip)
+    x.add_clip("revolver_charged", piercer.chargedSound)
+    x.add_clip("revolver_recharging", piercer.chargingSound)
+    x.add_source("revolver_click", named_source(piercer_go, "Cylinder_Bone"))
+    x.add_source("coin_ready", named_source(marksman_go, "Canvas"))
+
+    coin_go = marksman.coin.deref().read()
+    coin = next(s for s in components(coin_go, "MonoBehaviour") if hasattr(s, "coinHitSound"))
+    x.add_source("coin_throw", next(components(coin_go, "AudioSource")))
+    x.add_source("coin_spin", named_source(coin_go, "Audio Source"))
+    hit = coin.coinHitSound.deref().read()
+    x.add_source("coin_hit", named_source(hit, hit.m_Name))
+    x.add_source("coin_hit_flip", named_source(hit, "Audio Source"))
+    x.add_source("coin_flash", source_ref(coin.flash))
+    x.add_source("coin_break", source_ref(coin.coinBreak))
+
+    beam = next(s for s in components(piercer.revolverBeam.deref().read(), "MonoBehaviour") if hasattr(s, "enemyHitSound"))
+    x.add_source("beam_hit", source_ref(beam.enemyHitSound))
+    x.add_source("beam_ricochet", source_ref(beam.ricochetSound))
+
+    for event, go_name in [("gore.head", "BS Head"), ("gore.limb", "BS Limb"), ("gore.body", "BS Body"), ("gore.small", "BS Body Small")]:
+        x.add_source(event, source_ref(find_class(env, "Bloodsplatter", go_name).m_GameObject))
+
+    punch = find_class(env, "Punch", "Arm Blue")
+    x.add_source("punch_swoosh", next(components(punch.m_GameObject.read(), "AudioSource")))
+    x.add_source("punch_hit", source_ref(punch.normalHit))
+    x.add_source("parry_hit", source_ref(punch.specialHit))
+
+    movement = find_script(env, "walkSpeed", "jumpSound")
+    x.add_source("hurt", source_ref(movement.hurtScreen.deref().read().m_GameObject))
+    x.add_source("heal", source_ref(movement.hpFlash.deref().read().m_GameObject))
+    time_controller = find_script(env, "parryLight", "parryFlash")
+    parry = time_controller.parryLight.deref().read()
+    x.add_source("parry", named_source(parry, "Audio Source"))
+    x.add_source("parry_ricochet", named_source(parry, parry.m_Name))
+
+
 def main():
     assets = BUNDLES / "assets_assets_assets"
     env = UnityPy.load(
         str(BUNDLES / "gameprefabs_assets_all.bundle"),
         str(BUNDLES / "other_assets_all.bundle"),
+        str(BUNDLES / "monoscript_monoscripts.bundle"),
         str(assets / "sounds.bundle"),
     )
-    if OUT.exists():
-        shutil.rmtree(OUT)
+    if (OUT / "sounds").exists():
+        shutil.rmtree(OUT / "sounds")
     (OUT / "sounds").mkdir(parents=True)
 
     x = Extractor()
@@ -147,6 +229,8 @@ def main():
     for entry in footsteps.footsteps:
         surface = SURFACES[backing(entry, "SurfaceType")]
         x.event(f"footstep.{surface}", [sound(x.clip(c)) for c in backing(entry, "Clips")])
+
+    combat(env, x)
 
     (OUT / "sounds.json").write_text(json.dumps(x.events, indent=1, sort_keys=True))
     print(f"{len(x.files)} sounds, {len(x.events)} events -> {OUT.relative_to(REPO)}")

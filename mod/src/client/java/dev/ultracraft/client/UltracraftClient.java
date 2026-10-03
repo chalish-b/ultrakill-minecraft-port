@@ -1,6 +1,8 @@
 package dev.ultracraft.client;
 
+import dev.ultracraft.client.combat.ClientCombat;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents;
 
 public class UltracraftClient implements ClientModInitializer {
 	@Override
@@ -9,5 +11,7 @@ public class UltracraftClient implements ClientModInitializer {
 		UltraKeys.register();
 		UltraHud.register();
 		UltraCommands.register();
+		ClientCombat.init();
+		LevelRenderEvents.COLLECT_SUBMITS.register(ClientCombat.INSTANCE::render);
 	}
 }

@@ -6,8 +6,8 @@ import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.minecraft.client.KeyMapping;
 
 /**
- * ULTRAKILL's controls. Dash and slide default to ULTRAKILL's Shift and Ctrl; while ULTRAKILL movement is
- * on, those keys stop sneaking and sprinting, and sneaking moves to its own key.
+ * ULTRAKILL's controls. Dash, slide and punch default to ULTRAKILL's Shift, Ctrl and F; while ULTRAKILL
+ * movement is on, those keys stop sneaking, sprinting and swapping hands, and sneaking moves to its own key.
  */
 public final class UltraKeys {
 	private static final KeyMapping.Category CATEGORY = KeyMapping.Category.register(Ultracraft.id("ultracraft"));
@@ -16,6 +16,7 @@ public final class UltraKeys {
 	public static final KeyMapping DASH = key("dash", InputConstants.KEY_LSHIFT);
 	public static final KeyMapping SLIDE = key("slide", InputConstants.KEY_LCONTROL);
 	public static final KeyMapping SNEAK = key("sneak", InputConstants.KEY_LALT);
+	public static final KeyMapping PUNCH = key("punch", InputConstants.KEY_F);
 
 	private UltraKeys() {
 	}
@@ -29,5 +30,6 @@ public final class UltraKeys {
 		KeyMappingHelper.registerKeyMapping(DASH);
 		KeyMappingHelper.registerKeyMapping(SLIDE);
 		KeyMappingHelper.registerKeyMapping(SNEAK);
+		KeyMappingHelper.registerKeyMapping(PUNCH);
 	}
 }

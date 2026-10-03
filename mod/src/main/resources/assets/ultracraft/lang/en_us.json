@@ -5,5 +5,8 @@
 	"key.ultracraft.slide": "Slide / Slam",
 	"key.ultracraft.sneak": "Sneak (ULTRAKILL movement)",
 	"ultracraft.toggle.on": "ULTRAKILL movement on",
-	"ultracraft.toggle.off": "ULTRAKILL movement off"
+	"ultracraft.toggle.off": "ULTRAKILL movement off",
+	"key.ultracraft.punch": "Punch (Feedbacker)",
+	"item.ultracraft.revolver_piercer": "Revolver (Piercer)",
+	"item.ultracraft.revolver_marksman": "Revolver (Marksman)"
 }

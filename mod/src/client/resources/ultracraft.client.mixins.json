@@ -4,10 +4,12 @@
 	"compatibilityLevel": "JAVA_25",
 	"client": [
 		"CameraMixin",
+		"FirstPersonHandsMixin",
 		"GameRendererMixin",
 		"KeyboardInputMixin",
 		"LivingEntityMixin",
 		"LocalPlayerMixin",
+		"MinecraftCombatInputMixin",
 		"MinecraftMixin",
 		"PlayerStepSoundMixin",
 		"PlayerTravelMixin",

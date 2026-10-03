@@ -13,13 +13,13 @@ import net.minecraft.util.RandomSource;
 import org.jspecify.annotations.Nullable;
 
 /**
- * ULTRAKILL's movement sounds, extracted by tools/extract_sounds.py, played on the player.
+ * ULTRAKILL's sounds, extracted by tools/extract_sounds.py, played on the player.
  *
  * <p>Sounds that ULTRAKILL plays through one of the player's AudioSources go through a {@link Channel}:
  * a new sound on a channel cuts off the one before it, as replaying an AudioSource does.
  */
-final class UltraSounds {
-	enum Channel {
+public final class UltraSounds {
+	public enum Channel {
 		/** NewMovement's own AudioSource: jumps and dashes. */
 		MAIN,
 		/** GroundCheck's AudioSource: landings and the third wall jump. */
@@ -35,15 +35,15 @@ final class UltraSounds {
 	private final Scrape slide = new Scrape("slide");
 	private final Scrape wallScrape = new Scrape("wall_scrape");
 
-	void play(String event, float volume, float pitch) {
+	public void play(String event, float volume, float pitch) {
 		play(event, volume, pitch, 0);
 	}
 
-	void play(Channel channel, String event, float volume, float pitch) {
+	public void play(Channel channel, String event, float volume, float pitch) {
 		play(channel, event, volume, pitch, 0);
 	}
 
-	void play(Channel channel, String event, float volume, float pitch, int delayTicks) {
+	public void play(Channel channel, String event, float volume, float pitch, int delayTicks) {
 		SoundInstance previous = this.channels[channel.ordinal()];
 		if (previous != null) {
 			manager().stop(previous);
@@ -62,8 +62,17 @@ final class UltraSounds {
 		return sound;
 	}
 
-	float randomPitch() {
-		return 0.9F + this.random.nextFloat() * 0.2F;
+	public float randomPitch() {
+		return randomPitch(0.9F, 1.1F);
+	}
+
+	public float randomPitch(float min, float max) {
+		return min + this.random.nextFloat() * (max - min);
+	}
+
+	/** A looping sound for the caller to drive. */
+	public Loop loop() {
+		return new Loop();
 	}
 
 	/** The falling wind, louder and higher the faster the player falls. */
@@ -119,10 +128,10 @@ final class UltraSounds {
 	}
 
 	/** A looping sound that keeps playing while it's updated. */
-	private final class Loop {
+	public final class Loop {
 		private @Nullable LoopInstance instance;
 
-		void update(String event, double volume, double pitch) {
+		public void update(String event, double volume, double pitch) {
 			if (this.instance == null || this.instance.isStopped()) {
 				Identifier id = Ultracraft.id(event);
 				if (manager().getSoundEvent(id) == null) {
@@ -134,7 +143,7 @@ final class UltraSounds {
 			this.instance.set((float)volume, (float)pitch);
 		}
 
-		void stop() {
+		public void stop() {
 			if (this.instance != null) {
 				this.instance.finish();
 				this.instance = null;

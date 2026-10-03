@@ -1,6 +1,7 @@
 package dev.ultracraft.client;
 
 import dev.ultracraft.Ultracraft;
+import dev.ultracraft.client.render.ScreenFlashes;
 import dev.ultracraft.client.movement.UltraMovement;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
@@ -9,7 +10,7 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 
 /**
  * ULTRAKILL's stamina takes the hunger bar's place while ULTRAKILL movement drives the player (it has no
- * hunger). The speedometer and debug line sit in the top left.
+ * hunger). The speedometer and debug line sit in the top left, and parries and healing flash the screen.
  */
 final class UltraHud {
 	private static final int BAR_WIDTH = 25;
@@ -31,6 +32,7 @@ final class UltraHud {
 			}
 		});
 		HudElementRegistry.addLast(Ultracraft.id("speedometer"), (graphics, deltaTracker) -> drawSpeedometer(graphics));
+		HudElementRegistry.addLast(Ultracraft.id("flashes"), (graphics, deltaTracker) -> ScreenFlashes.INSTANCE.draw(graphics));
 	}
 
 	private static void drawStamina(GuiGraphicsExtractor graphics, double stamina) {

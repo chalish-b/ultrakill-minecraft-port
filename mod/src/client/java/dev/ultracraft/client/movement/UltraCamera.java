@@ -36,6 +36,11 @@ final class UltraCamera {
 		}
 	}
 
+	/** Weapons widen the view for a moment when they fire (cam.fieldOfView += defaultFov / 40). */
+	void kickFov(double amount) {
+		this.fovRatio += amount;
+	}
+
 	void crouch() {
 		this.defaultTarget = ORIGINAL_HEIGHT - SLIDE_DROP;
 	}
