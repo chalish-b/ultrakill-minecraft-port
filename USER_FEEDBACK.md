@@ -1,6 +1,4 @@
 Bugs
-- The revolvers don't have that light / hud behind them (like how piercer shows the charge, or marksman shows the coin count etc.). The lights are also kinda broken I think so it's impossible to tell whether the gun I'm holding is piercer or marksman
-- Feedbacker punch uses the wrong animation (coin throwing) instead of punching, while coin throwing has no hand animation
 - Water is completely broken, same with ladders and stuff, anything that changes the movement "mode" I think
 - Can't punch a coin
 

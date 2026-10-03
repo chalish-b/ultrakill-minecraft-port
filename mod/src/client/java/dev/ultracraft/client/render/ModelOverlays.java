@@ -21,6 +21,9 @@ final class ModelOverlays {
 	private record Corner(float x, float y, float u, float v) {
 	}
 
+	/** How far apart, in canvas units, images are layered. */
+	private static final float LAYER_DEPTH = 0.5F;
+
 	private ModelOverlays() {
 	}
 
@@ -32,21 +35,62 @@ final class ModelOverlays {
 		submit(poseStack, collector, type, bone, color, List.of(corners));
 	}
 
-	/** A UI Image filled {@code fillAmount} of the way, if it's a filled image. */
-	static void image(PoseStack poseStack, SubmitNodeCollector collector, RenderType type, Matrix4f canvas, UltraModel.Image image, float[] color, float fillAmount) {
+	/** A sprite over {@code rect} (left, bottom, right, top) in the bone's space. */
+	static void sprite(PoseStack poseStack, SubmitNodeCollector collector, RenderType type, Matrix4f bone, float[] rect, float[] color) {
+		submit(poseStack, collector, type, bone, color, List.of(rectangle(rect)));
+	}
+
+	/**
+	 * A UI Image filled {@code fillAmount} of the way, if it's a filled image. Images later on a canvas draw over
+	 * earlier ones, as Unity's UI orders them: each {@code layer} sits a little closer to the camera.
+	 */
+	static void image(
+		PoseStack poseStack, SubmitNodeCollector collector, RenderType type, Matrix4f canvas, UltraModel.Image image, float[] color, float fillAmount, int layer
+	) {
 		float[] r = image.rect();
 		List<List<Corner>> polygons = switch (image.type()) {
 			case SLICED -> sliced(r, image.border(), image.uvBorder());
-			case FILLED -> image.fillMethod() == UltraModel.FillMethod.RADIAL360
-				? radial360(r, image.fillOrigin(), image.fillClockwise(), fillAmount)
-				: List.of(rectangle(r));
+			case FILLED -> switch (image.fillMethod()) {
+				case RADIAL360 -> radial360(r, image.fillOrigin(), image.fillClockwise(), fillAmount);
+				case HORIZONTAL, VERTICAL -> linear(r, image.fillMethod() == UltraModel.FillMethod.VERTICAL, image.fillOrigin(), fillAmount);
+				case RADIAL90, RADIAL180 -> List.of(rectangle(r));
+			};
 			case SIMPLE, TILED -> List.of(rectangle(r));
 		};
-		submit(poseStack, collector, type, canvas, color, polygons);
+		Vector3f normal = canvas.transformDirection(new Vector3f(0, 0, 1));
+		Vector3f center = canvas.transformPosition(new Vector3f());
+		float towardCamera = normal.dot(center) > 0 ? -1 : 1;
+		Matrix4f layered = new Matrix4f(canvas).translate(0, 0, towardCamera * layer * LAYER_DEPTH);
+		submit(poseStack, collector, type, layered, color, polygons);
 	}
 
 	private static List<Corner> rectangle(float[] r) {
 		return List.of(new Corner(r[0], r[1], 0, 1), new Corner(r[2], r[1], 1, 1), new Corner(r[2], r[3], 1, 0), new Corner(r[0], r[3], 0, 0));
+	}
+
+	/**
+	 * Image.FillMethod.Horizontal and Vertical: the part of the image from the origin edge (left or bottom for 0,
+	 * right or top for 1) to {@code fillAmount} of the way across.
+	 */
+	private static List<List<Corner>> linear(float[] r, boolean vertical, int origin, float fillAmount) {
+		float amount = Math.clamp(fillAmount, 0, 1);
+		if (amount <= 0) {
+			return List.of();
+		}
+		int low = vertical ? 1 : 0;
+		int high = vertical ? 3 : 2;
+		float[] filled = r.clone();
+		float length = (r[high] - r[low]) * amount;
+		if (origin == 0) {
+			filled[high] = r[low] + length;
+		} else {
+			filled[low] = r[high] - length;
+		}
+		List<Corner> corners = new ArrayList<>();
+		for (float[] p : new float[][]{{filled[0], filled[1]}, {filled[2], filled[1]}, {filled[2], filled[3]}, {filled[0], filled[3]}}) {
+			corners.add(corner(r, p[0], p[1]));
+		}
+		return List.of(corners);
 	}
 
 	/** Nine pieces: the corners keep their size, the edges and middle stretch. */

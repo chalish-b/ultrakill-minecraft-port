@@ -161,6 +161,17 @@ def combat(env, x):
     x.add_source("revolver_click", named_source(piercer_go, "Cylinder_Bone"))
     x.add_source("coin_ready", named_source(marksman_go, "Canvas"))
 
+    sharpshooter = find_class(env, "Revolver", "Revolver Twirl", altVersion=0)
+    sharpshooter_go = sharpshooter.m_GameObject.read()
+    x.add_clip("revolver_shoot.sharpshooter", sharpshooter.gunShots[0])
+    if sharpshooter.superGunSound.path_id:
+        x.add_source("revolver_super.sharpshooter", source_ref(sharpshooter.superGunSound))
+    x.add_source("revolver_twirl_shot", source_ref(sharpshooter.twirlShotSound))
+    x.add_clip("revolver_twirl", named_source(sharpshooter_go, "ChargeEffect").m_audioClip)
+    x.add_source("sharpshooter_ready", named_source(sharpshooter_go, "Canvas"))
+    sharp_beam = next(s for s in components(sharpshooter.revolverBeamSuper.deref().read(), "MonoBehaviour") if hasattr(s, "ricochetSound"))
+    x.add_source("beam_ricochet.sharpshooter", source_ref(sharp_beam.ricochetSound))
+
     coin_go = marksman.coin.deref().read()
     coin = next(s for s in components(coin_go, "MonoBehaviour") if hasattr(s, "coinHitSound"))
     x.add_source("coin_throw", next(components(coin_go, "AudioSource")))

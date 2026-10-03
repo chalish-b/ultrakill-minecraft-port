@@ -19,6 +19,7 @@ import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.monster.Enemy;
@@ -36,6 +37,7 @@ import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the Feedbacker punch,
@@ -58,6 +60,9 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	private boolean wasFire2;
 	private double coinCharge = 400;
 	private int readyCoins = 4;
+	private double sharpshooterCharge = 300;
+	private int readyShots = 3;
+	private final List<Ricochet> ricochets = new ArrayList<>();
 	private double punchStamina = 2;
 	/** Punch.ready: cleared by a punch, set again by its animation's ReadyToPunch event. */
 	private boolean punchReady = true;
@@ -88,9 +93,12 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			this.coins.clear();
 			return;
 		}
-		ScreenFlashes.INSTANCE.update(dt);
+		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
 		if (this.hitstopLeft > 0) {
 			this.hitstopLeft -= dt;
+			if (this.hitstopLeft <= 0) {
+				minecraft.getSoundManager().resume();
+			}
 			return;
 		}
 		this.effects.update(dt);
@@ -104,6 +112,13 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			this.sounds.play("coin_ready", 1, 1 + (coins - 1) / 2F);
 		}
 		this.readyCoins = coins;
+		this.sharpshooterCharge = Math.min(this.sharpshooterCharge + 15 * dt, 300);
+		int shots = (int)(this.sharpshooterCharge / 100);
+		if (shots > this.readyShots && this.held == Revolver.Variant.SHARPSHOOTER) {
+			this.sounds.play("sharpshooter_ready", 1, 1 + (shots - 1) / 2F);
+		}
+		this.readyShots = shots;
+		updateRicochets(dt, minecraft.level, player);
 		this.punchStamina = Math.min(this.punchStamina + 1.25 * dt, 2);
 		this.fistCooldown = Math.max(this.fistCooldown - 2 * dt, 0);
 		for (Coin coin : this.coins) {
@@ -132,7 +147,9 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			this.lastHealth = -1;
 		}
 		// Animators run after gameplay code, as Unity's do, so what it set this frame plays this frame.
-		FirstPersonWeapons.RevolverState display = this.held == null ? FirstPersonWeapons.RevolverState.NONE : this.revolvers.get(this.held).display(this.coinCharge);
+		FirstPersonWeapons.RevolverState display = this.held == null
+			? FirstPersonWeapons.RevolverState.NONE
+			: this.revolvers.get(this.held).display(this.held == Revolver.Variant.SHARPSHOOTER ? this.sharpshooterCharge : this.coinCharge);
 		FirstPersonWeapons.INSTANCE.update(dt, viewmodel(this.held), display, this);
 	}
 
@@ -155,7 +172,11 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	@Override
 	public void weaponEvent(FirstPersonWeapons.Weapon weapon, String function) {
 		if (function.equals("ReadyGun")) {
-			this.revolvers.get(weapon == FirstPersonWeapons.Weapon.REVOLVER_PIERCER ? Revolver.Variant.PIERCER : Revolver.Variant.MARKSMAN).readyGun();
+			for (Revolver revolver : this.revolvers.values()) {
+				if (viewmodel(revolver.variant) == weapon) {
+					revolver.readyGun();
+				}
+			}
 		}
 	}
 
@@ -178,14 +199,21 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		if (variant == null) {
 			return null;
 		}
-		return variant == Revolver.Variant.PIERCER ? FirstPersonWeapons.Weapon.REVOLVER_PIERCER : FirstPersonWeapons.Weapon.REVOLVER_MARKSMAN;
+		return switch (variant) {
+			case PIERCER -> FirstPersonWeapons.Weapon.REVOLVER_PIERCER;
+			case MARKSMAN -> FirstPersonWeapons.Weapon.REVOLVER_MARKSMAN;
+			case SHARPSHOOTER -> FirstPersonWeapons.Weapon.REVOLVER_SHARPSHOOTER;
+		};
 	}
 
 	private static Revolver.@Nullable Variant variantOf(ItemStack stack) {
 		if (stack.is(UltraItems.REVOLVER_PIERCER)) {
 			return Revolver.Variant.PIERCER;
 		}
-		return stack.is(UltraItems.REVOLVER_MARKSMAN) ? Revolver.Variant.MARKSMAN : null;
+		if (stack.is(UltraItems.REVOLVER_MARKSMAN)) {
+			return Revolver.Variant.MARKSMAN;
+		}
+		return stack.is(UltraItems.REVOLVER_SHARPSHOOTER) ? Revolver.Variant.SHARPSHOOTER : null;
 	}
 
 	/** Whether the held item is an ULTRAKILL weapon in use, so attacking and using belong to it. */
@@ -222,7 +250,7 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	// ---- revolver ---------------------------------------------------------------------------
 
 	@Override
-	public void shoot(Revolver.Variant variant, boolean charged) {
+	public void shoot(Revolver.Variant variant, boolean charged, int ricochets) {
 		Minecraft minecraft = Minecraft.getInstance();
 		LocalPlayer player = minecraft.player;
 		UltraMovement movement = UltraController.INSTANCE.movement();
@@ -231,11 +259,13 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		}
 		Vec3 eye = movement.eyePosition();
 		Vec3 look = player.getLookAngle();
-		List<Hitscan.Hit> hits = Hitscan.cast(minecraft.level, player, eye, look, RANGE, this.coins);
 
-		String sound = variant == Revolver.Variant.PIERCER ? "revolver_shoot.piercer" : "revolver_shoot.marksman";
-		this.sounds.play(sound, 0.55F, this.sounds.randomPitch());
-		if (charged) {
+		// Revolver.Shoot: a normal shot plays a gunshot; a charged one its super shot sound (the sharpshooter's twirl shot).
+		if (!charged) {
+			this.sounds.play("revolver_shoot." + variant.name().toLowerCase(), 0.55F, this.sounds.randomPitch());
+		} else if (variant == Revolver.Variant.SHARPSHOOTER) {
+			this.sounds.play("revolver_twirl_shot", 1, 1);
+		} else {
 			this.sounds.play("revolver_super", 1, 1);
 		}
 		movement.kickFov(charged ? 1 / 20.0 : 1 / 40.0);
@@ -246,6 +276,11 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		}
 		FirstPersonWeapons.INSTANCE.turnCylinder(viewmodel(variant));
 
+		if (charged && variant == Revolver.Variant.SHARPSHOOTER) {
+			sharpshooterBeam(minecraft.level, player, eye, look, muzzle(eye, look, player), ricochets);
+			return;
+		}
+		List<Hitscan.Hit> hits = Hitscan.cast(minecraft.level, player, eye, look, RANGE, this.coins);
 		Vec3 end = hits.getLast().position();
 		int bodiesLeft = charged ? 3 : 1;
 		for (Hitscan.Hit hit : hits) {
@@ -263,7 +298,7 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 					break;
 				}
 			} else if (hit.kind() == Hitscan.Kind.COIN) {
-				hit.coin().hit(hit.coin().power, new HashSet<>());
+				hit.coin().hit(hit.coin().power, new HashSet<>(), charged ? Effects.BeamStyle.SUPER : Effects.BeamStyle.REVOLVER);
 				end = hit.position();
 				break;
 			} else {
@@ -282,6 +317,132 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		double yaw = Math.toRadians(player.getYRot());
 		Vec3 right = new Vec3(-Math.cos(yaw), 0, -Math.sin(yaw));
 		return eye.add(look.scale(0.6)).add(right.scale(0.18)).add(0, -0.14, 0);
+	}
+
+	/**
+	 * The sharpshooter's charged beam ("Revolver Beam Sharp"): it pierces everything in its way, and while it has
+	 * ricochets left, a wall sends it on 0.1 s later, reflected and aimed at the nearest enemy near its path.
+	 */
+	private void sharpshooterBeam(Level level, LocalPlayer player, Vec3 from, Vec3 direction, Vec3 drawFrom, int ricochets) {
+		List<Hitscan.Hit> hits = Hitscan.cast(level, player, from, direction, RANGE, this.coins);
+		Vec3 end = hits.getLast().position();
+		for (Hitscan.Hit hit : hits) {
+			if (hit.kind() == Hitscan.Kind.ENTITY) {
+				damage(level, hit.entity(), hit.head() ? 2 : 1, hit.head(), hit.position());
+				UltraMovement movement = UltraController.INSTANCE.movement();
+				if (movement != null) {
+					movement.shake(1);
+				}
+			} else if (hit.kind() == Hitscan.Kind.COIN) {
+				hit.coin().hit(hit.coin().power, new HashSet<>(), Effects.BeamStyle.SHARP);
+				end = hit.position();
+				break;
+			} else {
+				end = hit.position();
+				if (hit.kind() == Hitscan.Kind.BLOCK && hit.face() != null) {
+					this.effects.impact(level, end);
+					if (ricochets > 0) {
+						Vec3 normal = hit.face().getUnitVec3();
+						Vec3 reflected = direction.subtract(normal.scale(2 * direction.dot(normal)));
+						this.ricochets.add(new Ricochet(end.add(normal.scale(0.01)), reflected, ricochets - 1));
+					}
+				}
+				break;
+			}
+		}
+		this.effects.beam(drawFrom, end, Effects.BeamStyle.SHARP);
+	}
+
+	/** A sharpshooter beam about to come off a wall. */
+	private static final class Ricochet {
+		final Vec3 from;
+		final Vec3 direction;
+		final int ricochetsLeft;
+		double delay = 0.1;
+
+		Ricochet(Vec3 from, Vec3 direction, int ricochetsLeft) {
+			this.from = from;
+			this.direction = direction;
+			this.ricochetsLeft = ricochetsLeft;
+		}
+	}
+
+	private void updateRicochets(double dt, Level level, LocalPlayer player) {
+		List<Ricochet> due = new ArrayList<>();
+		for (Ricochet ricochet : this.ricochets) {
+			ricochet.delay -= dt;
+			if (ricochet.delay <= 0) {
+				due.add(ricochet);
+			}
+		}
+		this.ricochets.removeAll(due);
+		for (Ricochet ricochet : due) {
+			this.sounds.play("beam_ricochet.sharpshooter", 1, 1);
+			Vec3 direction = aimAssist(level, player, ricochet.from, ricochet.direction);
+			sharpshooterBeam(level, player, ricochet.from, direction, ricochet.from, ricochet.ricochetsLeft);
+		}
+	}
+
+	/**
+	 * RevolverBeam.RicochetAimAssist: sweeps a 5 unit sphere along the beam and turns it towards the nearest thing
+	 * the sweep touches that it can see, coins before enemies, and an enemy's head when that's in view.
+	 */
+	private Vec3 aimAssist(Level level, LocalPlayer player, Vec3 from, Vec3 direction) {
+		double radius = 5 * S;
+		Vec3 target = null;
+		double nearest = Double.MAX_VALUE;
+		boolean coin = false;
+		for (Coin c : this.coins) {
+			if (c.removed || c.shot) {
+				continue;
+			}
+			double along = c.position.subtract(from).dot(direction);
+			double off = c.position.distanceTo(from.add(direction.scale(Math.max(along, 0))));
+			double reach = radius + Coin.HIT_RADIUS;
+			if (along < 0 || off > reach) {
+				continue;
+			}
+			double distance = along - Math.sqrt(reach * reach - off * off);
+			if ((!coin || distance < nearest) && Hitscan.clear(level, player, from, c.position)) {
+				coin = true;
+				nearest = distance;
+				target = c.position;
+			}
+		}
+		if (!coin) {
+			Vec3 far = from.add(direction.scale(RANGE));
+			AABB area = new AABB(from, far).inflate(radius);
+			for (LivingEntity entity : level.getEntitiesOfClass(LivingEntity.class, area, e -> e != player && e.isAlive() && !e.isSpectator())) {
+				AABB box = entity.getBoundingBox();
+				Optional<Vec3> entry = box.inflate(radius).clip(from, far);
+				if (entry.isEmpty()) {
+					continue;
+				}
+				double distance = entry.get().distanceTo(from);
+				if (distance < 0.1 * S || distance >= nearest) {
+					continue;
+				}
+				Vec3 along = from.add(direction.scale(distance));
+				Vec3 point = new Vec3(Math.clamp(along.x, box.minX, box.maxX), Math.clamp(along.y, box.minY, box.maxY), Math.clamp(along.z, box.minZ, box.maxZ));
+				if (!Hitscan.clear(level, player, from, point)) {
+					continue;
+				}
+				nearest = distance;
+				Vec3 head = entity.getEyePosition();
+				target = Hitscan.clear(level, player, from, head) ? head : point;
+			}
+		}
+		return target == null ? direction : target.subtract(from).normalize();
+	}
+
+	@Override
+	public double sharpshooterCharge() {
+		return this.sharpshooterCharge;
+	}
+
+	@Override
+	public void spendSharpshooterCharge() {
+		this.sharpshooterCharge -= 100;
 	}
 
 	private void damage(Level level, LivingEntity target, float damage, boolean head, Vec3 at) {
@@ -332,8 +493,8 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			.min(Comparator.comparingDouble(c -> c.position.distanceToSqr(coin.position)))
 			.orElse(null);
 		if (next != null) {
-			next.hit(coin.power + 1, coin.chainHits);
-			this.effects.beam(coin.position, next.position, Effects.BeamStyle.COIN);
+			next.hit(coin.power + 1, coin.chainHits, coin.beam);
+			this.effects.beam(coin.position, next.position, coin.beam);
 			return;
 		}
 
@@ -342,14 +503,14 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			Vec3 head = target.getEyePosition();
 			coin.chainHits.add(target.getId());
 			damage(level, target, coin.power * 2, true, head);
-			this.effects.beam(coin.position, head, Effects.BeamStyle.COIN);
+			this.effects.beam(coin.position, head, coin.beam);
 			return;
 		}
 
 		Vec3 direction = new Vec3(this.random.nextGaussian(), this.random.nextGaussian(), this.random.nextGaussian()).normalize();
 		Vec3 end = coin.position.add(direction.scale(30));
 		HitResult hit = level.clip(new ClipContext(coin.position, end, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
-		this.effects.beam(coin.position, hit.getLocation(), Effects.BeamStyle.COIN);
+		this.effects.beam(coin.position, hit.getLocation(), coin.beam);
 	}
 
 	/** The nearest enemy the coin can see the head of, hostile mobs before anything else. */
@@ -394,10 +555,13 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 			this.sounds.play("parry", 1, 1);
 			this.sounds.play("parry_ricochet", 1, 1);
 			this.hitstopLeft = HITSTOP;
+			// TimeController.TrueStop stops the world's sounds and music; the player's own play on.
+			minecraft.getSoundManager().pauseAllExcept(SoundSource.PLAYERS);
 			this.quietHealLeft = 0.5;
 			ScreenFlashes.INSTANCE.parry();
 			if (movement != null) {
 				movement.shake(0.5);
+				movement.fullStamina();
 			}
 		} else {
 			this.sounds.play("punch_hit", 1, 1);

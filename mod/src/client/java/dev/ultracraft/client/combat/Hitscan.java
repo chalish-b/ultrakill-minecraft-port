@@ -1,5 +1,6 @@
 package dev.ultracraft.client.combat;
 
+import net.minecraft.core.Direction;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.ClipContext;
@@ -28,7 +29,10 @@ final class Hitscan {
 		END
 	}
 
-	record Hit(Kind kind, Vec3 position, double distance, @Nullable LivingEntity entity, @Nullable Coin coin, boolean head) {
+	/**
+	 * @param face the side of the block a {@link Kind#BLOCK} hit struck
+	 */
+	record Hit(Kind kind, Vec3 position, double distance, @Nullable LivingEntity entity, @Nullable Coin coin, boolean head, @Nullable Direction face) {
 	}
 
 	static List<Hit> cast(Level level, Entity shooter, Vec3 from, Vec3 direction, double range, List<Coin> coins) {
@@ -41,7 +45,7 @@ final class Hitscan {
 		for (Entity entity : level.getEntities(shooter, new AABB(from, end).inflate(1), e -> e instanceof LivingEntity living && living.isAlive() && !e.isSpectator())) {
 			AABB box = entity.getBoundingBox().inflate(entity.getPickRadius());
 			Optional<Vec3> clip = box.contains(from) ? Optional.of(from) : box.clip(from, end);
-			clip.ifPresent(point -> hits.add(new Hit(Kind.ENTITY, point, point.distanceTo(from), (LivingEntity)entity, null, isHead(entity, point))));
+			clip.ifPresent(point -> hits.add(new Hit(Kind.ENTITY, point, point.distanceTo(from), (LivingEntity)entity, null, isHead(entity, point), null)));
 		}
 		for (Coin coin : coins) {
 			if (!coin.hittable()) {
@@ -53,11 +57,11 @@ final class Hitscan {
 			}
 			Vec3 nearest = from.add(direction.scale(along));
 			if (nearest.distanceTo(coin.position) <= Coin.HIT_RADIUS) {
-				hits.add(new Hit(Kind.COIN, nearest, along, null, coin, false));
+				hits.add(new Hit(Kind.COIN, nearest, along, null, coin, false, null));
 			}
 		}
 		hits.sort(Comparator.comparingDouble(Hit::distance));
-		hits.add(new Hit(blocked ? Kind.BLOCK : Kind.END, end, from.distanceTo(end), null, null, false));
+		hits.add(new Hit(blocked ? Kind.BLOCK : Kind.END, end, from.distanceTo(end), null, null, false, blocked ? block.getDirection() : null));
 		return hits;
 	}
 

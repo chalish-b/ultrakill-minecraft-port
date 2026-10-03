@@ -15,9 +15,10 @@ import java.util.List;
 public final class UltraItems {
 	public static final Item REVOLVER_PIERCER = register("revolver_piercer");
 	public static final Item REVOLVER_MARKSMAN = register("revolver_marksman");
+	public static final Item REVOLVER_SHARPSHOOTER = register("revolver_sharpshooter");
 
 	/** Variants in the order the slot key cycles through them. */
-	private static final List<List<Item>> VARIANTS = List.of(List.of(REVOLVER_PIERCER, REVOLVER_MARKSMAN));
+	private static final List<List<Item>> VARIANTS = List.of(List.of(REVOLVER_PIERCER, REVOLVER_MARKSMAN, REVOLVER_SHARPSHOOTER));
 
 	private UltraItems() {
 	}
@@ -31,6 +32,7 @@ public final class UltraItems {
 		CreativeModeTabEvents.modifyOutputEvent(CreativeModeTabs.COMBAT).register(output -> {
 			output.accept(REVOLVER_PIERCER);
 			output.accept(REVOLVER_MARKSMAN);
+			output.accept(REVOLVER_SHARPSHOOTER);
 		});
 	}
 

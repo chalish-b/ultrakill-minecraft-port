@@ -36,10 +36,12 @@ public final class FirstPersonWeapons {
 	/** Unity's Color.red and Color.yellow. */
 	private static final float[] RED = {1, 0, 0, 1};
 	private static final float[] YELLOW = {1, 0.92156863F, 0.015686275F, 1};
+	private static final float[] GRAY = {0.5F, 0.5F, 0.5F, 1};
 
 	public enum Weapon {
 		REVOLVER_PIERCER("revolver_piercer"),
-		REVOLVER_MARKSMAN("revolver_marksman");
+		REVOLVER_MARKSMAN("revolver_marksman"),
+		REVOLVER_SHARPSHOOTER("revolver_sharpshooter");
 
 		final String model;
 
@@ -49,13 +51,20 @@ public final class FirstPersonWeapons {
 	}
 
 	/**
-	 * What the held revolver's screen, charge glow and cylinder show (Revolver's charges, 0 to 100).
+	 * What the held revolver's screen, charge glow, cylinder and twirl show (Revolver's charges, 0 to 100).
 	 *
-	 * @param coinCharge the marksman's coins, 0 to 400
+	 * @param coinCharge the marksman's coins (0 to 400) or the sharpshooter's shots (0 to 300)
 	 * @param cylinderSpin how fast the charge spins the cylinder (RevolverCylinder.spinSpeed)
+	 * @param spinning whether the sharpshooter twirls (the Animator's Spinning)
+	 * @param twirlSpeed the Animator's TwirlSpeed
+	 * @param twirlAngle degrees the sharpshooter has turned in the hand
+	 * @param twirlSpriteAlpha how visible the spin blur is
 	 */
-	public record RevolverState(double pierceShotCharge, double pierceCharge, boolean pierceReady, double coinCharge, double cylinderSpin) {
-		public static final RevolverState NONE = new RevolverState(0, 100, true, 400, 0);
+	public record RevolverState(
+		double pierceShotCharge, double pierceCharge, boolean pierceReady, double coinCharge, double cylinderSpin,
+		boolean spinning, double twirlSpeed, double twirlAngle, double twirlSpriteAlpha
+	) {
+		public static final RevolverState NONE = new RevolverState(0, 100, true, 400, 0, false, 0, 0, 0);
 	}
 
 	/** Clip events from the held weapon and from the arm, and the held revolver's cylinder clicking into place. */
@@ -193,7 +202,10 @@ public final class FirstPersonWeapons {
 		if (held != null) {
 			Viewmodel weapon = weapon(held);
 			if (weapon != null) {
+				weapon.animator.setBool("Spinning", state.spinning());
+				weapon.animator.setFloat("TwirlSpeed", (float)state.twirlSpeed());
 				weapon.update(dt, function -> events.weaponEvent(held, function));
+				twirl(weapon, state.twirlAngle());
 				if (weapon.cylinder != null && weapon.cylinder.update(dt, state.cylinderSpin(), weapon.pose)) {
 					events.cylinderClicked();
 				}
@@ -214,6 +226,18 @@ public final class FirstPersonWeapons {
 				this.returnToOrigRot = false;
 			}
 		}
+	}
+
+	/** Revolver.LateUpdate turns the sharpshooter's twirl bone about its forward axis, on top of its animation. */
+	private static void twirl(Viewmodel weapon, double angle) {
+		JsonObject revolver = weapon.model.script("revolver");
+		if (revolver == null || angle == 0 || !revolver.has("twirlBone") || revolver.get("twirlBone").isJsonNull()) {
+			return;
+		}
+		int bone = revolver.get("twirlBone").getAsInt();
+		Quaternionf rotation = new Quaternionf(weapon.pose.qx(bone), weapon.pose.qy(bone), weapon.pose.qz(bone), weapon.pose.qw(bone))
+			.rotateZ((float)Math.toRadians(angle));
+		weapon.pose.setRotation(bone, rotation.x, rotation.y, rotation.z, rotation.w);
 	}
 
 	/** Punch's ActiveStart, ActiveEnd (ResetFistRotation) and ReadyToPunch, for the arm's rotation. */
@@ -260,6 +284,7 @@ public final class FirstPersonWeapons {
 		if (revolver != null) {
 			submitScreen(poseStack, collector, weapon.model, world, revolver);
 			submitCoinPanels(poseStack, collector, weapon.model, world, revolver);
+			submitTwirlSprite(poseStack, collector, weapon.model, world, revolver);
 		}
 		poseStack.popPose();
 	}
@@ -298,9 +323,24 @@ public final class FirstPersonWeapons {
 		}
 	}
 
+	/** The sharpshooter's spin blur, fading in with the charge. */
+	private void submitTwirlSprite(PoseStack poseStack, SubmitNodeCollector collector, UltraModel model, Matrix4f[] world, JsonObject revolver) {
+		JsonElement name = revolver.get("twirlSprite");
+		if (name == null || name.isJsonNull() || this.state.twirlSpriteAlpha() <= 0) {
+			return;
+		}
+		for (UltraModel.Sprite sprite : model.sprites()) {
+			if (sprite.name().equals(name.getAsString())) {
+				float[] color = {1, 1, 1, (float)this.state.twirlSpriteAlpha()};
+				ModelOverlays.sprite(poseStack, collector, RenderTypes.text(sprite.texture()), world[sprite.bone()], sprite.rect(), color);
+			}
+		}
+	}
+
 	/**
-	 * The marksman's coin panels (Revolver.CheckCoinCharges): one per coin, filling as it recharges, red until
-	 * full and then in the variant's color.
+	 * The marksman's coin panels and the sharpshooter's charge meters (Revolver.CheckCoinCharges): one per coin or
+	 * shot, filling as it recharges, red (the marksman's) or gray (the sharpshooter's) until full, then in the
+	 * variant's color.
 	 */
 	private void submitCoinPanels(PoseStack poseStack, SubmitNodeCollector collector, UltraModel model, Matrix4f[] world, JsonObject revolver) {
 		List<int[]> panels = new ArrayList<>();
@@ -312,6 +352,7 @@ public final class FirstPersonWeapons {
 			return;
 		}
 		float[] variation = variationColor(revolver);
+		float[] charging = revolver.get("variation").getAsInt() == 1 ? RED : GRAY;
 		for (int c = 0; c < model.canvases().size(); c++) {
 			UltraModel.Canvas canvas = model.canvases().get(c);
 			Matrix4f matrix = world[canvas.bone()];
@@ -322,12 +363,10 @@ public final class FirstPersonWeapons {
 				for (int p = 0; p < panels.size(); p++) {
 					if (panels.get(p)[0] == c && panels.get(p)[1] == i) {
 						fill = (float)(this.state.coinCharge() / 100 - p);
-						color = fill < 1 ? RED : variation;
+						color = fill < 1 ? charging : variation;
 					}
 				}
-				// Children draw over their parents, as Unity's UI orders them.
-				var type = i == 0 ? RenderTypes.text(image.texture()) : RenderTypes.textPolygonOffset(image.texture());
-				ModelOverlays.image(poseStack, collector, type, matrix, image, color, fill);
+				ModelOverlays.image(poseStack, collector, RenderTypes.text(image.texture()), matrix, image, color, fill, i);
 			}
 		}
 	}

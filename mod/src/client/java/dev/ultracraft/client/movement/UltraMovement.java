@@ -1104,6 +1104,11 @@ public final class UltraMovement {
 		this.camera.shake(amount);
 	}
 
+	/** NewMovement.FullStamina. */
+	public void fullStamina() {
+		this.boostCharge = 300;
+	}
+
 	/** Units per second. */
 	public Vec3 velocity() {
 		return this.body.velocity;

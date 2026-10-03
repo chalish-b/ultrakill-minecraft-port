@@ -77,18 +77,27 @@ public final class UltraModel {
 	public record Canvas(int bone, List<Image> images) {
 	}
 
+	/**
+	 * A SpriteRenderer on a bone.
+	 *
+	 * @param rect left, bottom, right, top in the bone's space
+	 */
+	public record Sprite(String name, int bone, Identifier texture, float[] rect, float[] color) {
+	}
+
 	private final Vector3f origin;
 	private final String[] names;
 	private final int[] parents;
 	private final Pose rest;
 	private final List<Part> parts;
 	private final List<Quad> quads;
+	private final List<Sprite> sprites;
 	private final List<Canvas> canvases;
 	private final JsonObject scripts;
 	private final Animator.@Nullable Data animation;
 
 	private UltraModel(
-		Vector3f origin, String[] names, int[] parents, Pose rest, List<Part> parts, List<Quad> quads, List<Canvas> canvases,
+		Vector3f origin, String[] names, int[] parents, Pose rest, List<Part> parts, List<Quad> quads, List<Sprite> sprites, List<Canvas> canvases,
 		JsonObject scripts, Animator.@Nullable Data animation
 	) {
 		this.origin = origin;
@@ -97,6 +106,7 @@ public final class UltraModel {
 		this.rest = rest;
 		this.parts = parts;
 		this.quads = quads;
+		this.sprites = sprites;
 		this.canvases = canvases;
 		this.scripts = scripts;
 		this.animation = animation;
@@ -124,6 +134,10 @@ public final class UltraModel {
 
 	public List<Quad> quads() {
 		return this.quads;
+	}
+
+	public List<Sprite> sprites() {
+		return this.sprites;
 	}
 
 	public List<Canvas> canvases() {
@@ -302,6 +316,17 @@ public final class UltraModel {
 				JsonElement texture = quad.get("texture");
 				quads.add(new Quad(quad.get("name").getAsString(), quad.get("bone").getAsInt(), texture.isJsonNull() ? null : Identifier.parse(texture.getAsString())));
 			}
+			List<Sprite> sprites = new ArrayList<>();
+			for (JsonElement element : json.getAsJsonArray("sprites")) {
+				JsonObject sprite = element.getAsJsonObject();
+				sprites.add(new Sprite(
+					sprite.get("name").getAsString(),
+					sprite.get("bone").getAsInt(),
+					Identifier.parse(sprite.get("texture").getAsString()),
+					floats(sprite.getAsJsonArray("rect")),
+					floats(sprite.getAsJsonArray("color"))
+				));
+			}
 			List<Canvas> canvases = new ArrayList<>();
 			for (JsonElement element : json.getAsJsonArray("canvases")) {
 				JsonObject canvas = element.getAsJsonObject();
@@ -325,7 +350,7 @@ public final class UltraModel {
 				canvases.add(new Canvas(canvas.get("bone").getAsInt(), images));
 			}
 			Animator.Data animation = json.has("animator") ? Animator.Data.fromJson(json.getAsJsonObject("animator")) : null;
-			return Optional.of(new UltraModel(new Vector3f(origin), names, parents, rest, parts, quads, canvases, json.getAsJsonObject("scripts"), animation));
+			return Optional.of(new UltraModel(new Vector3f(origin), names, parents, rest, parts, quads, sprites, canvases, json.getAsJsonObject("scripts"), animation));
 		} catch (IOException | RuntimeException e) {
 			Ultracraft.LOGGER.warn("Couldn't load model {}", id, e);
 			return Optional.empty();

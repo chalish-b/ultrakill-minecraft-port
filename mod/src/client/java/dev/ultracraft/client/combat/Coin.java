@@ -42,6 +42,8 @@ final class Coin {
 	float power = 2;
 	/** The enemies this chain of coins has hit already, which it won't target again. */
 	Set<Integer> chainHits = new HashSet<>();
+	/** The beam that hit the coin, which it passes on (Coin's altBeam). */
+	Effects.BeamStyle beam = Effects.BeamStyle.REVOLVER;
 	/** The coin keeps the camera's rotation from when it was thrown. */
 	final float yaw;
 	final float pitch;
@@ -69,10 +71,11 @@ final class Coin {
 	}
 
 	/** Shot by a beam (or another coin): passes it on after a moment. */
-	void hit(float power, Set<Integer> chainHits) {
+	void hit(float power, Set<Integer> chainHits, Effects.BeamStyle beam) {
 		this.shot = true;
 		this.power = power;
 		this.chainHits = chainHits;
+		this.beam = beam;
 		this.reflectTimer = REFLECT_DELAY;
 	}
 

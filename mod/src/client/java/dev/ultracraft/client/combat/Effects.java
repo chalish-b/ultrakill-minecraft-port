@@ -26,26 +26,29 @@ import java.util.List;
 
 /** Beams, blood and impacts, and drawing beams, coins and coin trails in the world. */
 final class Effects {
+	/**
+	 * The revolver beams' LineRenderers: a strip from the gun to what the shot hit, shaded along its length by
+	 * color keys, narrowing away at 1.5 units a second (RevolverBeam's fade out). Their material is opaque.
+	 */
 	enum BeamStyle {
-		/** The revolver's beam: pale yellow. */
-		REVOLVER(1.0F, 0.95F, 0.7F, 0.1, 0.15),
-		/** The piercer's charged beam: thicker, blue-white, lingers. */
-		SUPER(0.55F, 0.85F, 1.0F, 0.3, 0.3),
-		/** A coin passing a shot on: orange. */
-		COIN(1.0F, 0.7F, 0.25F, 0.1, 0.25);
+		/** "Revolver Beam": 0.25 units wide, white to orange. */
+		REVOLVER(0.25, new float[][]{{0, 1, 1, 1}, {1, 1, 0.80689657F, 0}}),
+		/** "Revolver Beam Super", the piercer's charged shot: 0.5 units wide, white to blue. */
+		SUPER(0.5, new float[][]{{0, 1, 1, 1}, {1, 0, 0.8344827F, 1}}),
+		/** "Revolver Beam Sharp", the sharpshooter's charged shot: 0.5 units wide, white to red. */
+		SHARP(0.5, new float[][]{{0, 1, 1, 1}, {1, 1, 0.23529413F, 0.23529413F}});
 
-		final float r;
-		final float g;
-		final float b;
+		/** Blocks. */
 		final double width;
+		/** Seconds until it has narrowed away. */
 		final double life;
+		/** Each key: where along the beam (0 to 1), then red, green and blue. */
+		final float[][] keys;
 
-		BeamStyle(float r, float g, float b, double width, double life) {
-			this.r = r;
-			this.g = g;
-			this.b = b;
-			this.width = width;
-			this.life = life;
+		BeamStyle(double units, float[][] keys) {
+			this.width = units * PlayerShape.BLOCKS_PER_UNIT;
+			this.life = units / 1.5;
+			this.keys = keys;
 		}
 	}
 
@@ -108,7 +111,7 @@ final class Effects {
 		Vec3 camera = minecraft.gameRenderer.mainCamera().position();
 		PoseStack poseStack = context.poseStack();
 		if (!this.beams.isEmpty()) {
-			context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.lightning(), (pose, buffer) -> {
+			context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.debugQuads(), (pose, buffer) -> {
 				for (Beam beam : this.beams) {
 					float fade = (float)(1 - (this.clock - beam.start) / beam.style.life);
 					quad(pose, buffer, beam, camera, fade);
@@ -140,18 +143,21 @@ final class Effects {
 		}
 	}
 
-	/** A flat strip from one end of the beam to the other, turned to face the camera. */
+	/** A flat strip from one end of the beam to the other, turned to face the camera, a piece per color key. */
 	private static void quad(PoseStack.Pose pose, VertexConsumer buffer, Beam beam, Vec3 camera, float fade) {
 		Vec3 from = beam.from.subtract(camera);
 		Vec3 to = beam.to.subtract(camera);
 		Vec3 along = to.subtract(from);
 		Vec3 side = along.cross(from.add(to).scale(0.5)).normalize().scale(beam.style.width * fade / 2);
-		BeamStyle style = beam.style;
-		float alpha = fade;
-		corner(pose, buffer, from.add(side), style, alpha);
-		corner(pose, buffer, from.subtract(side), style, alpha);
-		corner(pose, buffer, to.subtract(side), style, alpha);
-		corner(pose, buffer, to.add(side), style, alpha);
+		float[][] keys = beam.style.keys;
+		for (int i = 0; i + 1 < keys.length; i++) {
+			Vec3 a = from.add(along.scale(keys[i][0]));
+			Vec3 b = from.add(along.scale(keys[i + 1][0]));
+			corner(pose, buffer, a.add(side), keys[i]);
+			corner(pose, buffer, a.subtract(side), keys[i]);
+			corner(pose, buffer, b.subtract(side), keys[i + 1]);
+			corner(pose, buffer, b.add(side), keys[i + 1]);
+		}
 	}
 
 	/**
@@ -199,7 +205,7 @@ final class Effects {
 		buffer.addVertex(pose, new Vector3f((float)at.x, (float)at.y, (float)at.z)).setColor(1, 1, 1, alpha);
 	}
 
-	private static void corner(PoseStack.Pose pose, VertexConsumer buffer, Vec3 at, BeamStyle style, float alpha) {
-		buffer.addVertex(pose, new Vector3f((float)at.x, (float)at.y, (float)at.z)).setColor(style.r * alpha, style.g * alpha, style.b * alpha, alpha);
+	private static void corner(PoseStack.Pose pose, VertexConsumer buffer, Vec3 at, float[] key) {
+		buffer.addVertex(pose, new Vector3f((float)at.x, (float)at.y, (float)at.z)).setColor(key[1], key[2], key[3], 1);
 	}
 }

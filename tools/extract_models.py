@@ -37,6 +37,7 @@ NAMESPACE = "ultracraft"
 MODELS = {
     "revolver_piercer": ("Revolver Pierce", "Revolver", (0, 0, 0)),
     "revolver_marksman": ("Revolver Ricochet", "Revolver", (0, 0, 0)),
+    "revolver_sharpshooter": ("Revolver Twirl", "Revolver", (0, 0, 0)),
     "feedbacker": ("Arm Blue", "Punch", (0, -0.225, 0)),
     "coin": ("Coin", "Coin", None),
 }
@@ -145,6 +146,17 @@ class Exporter:
             self.textures[name] = path
         return f"{NAMESPACE}:textures/viewmodel/{name}.png", name
 
+    def sprite(self, pptr):
+        """A Sprite's own pixels (cut out of its texture), as a texture."""
+        sprite = pptr.deref().read()
+        name = file_name(sprite.m_Name) + "_sprite"
+        if name not in self.textures:
+            path = OUT / "textures" / "viewmodel" / f"{name}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            sprite.image.save(path)
+            self.textures[name] = path
+        return f"{NAMESPACE}:textures/viewmodel/{name}.png"
+
     def renderer_parts(self, renderer, mesh, joints, binds, influences):
         """One part per textured submesh: mesh-space vertices with the joints (bone and bind pose) they follow.
 
@@ -219,6 +231,7 @@ def export_parts(exporter, rig, glow_colors):
     """
     parts = []
     quads = []
+    sprites = []
     for go_id, active in rig.active.items():
         if not active:
             continue
@@ -265,6 +278,25 @@ def export_parts(exporter, rig, glow_colors):
                 binds = [np.eye(4)]
                 indices = np.zeros((handler.m_VertexCount, 1), dtype=int)
                 weights = np.ones((handler.m_VertexCount, 1))
+            elif kind == "SpriteRenderer":
+                r = obj.read()
+                if not r.m_Enabled or not r.m_Sprite.path_id:
+                    continue
+                tree = obj.read_typetree()
+                sprite_tree = r.m_Sprite.deref().read_typetree()
+                ppu = sprite_tree["m_PixelsToUnits"]
+                width, height = sprite_tree["m_Rect"]["width"] / ppu, sprite_tree["m_Rect"]["height"] / ppu
+                pivot = sprite_tree["m_Pivot"]
+                color = tree["m_Color"]
+                sprites.append({
+                    "name": go.m_Name,
+                    "bone": rig.index[transform_of(go).object_reader.path_id],
+                    "texture": exporter.sprite(r.m_Sprite),
+                    # left, bottom, right, top in the bone's space
+                    "rect": [-pivot["x"] * width, -pivot["y"] * height, (1 - pivot["x"]) * width, (1 - pivot["y"]) * height],
+                    "color": [color["r"], color["g"], color["b"], color["a"]],
+                })
+                continue
             else:
                 continue
             for part in exporter.renderer_parts(r, mesh, joints, binds, (indices, weights)):
@@ -272,7 +304,7 @@ def export_parts(exporter, rig, glow_colors):
                 if "emissive" in part and obj.path_id in glow_colors:
                     part["emissiveColor"] = glow_colors[obj.path_id]
                 parts.append(part)
-    return parts, quads
+    return parts, quads, sprites
 
 
 # UnityEngine.UI.Image.Type and FillMethod.
@@ -354,6 +386,11 @@ def export_canvases(exporter, rig):
     return canvases, placed
 
 
+def go_name_of(component_pptr):
+    """The name of the GameObject a referenced component sits on, or None."""
+    return component_pptr.deref().read().m_GameObject.read().m_Name if component_pptr.path_id else None
+
+
 def color_list(color):
     return [color.r, color.g, color.b, color.a]
 
@@ -380,6 +417,8 @@ def export_scripts(exporter, rig, colors, placed):
                     "batteryFull": texture(revolver.batteryFull),
                     "batteryCharges": [texture(p) for p in revolver.batteryCharges],
                     "coinPanels": [list(placed[p.path_id]) for p in revolver.coinPanels],
+                    "twirlBone": rig.index[revolver.twirlBone.path_id] if revolver.twirlBone.path_id else None,
+                    "twirlSprite": go_name_of(revolver.twirlSprite),
                 }
             elif kind == "RevolverCylinder" and active:
                 tree = obj.read_typetree()
@@ -595,9 +634,9 @@ def variation_glow(root_go, colors):
 
 def export_model(exporter, root_go, offset, colors):
     rig = Rig(root_go, at_origin=offset is None)
-    parts, quads = export_parts(exporter, rig, variation_glow(root_go, colors))
+    parts, quads, sprites = export_parts(exporter, rig, variation_glow(root_go, colors))
     canvases, placed = export_canvases(exporter, rig)
-    model = {"origin": list(offset or (0, 0, 0)), "bones": rig.bones, "parts": parts, "quads": quads,
+    model = {"origin": list(offset or (0, 0, 0)), "bones": rig.bones, "parts": parts, "quads": quads, "sprites": sprites,
              "canvases": canvases, "scripts": export_scripts(exporter, rig, colors, placed)}
     animator = find_animator(rig)
     if animator is not None:
@@ -782,7 +821,7 @@ def main():
         parts = model["parts"]
         clips = [c["name"] for c in model.get("animator", {}).get("clips", [])]
         print(f"{name}: {len(model['bones'])} bones, {len(parts)} parts, {sum(len(p['indices']) // 3 for p in parts)} triangles, "
-              f"quads {[q['name'] for q in model['quads']]}, canvas images {[len(c['images']) for c in model['canvases']]}, "
+              f"quads {[q['name'] for q in model['quads']]}, sprites {[q['name'] for q in model['sprites']]}, canvas images {[len(c['images']) for c in model['canvases']]}, "
               f"scripts {sorted(model['scripts'])}, clips {clips}")
         if args.preview:
             preview(name, model, args.preview)
