@@ -11,5 +11,5 @@ Other feedback or ideas to discuss
 
 Features
 - Other weapons, one variant at a time.
-- Whiplash and knuckleblaster
+- Whiplash
 - Ground slam launching mobs up

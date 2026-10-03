@@ -2,6 +2,8 @@ package dev.ultracraft;
 
 import dev.ultracraft.combat.ServerCombat;
 import dev.ultracraft.net.CycleVariantPayload;
+import dev.ultracraft.net.ExplosionHitPayload;
+import dev.ultracraft.net.ExplosionHurtPayload;
 import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.UltraStatePayload;
@@ -28,6 +30,8 @@ public class Ultracraft implements ModInitializer {
 		PayloadTypeRegistry.serverboundPlay().register(WeaponHitPayload.TYPE, WeaponHitPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(PunchPayload.TYPE, PunchPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(CycleVariantPayload.TYPE, CycleVariantPayload.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(ExplosionHitPayload.TYPE, ExplosionHitPayload.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(ExplosionHurtPayload.TYPE, ExplosionHurtPayload.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(PunchResultPayload.TYPE, PunchResultPayload.CODEC);
 		ServerPlayNetworking.registerGlobalReceiver(UltraStatePayload.TYPE, (payload, context) ->
 			((UltraPlayer)context.player()).ultracraft$setUltraState(payload.active(), payload.crouched())

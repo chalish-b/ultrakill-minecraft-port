@@ -12,6 +12,8 @@ import dev.ultracraft.client.render.animation.Animator;
 import dev.ultracraft.combat.FistType;
 import dev.ultracraft.combat.Gore;
 import dev.ultracraft.net.CycleVariantPayload;
+import dev.ultracraft.net.ExplosionHitPayload;
+import dev.ultracraft.net.ExplosionHurtPayload;
 import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.WeaponHitPayload;
@@ -23,14 +25,19 @@ import net.minecraft.client.Options;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.util.RandomSource;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.monster.Enemy;
+import net.minecraft.world.entity.projectile.Projectile;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Matrix3f;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
@@ -42,10 +49,10 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the arms' punches,
- * weapon charges (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the server, which applies them.
+ * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the arms' punches and the
+ * Knuckleblaster's blast, explosions, weapon charges (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the server, which applies them.
  */
-public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.Events {
+public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.Events, Explosion.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
@@ -60,11 +67,17 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	private static final double PUNCH_REACH = 4 * S;
 	/** The punch checks for coins on ActiveStart and the six physics steps after it. */
 	private static final double PUNCH_ACTIVE_TIME = 6 * 0.008;
+	/** The Knuckleblaster's blast goes off this far ahead of the camera, or just short of a wall (Punch.BlastCheck). */
+	private static final double BLAST_DISTANCE = 2 * S;
+	/** Landed shells stay until there are more than this many (GoreZone's maxGibs at the default maxGore). */
+	private static final int MAX_SHELLS = 150;
 
 	private final UltraSounds sounds = new UltraSounds();
 	private final Effects effects = new Effects();
 	private final Map<Revolver.Variant, Revolver> revolvers = new EnumMap<>(Revolver.Variant.class);
 	private final List<Coin> coins = new ArrayList<>();
+	private final List<Explosion> explosions = new ArrayList<>();
+	private final List<Shell> shells = new ArrayList<>();
 	private final Revolver.Input input = new Revolver.Input();
 	private final RandomSource random = RandomSource.create();
 	private Revolver.@Nullable Variant held;
@@ -111,6 +124,8 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		if (player == null || minecraft.level == null) {
 			this.coins.forEach(Coin::remove);
 			this.coins.clear();
+			this.explosions.clear();
+			this.shells.clear();
 			return;
 		}
 		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
@@ -158,6 +173,17 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		this.coins.removeIf(coin -> coin.removed);
 		this.coins.addAll(this.respawned);
 		this.respawned.clear();
+		for (Explosion explosion : List.copyOf(this.explosions)) {
+			explosion.update(dt, minecraft.level, player, this);
+		}
+		this.explosions.removeIf(explosion -> explosion.removed);
+		for (Shell shell : this.shells) {
+			shell.update(dt, minecraft.level, player, this.sounds);
+		}
+		this.shells.removeIf(shell -> shell.removed);
+		while (this.shells.size() > MAX_SHELLS) {
+			this.shells.removeFirst();
+		}
 
 		boolean driving = UltraController.INSTANCE.isDriving(player);
 		updateHeld(driving ? variantOf(player.getMainHandItem()) : null);
@@ -227,6 +253,8 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 				}
 			}
 			case "ReadyToPunch" -> this.punchReady = true;
+			case "BlastCheck" -> blastCheck();
+			case "Eject" -> eject();
 			default -> {
 			}
 		}
@@ -697,6 +725,104 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 		}
 	}
 
+	/**
+	 * Punch.BlastCheck: if the Knuckleblaster's punch is still held halfway through, the arm fires its blast,
+	 * an explosion that throws enemies, projectiles and loose things the way the player is looking.
+	 */
+	private void blastCheck() {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		Animator arm = FirstPersonWeapons.INSTANCE.armAnimator();
+		if (this.arm != FistType.HEAVY || !UltraKeys.PUNCH_KNUCKLEBLASTER.isDown() || player == null || minecraft.level == null || movement == null || arm == null) {
+			return;
+		}
+		arm.setTrigger("PunchBlast");
+		Vec3 eye = movement.eyePosition();
+		Vec3 look = player.getLookAngle();
+		Vec3 position = eye.add(look.scale(BLAST_DISTANCE));
+		HitResult wall = minecraft.level.clip(new ClipContext(eye, position, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+		if (wall.getType() != HitResult.Type.MISS) {
+			position = wall.getLocation().subtract(look.scale(0.1 * S));
+		}
+		Quaternionf rotation = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
+		Explosion explosion = new Explosion(Explosion.KNUCKLEBLASTER, position, rotation, look);
+		this.explosions.add(explosion);
+		this.effects.wave(explosion);
+		movement.shake(explosion.cameraShake(eye));
+		// The blast's RandomPitch: up to a quarter either way.
+		this.sounds.play("explosion_wave", 1, this.sounds.randomPitch(0.75F, 1.25F));
+	}
+
+	/**
+	 * Punch.Eject: the Knuckleblaster's reload throws out two shells from its ejector, side by side, each turned
+	 * up to 45 degrees about its length and tossed forwards and up.
+	 */
+	private void eject() {
+		Minecraft minecraft = Minecraft.getInstance();
+		FirstPersonWeapons.Frame ejector = FirstPersonWeapons.INSTANCE.armBone("ShellEjector");
+		if (ejector == null || minecraft.player == null) {
+			return;
+		}
+		this.sounds.play("fist_reload", 1, 1);
+		Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
+		Vec3 cameraPosition = minecraft.gameRenderer.mainCamera().position();
+		Vec3 position = world(camera, ejector.position()).scale(S).add(cameraPosition);
+		Vec3 right = world(camera, ejector.right());
+		Vec3 up = world(camera, ejector.up());
+		Vec3 forward = world(camera, ejector.forward());
+		for (int i = 0; i < 2; i++) {
+			Vec3 at = position.add(right.scale((i == 0 ? 0.075 : -0.075) * S));
+			// Unity's Random.Range(-45, 45) and Random.Range(8, 12) on integers leave out the top.
+			float roll = (float)Math.toRadians(this.random.nextIntBetweenInclusive(-45, 44));
+			Matrix3f axes = new Matrix3f(ejector.right(), ejector.up(), ejector.forward()).rotateZ(roll);
+			// The model is drawn mirrored into Minecraft's axes, so its rotation is the ejector's mirrored back.
+			Quaternionf rotation = new Quaternionf(camera).mul(axes.mul(new Matrix3f().scaling(1, 1, -1)).getNormalizedRotation(new Quaternionf()));
+			Vec3 velocity = forward.scale(1 / 1.75).add(up.scale(0.5)).add(0, 1 / 1.75, 0).scale(this.random.nextIntBetweenInclusive(8, 11));
+			this.shells.add(new Shell(at, velocity, rotation));
+		}
+	}
+
+	private static Vec3 world(Quaternionf camera, Vector3f cameraSpace) {
+		Vector3f v = camera.transform(new Vector3f(cameraSpace));
+		return new Vec3(v.x, v.y, v.z);
+	}
+
+	// ---- explosions -----------------------------------------------------------------------------
+
+	@Override
+	public void enemy(LivingEntity enemy, float damage, Vec3 push) {
+		ClientPlayNetworking.send(new ExplosionHitPayload(enemy.getId(), damage, push));
+		Minecraft minecraft = Minecraft.getInstance();
+		if (minecraft.level != null) {
+			Gore gore = Gore.of(false, damage, false);
+			this.effects.blood(minecraft.level, enemy.getBoundingBox().getCenter(), gore);
+			this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
+		}
+	}
+
+	@Override
+	public void projectile(Projectile projectile, Vec3 push) {
+		ClientPlayNetworking.send(new ExplosionHitPayload(projectile.getId(), 0, push));
+	}
+
+	@Override
+	public void object(Entity object, Vec3 velocity) {
+		ClientPlayNetworking.send(new ExplosionHitPayload(object.getId(), 0, velocity));
+	}
+
+	@Override
+	public void player(Explosion explosion) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (movement != null) {
+			Explosion.Settings settings = explosion.settings;
+			movement.explosionLaunch(explosion.origin, settings.pushForceMultiplier(), settings.maxSize(), settings.rocketExplosion(), explosion.harmful());
+		}
+		if (explosion.harmful()) {
+			ClientPlayNetworking.send(new ExplosionHurtPayload(explosion.playerDamage()));
+		}
+	}
+
 	private void onPunchResult(PunchResultPayload result) {
 		Minecraft minecraft = Minecraft.getInstance();
 		UltraMovement movement = UltraController.INSTANCE.movement();
@@ -748,6 +874,6 @@ public final class ClientCombat implements Revolver.Actions, FirstPersonWeapons.
 	}
 
 	public void render(LevelRenderContext context) {
-		this.effects.render(context, this.coins);
+		this.effects.render(context, this.coins, this.shells);
 	}
 }

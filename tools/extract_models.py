@@ -41,6 +41,8 @@ MODELS = {
     "feedbacker": ("Arm Blue", "Punch", (0, -0.225, 0)),
     "knuckleblaster": ("Arm Red", "Punch", (0, -0.225, 0)),
     "coin": ("Coin", "Coin", None),
+    "shotgun_shell": ("ShotgunShell", "ShotgunShell", None),
+    "explosion_wave_knuckleblaster": ("Explosion Wave Knuckleblaster", "RandomPitch", None),
 }
 
 # AnimatorControllerParameterType and AnimatorConditionMode values.
@@ -92,7 +94,7 @@ class Rig:
     """Every transform under a prefab root, depth first, with its parent and the prefab's local values."""
 
     def __init__(self, root_go, at_origin):
-        """`at_origin` puts the root itself at the origin instead of where the prefab stores it."""
+        """`at_origin` puts the root itself at the origin, unrotated, instead of where the prefab stores it."""
         self.bones = []
         self.index = {}
         self.active = {}
@@ -112,7 +114,7 @@ class Rig:
         bone = {"name": go.m_Name, "parent": parent,
                 "position": position, "rotation": [q.x, q.y, q.z, q.w], "scale": [s.x, s.y, s.z]}
         if at_origin:
-            bone.update(position=[0, 0, 0], rotation=[0, 0, 0, 1], scale=[1, 1, 1])
+            bone.update(position=[0, 0, 0], rotation=[0, 0, 0, 1])
         index = len(self.bones)
         self.bones.append(bone)
         self.index[transform.object_reader.path_id] = index

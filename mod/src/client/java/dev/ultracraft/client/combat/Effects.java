@@ -10,6 +10,7 @@ import dev.ultracraft.combat.Gore;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.rendertype.RenderTypes;
+import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.BlockParticleOption;
 import net.minecraft.core.particles.DustParticleOptions;
@@ -21,12 +22,13 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.List;
 
-/** Beams, blood and impacts, and drawing beams, coins and coin trails in the world. */
+/** Beams, blood and impacts, explosions' looks, and drawing beams, coins, coin trails and shells in the world. */
 final class Effects {
 	/**
 	 * The revolver beams' LineRenderers: a strip from the gun to what the shot hit, shaded along its length by
@@ -69,13 +71,50 @@ final class Effects {
 	/** The coin trail's alpha at its head; it fades to nothing at the tail. */
 	private static final float TRAIL_ALPHA = 0.49F;
 
+	/** The blast wave's sphere material (ExplosionShockwave 3): its color, its glow, and its texture's alpha. */
+	private static final float SPHERE_COLOR = 0.17924529F;
+	private static final float SPHERE_EMISSION = 0.4056604F;
+	private static final float SPHERE_TEXTURE_ALPHA = 125 / 255F;
+	/** The blast wave's Shockwave sprite grows by this much scale a second and fades at this much alpha (ScaleNFade). */
+	private static final double SPRITE_SCALE_SPEED = 50;
+	private static final double SPRITE_FADE_SPEED = 1;
+	/** The blast wave's particles: a burst of sparks out of a 1 unit sphere, each trailing a streak back to where it started. */
+	private static final int SPARK_COUNT = 50;
+	private static final double SPARK_LIFETIME = 0.175;
+	private static final double SPARK_SPEED = 200;
+	/** The streaks' brightness: the Additive material doubles its tint (0.25) times the trail's gray (0.5). */
+	private static final float SPARK_BRIGHTNESS = 0.25F;
+
+	/** An explosion as the blast wave prefab draws it, with the sparks it threw. */
+	private record Wave(Explosion explosion, List<Spark> sparks) {
+	}
+
+	/** Units: where it started, which way it flies, and its size (its streak's width at the head). */
+	private record Spark(Vec3 start, Vec3 direction, double size) {
+	}
+
 	private final List<Beam> beams = new ArrayList<>();
+	private final List<Wave> waves = new ArrayList<>();
 	private final RandomSource random = RandomSource.create();
 	private double clock;
 
 	void update(double dt) {
 		this.clock += dt;
 		this.beams.removeIf(beam -> this.clock - beam.start > beam.style.life);
+		this.waves.removeIf(wave -> wave.explosion.removed && spriteAlpha(wave.explosion) <= 0);
+	}
+
+	/** "Explosion Wave Knuckleblaster": the explosion's sphere, and its shockwave sprite and sparks. */
+	void wave(Explosion explosion) {
+		List<Spark> sparks = new ArrayList<>();
+		for (int i = 0; i < SPARK_COUNT; i++) {
+			Vec3 point;
+			do {
+				point = new Vec3(this.random.nextDouble() * 2 - 1, this.random.nextDouble() * 2 - 1, this.random.nextDouble() * 2 - 1);
+			} while (point.lengthSqr() > 1 || point.lengthSqr() == 0);
+			sparks.add(new Spark(point, point.normalize(), 0.1 + this.random.nextDouble() * 0.9));
+		}
+		this.waves.add(new Wave(explosion, sparks));
 	}
 
 	void beam(Vec3 from, Vec3 to, BeamStyle style) {
@@ -110,7 +149,7 @@ final class Effects {
 		}
 	}
 
-	void render(LevelRenderContext context, List<Coin> coins) {
+	void render(LevelRenderContext context, List<Coin> coins, List<Shell> shells) {
 		Minecraft minecraft = Minecraft.getInstance();
 		if (minecraft.level == null) {
 			return;
@@ -132,6 +171,20 @@ final class Effects {
 				}
 			}
 		});
+		for (Wave wave : this.waves) {
+			renderWave(context, camera, wave);
+		}
+		UltraModel shell = UltraModel.get("shotgun_shell");
+		if (shell != null) {
+			for (Shell s : shells) {
+				poseStack.pushPose();
+				poseStack.translate(s.position.x - camera.x, s.position.y - camera.y, s.position.z - camera.z);
+				poseStack.rotate(s.rotation);
+				poseStack.scale((float)PlayerShape.BLOCKS_PER_UNIT, (float)PlayerShape.BLOCKS_PER_UNIT, (float)PlayerShape.BLOCKS_PER_UNIT);
+				shell.submit(poseStack, context.submitNodeCollector(), LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(s.position)));
+				poseStack.popPose();
+			}
+		}
 		UltraModel model = UltraModel.get("coin");
 		if (model == null) {
 			return;
@@ -157,6 +210,144 @@ final class Effects {
 				if (!coin.removed && coin.flashAge >= 0) {
 					flash(context, camera, coin, texture, size);
 				}
+			}
+		}
+	}
+
+	/** The Shockwave sprite's alpha: its color's, fading from when the explosion appeared. */
+	private static double spriteAlpha(Explosion explosion) {
+		return 0.686274528503418 - SPRITE_FADE_SPEED * explosion.age();
+	}
+
+	private void renderWave(LevelRenderContext context, Vec3 camera, Wave wave) {
+		UltraModel model = UltraModel.get("explosion_wave_knuckleblaster");
+		if (model == null) {
+			return;
+		}
+		Explosion explosion = wave.explosion;
+		PoseStack poseStack = context.poseStack();
+		poseStack.pushPose();
+		poseStack.translate(explosion.origin.x - camera.x, explosion.origin.y - camera.y, explosion.origin.z - camera.z);
+		poseStack.rotate(explosion.rotation);
+		float units = (float)PlayerShape.BLOCKS_PER_UNIT;
+		if (!explosion.removed) {
+			poseStack.pushPose();
+			float scale = (float)explosion.meshScale() * units;
+			poseStack.scale(scale, scale, scale);
+			sphere(context, model.mesh(0), explosion, camera);
+			poseStack.popPose();
+		}
+		double alpha = spriteAlpha(explosion);
+		if (alpha > 0 && !model.sprites().isEmpty()) {
+			UltraModel.Sprite sprite = model.sprites().getFirst();
+			double scale = model.rest().sx(0) * (model.rest().sx(sprite.bone()) + SPRITE_SCALE_SPEED * explosion.age()) * units;
+			poseStack.pushPose();
+			poseStack.scale((float)scale, (float)scale, (float)scale);
+			float[] r = sprite.rect();
+			float a = (float)alpha;
+			context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.text(sprite.texture()), (pose, buffer) -> {
+				float[][] corners = {{r[0], r[1], 0, 1}, {r[2], r[1], 1, 1}, {r[2], r[3], 1, 0}, {r[0], r[3], 0, 0}};
+				for (int i = 0; i < 4; i++) {
+					float[] c = corners[i];
+					buffer.addVertex(pose, c[0], c[1], 0).setColor(1, 1, 1, a).setUv(c[2], c[3]).setLight(LightCoordsUtil.FULL_BRIGHT);
+				}
+				for (int i = 3; i >= 0; i--) {
+					float[] c = corners[i];
+					buffer.addVertex(pose, c[0], c[1], 0).setColor(1, 1, 1, a).setUv(c[2], c[3]).setLight(LightCoordsUtil.FULL_BRIGHT);
+				}
+			});
+			poseStack.popPose();
+		}
+		poseStack.popPose();
+		if (explosion.age() < SPARK_LIFETIME) {
+			context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.lightning(), (pose, buffer) -> {
+				for (Spark spark : wave.sparks) {
+					spark(pose, buffer, explosion, spark, camera);
+				}
+			});
+		}
+	}
+
+	/**
+	 * The explosion's sphere. For its first tenth of a second it's plain white, seen from outside only; then it
+	 * shows its material from both sides, adding its texture and glow to what's behind it and fading as it goes.
+	 */
+	private static void sphere(LevelRenderContext context, UltraModel.Mesh mesh, Explosion explosion, Vec3 camera) {
+		float[] p = mesh.positions();
+		float[] n = mesh.normals();
+		float[] uv = mesh.uvs();
+		int[] indices = mesh.indices();
+		PoseStack poseStack = context.poseStack();
+		if (explosion.age() <= Explosion.WHITE_TIME) {
+			Vec3 toCamera = camera.subtract(explosion.origin);
+			Quaternionf inverse = new Quaternionf(explosion.rotation).conjugate();
+			Vector3f view = inverse.transform(new Vector3f((float)toCamera.x, (float)toCamera.y, (float)toCamera.z));
+			float scale = (float)(explosion.meshScale() * PlayerShape.BLOCKS_PER_UNIT);
+			context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.debugQuads(), (pose, buffer) -> {
+				for (int i = 0; i < indices.length; i += 3) {
+					int a = indices[i], b = indices[i + 1], c = indices[i + 2];
+					float cx = (p[a * 3] + p[b * 3] + p[c * 3]) / 3 * scale;
+					float cy = (p[a * 3 + 1] + p[b * 3 + 1] + p[c * 3 + 1]) / 3 * scale;
+					float cz = -(p[a * 3 + 2] + p[b * 3 + 2] + p[c * 3 + 2]) / 3 * scale;
+					float nx = n[a * 3] + n[b * 3] + n[c * 3];
+					float ny = n[a * 3 + 1] + n[b * 3 + 1] + n[c * 3 + 1];
+					float nz = -(n[a * 3 + 2] + n[b * 3 + 2] + n[c * 3 + 2]);
+					if (nx * (view.x - cx) + ny * (view.y - cy) + nz * (view.z - cz) <= 0) {
+						continue;
+					}
+					for (int v : new int[]{a, b, c, c}) {
+						buffer.addVertex(pose, p[v * 3], p[v * 3 + 1], -p[v * 3 + 2]).setColor(1F, 1F, 1F, 1F);
+					}
+				}
+			});
+			return;
+		}
+		float fade = (float)Math.max(explosion.alpha(), 0);
+		float color = SPHERE_COLOR * SPHERE_TEXTURE_ALPHA * fade;
+		context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.energySwirl(mesh.texture(), 0, 0), (pose, buffer) -> {
+			for (int i = 0; i < indices.length; i += 3) {
+				for (int v : new int[]{indices[i], indices[i + 1], indices[i + 2], indices[i + 2]}) {
+					buffer.addVertex(pose, p[v * 3], p[v * 3 + 1], -p[v * 3 + 2])
+						.setColor(color, color, color, 1)
+						.setUv(uv[v * 2], uv[v * 2 + 1])
+						.setOverlay(OverlayTexture.NO_OVERLAY)
+						.setLight(LightCoordsUtil.FULL_BRIGHT)
+						.setNormal(pose, n[v * 3], n[v * 3 + 1], -n[v * 3 + 2]);
+				}
+			}
+		});
+		float glow = SPHERE_TEXTURE_ALPHA * fade;
+		context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.lightning(), (pose, buffer) -> {
+			for (int i = 0; i < indices.length; i += 3) {
+				for (int v : new int[]{indices[i], indices[i + 1], indices[i + 2], indices[i + 2], indices[i + 2], indices[i + 2], indices[i + 1], indices[i]}) {
+					buffer.addVertex(pose, p[v * 3], p[v * 3 + 1], -p[v * 3 + 2]).setColor(SPHERE_EMISSION, SPHERE_EMISSION, SPHERE_EMISSION, glow);
+				}
+			}
+		});
+	}
+
+	/**
+	 * A spark's streak, from where it started to where it is, turned to face the camera: full width at the spark
+	 * and none at the start, and fading towards the start as its trail ages out.
+	 */
+	private static void spark(PoseStack.Pose pose, VertexConsumer buffer, Explosion explosion, Spark spark, Vec3 camera) {
+		double units = PlayerShape.BLOCKS_PER_UNIT;
+		double t = explosion.age();
+		Vec3 start = explosion.origin.add(spark.start.scale(units)).subtract(camera);
+		Vec3 head = start.add(spark.direction.scale(SPARK_SPEED * t * units));
+		Vec3 side = spark.direction.cross(head).normalize().scale(spark.size * units / 2);
+		if (!Double.isFinite(side.x)) {
+			return;
+		}
+		// The Additive shader doubles the trail's alpha, which runs from 1 at the spark to 0 where a point is a
+		// lifetime old.
+		float tailAlpha = (float)Math.min(1, 2 * (1 - t / SPARK_LIFETIME));
+		float b = SPARK_BRIGHTNESS;
+		for (Vec3[] quad : new Vec3[][]{{head.add(side), head.subtract(side), start, start}, {start, start, head.subtract(side), head.add(side)}}) {
+			for (int i = 0; i < 4; i++) {
+				Vec3 v = quad[i];
+				boolean atHead = v != start;
+				buffer.addVertex(pose, new Vector3f((float)v.x, (float)v.y, (float)v.z)).setColor(b, b, b, atHead ? 1 : tailAlpha);
 			}
 		}
 	}

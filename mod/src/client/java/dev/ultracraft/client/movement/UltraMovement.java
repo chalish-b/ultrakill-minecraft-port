@@ -32,6 +32,8 @@ import java.util.function.IntToDoubleFunction;
  */
 public final class UltraMovement {
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
+	/** The player's Rigidbody mass. */
+	private static final double MASS = 100;
 	private static final double DT = UltraBody.FIXED_DT;
 	private static final Vec3 UP = UltraBody.UP;
 	private static final Vec3 G = UltraBody.GRAVITY_DIRECTION;
@@ -126,6 +128,10 @@ public final class UltraMovement {
 	private boolean shortCollider;
 	private double notJumpingTimer;
 	private double jumpReadyTimer;
+	/** Rocket jumps since the player last stood on the ground or stepped on an enemy. */
+	private int rocketJumps;
+	/** A harmless explosion can't launch the player again until this runs out. */
+	private double safeExplosionLaunchCooldown;
 	/** PlayerFootsteps: counts down to the next footstep while walking. */
 	private double footstepTimer = 1;
 
@@ -305,6 +311,7 @@ public final class UltraMovement {
 		this.invincible = false;
 		if (this.onGround && !this.jumping) {
 			this.currentWallJumps = 0;
+			this.rocketJumps = 0;
 			double downwardSpeed = G.dot(this.body.velocity);
 			if (this.slopeOnGround && this.inputDir.x == 0 && this.inputDir.z == 0) {
 				downwardSpeed = 0;
@@ -784,6 +791,7 @@ public final class UltraMovement {
 
 	private void enemyStepResets() {
 		this.currentWallJumps = 0;
+		this.rocketJumps = 0;
 		this.clingFade = 0;
 	}
 
@@ -801,12 +809,64 @@ public final class UltraMovement {
 		this.body.velocity = this.body.velocity.add(velocityChange);
 	}
 
+	/**
+	 * Explosion.Collide's push on the player: NewMovement.LaunchFromPoint, away from the explosion. A harmless
+	 * rocket explosion pushes less with every rocket jump in a row, and a harmless explosion can't push again
+	 * for half a second.
+	 *
+	 * @param origin the explosion's centre
+	 * @param harmful whether the explosion also hurts the player
+	 */
+	public void explosionLaunch(Vec3 origin, double pushForceMultiplier, double maxSize, boolean rocketExplosion, boolean harmful) {
+		if (this.safeExplosionLaunchCooldown > 0 && !harmful) {
+			return;
+		}
+		double strength = 200;
+		if (rocketExplosion && !harmful) {
+			strength = Math.rint(100 / ((this.rocketJumps + 3) / 3.0));
+			this.rocketJumps++;
+		}
+		Vec3 root = root();
+		Vec3 offset = origin.subtract(root);
+		Vec3 from = (offset.x * offset.x + offset.z * offset.z) / (S * S) < 0.0625 ? root : origin;
+		launchFromPoint(from, strength * pushForceMultiplier, maxSize);
+		if (!harmful) {
+			this.safeExplosionLaunchCooldown = 0.5;
+		}
+	}
+
+	/**
+	 * NewMovement.LaunchFromPoint: away from {@code position}, harder the closer the player is to it within
+	 * {@code maxDistance} units (at full strength while jumping), and at least upwards by half that.
+	 */
+	private void launchFromPoint(Vec3 position, double strength, double maxDistance) {
+		Vec3 root = root();
+		Vec3 away = root.equals(position) ? new Vec3(0, 1, 0) : root.subtract(position).normalize();
+		double reach = this.jumping ? maxDistance : Math.max(0, maxDistance - root.distanceTo(position) / S);
+		Vec3 push = away.scale(reach * strength);
+		double up = Math.max(-G.dot(this.body.velocity), 0.5 * reach * strength);
+		push = push.subtract(G.scale(G.dot(push))).subtract(G.scale(up));
+		launchImpulse(push);
+	}
+
+	/** NewMovement.Launch: an impulse of {@code direction} × 8 on the player's 100 kg body, replacing its velocity. */
+	private void launchImpulse(Vec3 direction) {
+		if (direction.subtract(G).lengthSqr() < 1.0E-10 && this.onGround) {
+			return;
+		}
+		if (direction.lengthSqr() > 0) {
+			this.body.velocity = Vec3.ZERO;
+		}
+		launch(U.clampMagnitude(direction, 1000).scale(8 / MASS));
+	}
+
 	/** Unity's Invoke without CancelInvoke: when one is already pending, the earlier one fires first. */
 	private static double scheduleEarliest(double pending, double delay) {
 		return pending > 0 ? Math.min(pending, delay) : delay;
 	}
 
 	private void runTimers(double dt) {
+		this.safeExplosionLaunchCooldown = U.moveTowards(this.safeExplosionLaunchCooldown, 0, dt);
 		if (this.notJumpingTimer > 0) {
 			this.notJumpingTimer -= dt;
 			if (this.notJumpingTimer <= 0) {
@@ -1081,6 +1141,11 @@ public final class UltraMovement {
 
 	public boolean shortCollider() {
 		return this.shortCollider;
+	}
+
+	/** NewMovement's transform.position, in blocks. */
+	public Vec3 rootPosition() {
+		return root();
 	}
 
 	/** Where the camera is drawn this frame, between the last two physics steps. */

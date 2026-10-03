@@ -177,6 +177,29 @@ public final class FirstPersonWeapons {
 		this.returnToOrigRot = true;
 	}
 
+	/**
+	 * A bone of the current arm in camera space (Minecraft's axes, units): where it is, and where its own right,
+	 * up and forward point, each of length 1.
+	 */
+	public record Frame(Vector3f position, Vector3f right, Vector3f up, Vector3f forward) {
+	}
+
+	/** The current arm's bone with this name, as it's posed now. */
+	public @Nullable Frame armBone(String name) {
+		Viewmodel arm = arm();
+		int bone = arm == null ? -1 : arm.model.bone(name);
+		if (bone < 0) {
+			return null;
+		}
+		Matrix4f matrix = arm.model.boneMatrices(arm.pose, this.armRotation)[bone];
+		return new Frame(
+			matrix.getTranslation(new Vector3f()),
+			matrix.getColumn(0, new Vector3f()).normalize(),
+			matrix.getColumn(1, new Vector3f()).normalize(),
+			matrix.getColumn(2, new Vector3f()).normalize()
+		);
+	}
+
 	/** RevolverCylinder.DoTurn, after a shot. */
 	public void turnCylinder(Weapon weapon) {
 		Viewmodel viewmodel = weapon(weapon);

@@ -198,6 +198,10 @@ def combat(env, x):
         x.add_source(f"punch_swoosh.{arm}", next(components(punch.m_GameObject.read(), "AudioSource")))
         x.add_source(f"punch_hit.{arm}", source_ref(punch.heavyHit))
     x.add_source("parry_hit", source_ref(punch.specialHit))
+    blast = punch.blastWave.deref().read()
+    x.add_source("explosion_wave", next(components(blast, "AudioSource")))
+    x.add_source("fist_reload", next(components(punch.shellEjector.deref().read().m_GameObject.read(), "AudioSource")))
+    x.add_source("shell_impact", next(components(punch.shell.deref().read(), "AudioSource")))
 
     movement = find_script(env, "walkSpeed", "jumpSound")
     x.add_source("hurt", source_ref(movement.hurtScreen.deref().read().m_GameObject))

@@ -5,6 +5,8 @@ import dev.ultracraft.UltraItems;
 import dev.ultracraft.UltraPlayer;
 import dev.ultracraft.mixin.AbstractArrowAccessor;
 import dev.ultracraft.net.CycleVariantPayload;
+import dev.ultracraft.net.ExplosionHitPayload;
+import dev.ultracraft.net.ExplosionHurtPayload;
 import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.WeaponHitPayload;
@@ -20,6 +22,8 @@ import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityReference;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.boss.enderdragon.EnderDragon;
+import net.minecraft.world.entity.boss.wither.WitherBoss;
 import net.minecraft.world.entity.projectile.Projectile;
 import net.minecraft.world.entity.projectile.ProjectileDeflection;
 import net.minecraft.world.entity.projectile.arrow.AbstractArrow;
@@ -51,6 +55,8 @@ public final class ServerCombat {
 	private static final long PARRY_HITSTOP_MILLIS = 250;
 	/** TimeController.HitStop after a punch lands. */
 	private static final long PUNCH_HITSTOP_MILLIS = 100;
+	/** How far from the player an explosion can reach something. */
+	private static final double EXPLOSION_REACH = 64;
 
 	private static final Map<UUID, ActivePunch> PUNCHES = new HashMap<>();
 	private static boolean hitstopFroze;
@@ -63,6 +69,8 @@ public final class ServerCombat {
 		ServerPlayNetworking.registerGlobalReceiver(WeaponHitPayload.TYPE, (payload, context) -> onWeaponHit(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(PunchPayload.TYPE, (payload, context) -> onPunch(context.player(), payload.fist()));
 		ServerPlayNetworking.registerGlobalReceiver(CycleVariantPayload.TYPE, (payload, context) -> onCycleVariant(context.player()));
+		ServerPlayNetworking.registerGlobalReceiver(ExplosionHitPayload.TYPE, (payload, context) -> onExplosionHit(context.player(), payload));
+		ServerPlayNetworking.registerGlobalReceiver(ExplosionHurtPayload.TYPE, (payload, context) -> onExplosionHurt(context.player(), payload.damage()));
 		ServerTickEvents.END_SERVER_TICK.register(ServerCombat::tick);
 	}
 
@@ -96,6 +104,44 @@ public final class ServerCombat {
 		Gore gore = tryForExplode && killed ? Gore.HEAD : Gore.of(head, damage, killed);
 		BloodZones.add(level, position, gore);
 		return gore;
+	}
+
+	/**
+	 * Explosion.Collide, for what the client's explosion reached: an enemy takes the damage and the knockback, a
+	 * projectile turns friendly and flies off along the push at no less than its speed, and anything else is sent
+	 * off at the push's velocity.
+	 */
+	private static void onExplosionHit(ServerPlayer player, ExplosionHitPayload hit) {
+		if (!active(player)) {
+			return;
+		}
+		Entity entity = player.level().getEntity(hit.entityId());
+		if (entity == null || entity == player || !entity.isAlive() || entity.distanceToSqr(player) > EXPLOSION_REACH * EXPLOSION_REACH) {
+			return;
+		}
+		Vec3 push = hit.push();
+		if (entity instanceof LivingEntity target) {
+			Vec3 velocity = target.getDeltaMovement();
+			damage(player, target, hit.damage(), false, target.getBoundingBox().getCenter(), false);
+			knockBack(target, velocity, push);
+		} else if (entity instanceof Projectile projectile) {
+			Vec3 velocity = push.normalize().scale(Math.max(projectile.getDeltaMovement().length(), push.length() * S / 20));
+			projectile.deflect((deflected, deflector, random, power) -> {
+				deflected.setDeltaMovement(velocity);
+				deflected.needsSync = true;
+			}, player, EntityReference.of(player), false, Vec3.ZERO);
+		} else {
+			entity.setDeltaMovement(push.scale(S / 20));
+			entity.needsSync = true;
+		}
+	}
+
+	/** NewMovement.GetHurt from the player's own explosion. */
+	private static void onExplosionHurt(ServerPlayer player, int damage) {
+		if (!active(player) || damage <= 0 || damage > 1000) {
+			return;
+		}
+		player.hurtServer(player.level(), player.damageSources().explosion(player, player), damage / UltraHealth.HP_PER_HEALTH);
 	}
 
 	private static void onCycleVariant(ServerPlayer player) {
@@ -190,12 +236,17 @@ public final class ServerCombat {
 
 	/**
 	 * Enemy.KnockBack, in place of Minecraft's knockback from the hit: the enemy stops falling, rises a little if
-	 * it's in the air, and is sent along the punch.
+	 * it's in the air, and is sent along the force. Bosses stand their ground, as ULTRAKILL's heaviest enemies do.
 	 *
 	 * @param velocity the enemy's velocity before the hit
 	 * @param force units per second
 	 */
 	private static void knockBack(LivingEntity target, Vec3 velocity, Vec3 force) {
+		if (target instanceof WitherBoss || target instanceof EnderDragon) {
+			target.setDeltaMovement(velocity);
+			target.needsSync = true;
+			return;
+		}
 		double y = Math.max(velocity.y, 0);
 		if (!target.onGround()) {
 			y += 1 * S / 20;

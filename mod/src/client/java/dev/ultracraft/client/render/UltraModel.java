@@ -185,6 +185,16 @@ public final class UltraModel {
 		return world;
 	}
 
+	/** A mesh as stored: in its bone's space, Unity's axes. */
+	public record Mesh(Identifier texture, float[] positions, float[] normals, float[] uvs, int[] indices) {
+	}
+
+	/** The {@code index}th mesh, for drawing it some other way than {@link #submit}. */
+	public Mesh mesh(int index) {
+		Part part = this.parts.get(index);
+		return new Mesh(part.texture, part.positions, part.normals, part.uvs, part.indices);
+	}
+
 	/** The first bone with this name, or -1. */
 	public int bone(String name) {
 		for (int i = 0; i < this.names.length; i++) {
