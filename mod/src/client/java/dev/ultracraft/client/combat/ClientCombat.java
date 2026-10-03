@@ -268,7 +268,7 @@ public final class ClientCombat implements Revolver.Actions {
 			return;
 		}
 		Vec3 velocity = player.getLookAngle().scale(20).add(0, 15, 0).add(movement.velocity());
-		this.coins.add(new Coin(movement.eyePosition().add(0, -0.5 * S, 0), velocity));
+		this.coins.add(new Coin(movement.eyePosition().add(0, -0.5 * S, 0), velocity, player.getYRot(), player.getXRot()));
 		this.sounds.play("coin_throw", 1, 1);
 	}
 
@@ -357,12 +357,11 @@ public final class ClientCombat implements Revolver.Actions {
 
 	// ---- health ---------------------------------------------------------------------------------
 
-	/** NewMovement.GetHealth's sound and green flash, when blood heals the player. */
+	/** NewMovement.GetHealth's sound, when blood heals the player. */
 	private void healFeedback(LocalPlayer player) {
 		float health = player.getHealth();
 		if (this.lastHealth >= 0 && health > this.lastHealth + 1.0E-3F && this.quietHealLeft <= 0) {
 			this.sounds.play("heal", 1, 1);
-			ScreenFlashes.INSTANCE.heal();
 		}
 		this.lastHealth = health;
 	}
