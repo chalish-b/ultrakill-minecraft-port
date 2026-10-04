@@ -12,9 +12,11 @@ import dev.ultracraft.client.render.FirstPersonWeapons;
 import dev.ultracraft.client.render.ScreenFlashes;
 import dev.ultracraft.client.render.UltraModel;
 import dev.ultracraft.client.render.animation.Animator;
+import dev.ultracraft.combat.BlockDamage;
 import dev.ultracraft.combat.FistType;
 import dev.ultracraft.combat.Gore;
 import dev.ultracraft.combat.ServerCombat;
+import dev.ultracraft.net.BlockHitPayload;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
@@ -96,6 +98,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	private static final float WHIPLASH_DAMAGE = 0.2F;
 	/** Landed shells stay until there are more than this many (GoreZone's maxGibs at the default maxGore). */
 	private static final int MAX_SHELLS = 150;
+	/** The piercer's charged shot goes through up to this many blocks, as long as it breaks them. */
+	private static final int PIERCER_BLOCKS = 3;
 	/** Shotgun.Shoot: pellets per shot, and how far each is turned about every axis, in degrees. */
 	private static final int PELLETS = 12;
 	private static final double PELLET_SPREAD = 10;
@@ -173,6 +177,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	/** Since the grinding sparks last burst, and since bits last came off the wall; below 0 while not grinding. */
 	private double sinceSawSparks = -1;
 	private double sinceSawGibs;
+	/** Since the grinding chainsaw last hit the wall; below 0 while not grinding. */
+	private double sinceSawWallHit = -1;
 	private FirstPersonWeapons.@Nullable Weapon held;
 	private boolean wasFire2;
 	private double coinCharge = 400;
@@ -594,39 +600,57 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			sharpshooterBeam(minecraft.level, player, eye, look, muzzle(eye, look, player), ricochets);
 			return;
 		}
-		List<Hitscan.Hit> hits = Hitscan.cast(minecraft.level, player, eye, look, RANGE, this.coins, this.cores);
-		Vec3 end = hits.getLast().position();
 		int bodiesLeft = charged ? 3 : 1;
-		for (Hitscan.Hit hit : hits) {
-			if (hit.kind() == Hitscan.Kind.ENTITY) {
-				if (bodiesLeft-- <= 0) {
+		int blocksLeft = charged ? PIERCER_BLOCKS : 1;
+		float blockDamage = charged ? 2 : 1;
+		// Blocks the shot breaks on its way, and how far along it the last of them is.
+		Set<BlockPos> broken = new HashSet<>();
+		double passed = -1;
+		Vec3 end = eye;
+		shot:
+		while (true) {
+			for (Hitscan.Hit hit : Hitscan.cast(minecraft.level, player, eye, look, RANGE, this.coins, this.cores, broken)) {
+				boolean wall = hit.kind() == Hitscan.Kind.BLOCK || hit.kind() == Hitscan.Kind.END;
+				if (!wall && hit.distance() <= passed) {
 					continue;
 				}
-				// The charged beam usually crosses two of an enemy's hitboxes; Minecraft mobs have one, so it
-				// counts twice, once with the head bonus.
-				float damage = charged ? (hit.head() ? 2.5F : 1) + 1 : (hit.head() ? 2 : 1);
-				damage(minecraft.level, hit.entity(), damage, hit.head(), hit.position());
-				movement.shake(charged ? 1 : 0.5);
-				if (!charged) {
+				if (hit.kind() == Hitscan.Kind.ENTITY) {
+					if (bodiesLeft-- <= 0) {
+						continue;
+					}
+					// The charged beam usually crosses two of an enemy's hitboxes; Minecraft mobs have one, so it
+					// counts twice, once with the head bonus.
+					float damage = charged ? (hit.head() ? 2.5F : 1) + 1 : (hit.head() ? 2 : 1);
+					damage(minecraft.level, hit.entity(), damage, hit.head(), hit.position());
+					movement.shake(charged ? 1 : 0.5);
+					if (!charged) {
+						end = hit.position();
+						break shot;
+					}
+				} else if (hit.kind() == Hitscan.Kind.COIN) {
+					hit.coin().hit(hit.coin().power, new HashSet<>(), charged ? Effects.BeamStyle.SUPER : Effects.BeamStyle.COIN);
 					end = hit.position();
-					break;
-				}
-			} else if (hit.kind() == Hitscan.Kind.COIN) {
-				hit.coin().hit(hit.coin().power, new HashSet<>(), charged ? Effects.BeamStyle.SUPER : Effects.BeamStyle.COIN);
-				end = hit.position();
-				break;
-			} else if (hit.kind() == Hitscan.Kind.CORE) {
-				coreShot(hit.core());
-				if (!charged) {
+					break shot;
+				} else if (hit.kind() == Hitscan.Kind.CORE) {
+					coreShot(hit.core());
+					if (!charged) {
+						end = hit.position();
+						break shot;
+					}
+				} else {
 					end = hit.position();
-					break;
+					if (hit.kind() == Hitscan.Kind.BLOCK) {
+						this.effects.impact(minecraft.level, hit.position());
+						hitBlock(hit.block(), blockDamage);
+						// The charged beam carries on through the blocks it breaks.
+						if (--blocksLeft > 0 && BlockDamage.breaksInOneHit(minecraft.level, hit.block(), blockDamage)) {
+							broken.add(hit.block());
+							passed = hit.distance();
+							continue shot;
+						}
+					}
+					break shot;
 				}
-			} else {
-				if (hit.kind() == Hitscan.Kind.BLOCK) {
-					this.effects.impact(minecraft.level, hit.position());
-				}
-				end = hit.position();
-				break;
 			}
 		}
 		this.effects.beam(muzzle(eye, look, player), end, charged ? Effects.BeamStyle.SUPER : Effects.BeamStyle.REVOLVER);
@@ -663,6 +687,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 				end = hit.position();
 				if (hit.kind() == Hitscan.Kind.BLOCK && hit.face() != null) {
 					this.effects.impact(level, end);
+					hitBlock(hit.block(), 1);
 					if (ricochets > 0) {
 						Vec3 normal = hit.face().getUnitVec3();
 						Vec3 reflected = direction.subtract(normal.scale(2 * direction.dot(normal)));
@@ -767,6 +792,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		this.sharpshooterCharge -= 100;
 	}
 
+	private static void hitBlock(@Nullable BlockPos block, float damage) {
+		if (block != null) {
+			ClientPlayNetworking.send(new BlockHitPayload(block, damage));
+		}
+	}
+
 	private void damage(Level level, LivingEntity target, float damage, boolean head, Vec3 at) {
 		ClientPlayNetworking.send(new WeaponHitPayload(target.getId(), damage, head, at));
 		Gore gore = Gore.of(head, damage, false);
@@ -862,8 +893,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 
 		Vec3 direction = new Vec3(this.random.nextGaussian(), this.random.nextGaussian(), this.random.nextGaussian()).normalize();
 		Vec3 end = coin.position.add(direction.scale(30));
-		HitResult hit = level.clip(new ClipContext(coin.position, end, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+		BlockHitResult hit = level.clip(new ClipContext(coin.position, end, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
 		this.effects.beam(coin.position, hit.getLocation(), coin.beam);
+		if (hit.getType() != HitResult.Type.MISS) {
+			hitBlock(hit.getBlockPos(), coin.power);
+		}
 	}
 
 	/**
@@ -929,9 +963,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			landing = head;
 			power++;
 		} else {
-			HitResult hit = level.clip(new ClipContext(eye, eye.add(look.scale(RANGE)), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+			BlockHitResult hit = level.clip(new ClipContext(eye, eye.add(look.scale(RANGE)), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
 			this.effects.beam(coin.position, hit.getLocation(), Effects.BeamStyle.COIN);
 			if (hit.getType() != HitResult.Type.MISS) {
+				hitBlock(hit.getBlockPos(), coin.power);
 				landing = hit.getLocation().subtract(look.scale(S));
 				if (power < 5) {
 					power++;
@@ -1337,7 +1372,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			Vec3 to = world(camera, new Vector3f(center).add(axis)).scale(S).add(eye);
 			this.sawZone.update(dt, level, player, from, to, radius * S, zone.get("hurtCooldown").getAsDouble(), this);
 		}
-		grind(dt, level, player, movement);
+		grind(dt, level, player, movement, zone.get("hurtCooldown").getAsDouble(), zone.get("enemyDamage").getAsFloat());
 	}
 
 	/**
@@ -1368,10 +1403,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		}
 	}
 
-	/** The revving chainsaw on a wall within reach of the aim: sparks, a grinding sound, a shake, and bits of the wall. */
-	private void grind(double dt, Level level, LocalPlayer player, UltraMovement movement) {
+	/**
+	 * The revving chainsaw on a wall within reach of the aim: sparks, a grinding sound, a shake, and bits of the
+	 * wall. It hits the block as it hits enemies, straight away and again every {@code cooldown} seconds.
+	 */
+	private void grind(double dt, Level level, LocalPlayer player, UltraMovement movement, double cooldown, float damage) {
 		Vec3 eye = movement.eyePosition();
-		BlockHitResult wall = level.clip(new ClipContext(eye, eye.add(player.getLookAngle().scale(SAW_WALL_REACH)), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+		BlockHitResult wall = level.clip(new ClipContext(eye, eye.add(player.getLookAngle().scale(SAW_WALL_REACH)), ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player));
 		if (wall.getType() == HitResult.Type.MISS) {
 			stopGrinding();
 			return;
@@ -1381,6 +1419,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			this.sinceSawSparks = 0;
 		}
 		this.sinceSawSparks += dt;
+		if (this.sinceSawWallHit < 0 || this.sinceSawWallHit >= cooldown) {
+			hitBlock(wall.getBlockPos(), damage);
+			this.sinceSawWallHit = 0;
+		}
+		this.sinceSawWallHit += dt;
 		this.sawGrind.update("chainsaw_grind", 1, 1);
 		movement.shake(0.1);
 		this.sinceSawGibs += dt;
@@ -1393,6 +1436,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	private void stopGrinding() {
 		this.sawGrind.stop();
 		this.sinceSawSparks = -1;
+		this.sinceSawWallHit = -1;
 	}
 
 	/**
@@ -1498,6 +1542,16 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	@Override
 	public void sawbladeEnemy(LivingEntity enemy, boolean punched) {
 		sawHitEnemy(enemy, sawScript(SAWBLADE, "sawblade").get("damage").getAsFloat() * (punched ? 2 : 1));
+	}
+
+	@Override
+	public void sawWall(BlockPos block) {
+		hitBlock(block, sawScript(THROWN_SAW, "chainsaw").get("damage").getAsFloat());
+	}
+
+	@Override
+	public void sawbladeWall(BlockPos block, boolean punched) {
+		hitBlock(block, sawScript(SAWBLADE, "sawblade").get("damage").getAsFloat() * (punched ? 2 : 1));
 	}
 
 	private void sawHitEnemy(LivingEntity enemy, float damage) {
@@ -1737,11 +1791,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	}
 
 	@Override
-	public void wall(Pellet pellet) {
+	public void wall(Pellet pellet, BlockPos block) {
 		if (pellet.boosted) {
 			explode(EXPLOSION, pellet.position, pellet.direction(), true);
 		} else {
 			bulletSpark(pellet.position);
+			hitBlock(block, PELLET_DAMAGE);
 		}
 	}
 

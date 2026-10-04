@@ -1,10 +1,13 @@
 package dev.ultracraft.client.combat;
 
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -15,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /** What a hitscan ray passes through, nearest first, up to the block that stops it. */
 final class Hitscan {
@@ -33,9 +37,11 @@ final class Hitscan {
 
 	/**
 	 * @param face the side of the block a {@link Kind#BLOCK} hit struck
+	 * @param block the block a {@link Kind#BLOCK} hit struck
 	 */
 	record Hit(
-		Kind kind, Vec3 position, double distance, @Nullable LivingEntity entity, @Nullable Coin coin, @Nullable Core core, boolean head, @Nullable Direction face
+		Kind kind, Vec3 position, double distance, @Nullable LivingEntity entity, @Nullable Coin coin, @Nullable Core core, boolean head, @Nullable Direction face,
+		@Nullable BlockPos block
 	) {
 	}
 
@@ -44,8 +50,13 @@ final class Hitscan {
 	}
 
 	static List<Hit> cast(Level level, Entity shooter, Vec3 from, Vec3 direction, double range, List<Coin> coins, List<Core> cores) {
+		return cast(level, shooter, from, direction, range, coins, cores, Set.of());
+	}
+
+	/** @param broken blocks the ray passes through, as if they were already gone */
+	static List<Hit> cast(Level level, Entity shooter, Vec3 from, Vec3 direction, double range, List<Coin> coins, List<Core> cores, Set<BlockPos> broken) {
 		Vec3 to = from.add(direction.scale(range));
-		BlockHitResult block = level.clip(new ClipContext(from, to, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, shooter));
+		BlockHitResult block = clip(level, shooter, from, to, broken);
 		boolean blocked = block.getType() != HitResult.Type.MISS;
 		Vec3 end = blocked ? block.getLocation() : to;
 
@@ -53,7 +64,7 @@ final class Hitscan {
 		for (Entity entity : level.getEntities(shooter, new AABB(from, end).inflate(1), e -> e instanceof LivingEntity living && living.isAlive() && !e.isSpectator())) {
 			AABB box = entity.getBoundingBox().inflate(entity.getPickRadius());
 			Optional<Vec3> clip = box.contains(from) ? Optional.of(from) : box.clip(from, end);
-			clip.ifPresent(point -> hits.add(new Hit(Kind.ENTITY, point, point.distanceTo(from), (LivingEntity)entity, null, null, isHead(entity, point), null)));
+			clip.ifPresent(point -> hits.add(new Hit(Kind.ENTITY, point, point.distanceTo(from), (LivingEntity)entity, null, null, isHead(entity, point), null, null)));
 		}
 		for (Coin coin : coins) {
 			if (!coin.hittable()) {
@@ -65,7 +76,7 @@ final class Hitscan {
 			}
 			Vec3 nearest = from.add(direction.scale(along));
 			if (nearest.distanceTo(coin.position) <= Coin.HIT_RADIUS) {
-				hits.add(new Hit(Kind.COIN, nearest, along, null, coin, null, false, null));
+				hits.add(new Hit(Kind.COIN, nearest, along, null, coin, null, false, null, null));
 			}
 		}
 		for (Core core : cores) {
@@ -83,11 +94,29 @@ final class Hitscan {
 				continue;
 			}
 			double at = Math.max(entry, 0);
-			hits.add(new Hit(Kind.CORE, from.add(direction.scale(at)), at, null, null, core, false, null));
+			hits.add(new Hit(Kind.CORE, from.add(direction.scale(at)), at, null, null, core, false, null, null));
 		}
 		hits.sort(Comparator.comparingDouble(Hit::distance));
-		hits.add(new Hit(blocked ? Kind.BLOCK : Kind.END, end, from.distanceTo(end), null, null, null, false, blocked ? block.getDirection() : null));
+		hits.add(new Hit(blocked ? Kind.BLOCK : Kind.END, end, from.distanceTo(end), null, null, null, false, blocked ? block.getDirection() : null, blocked ? block.getBlockPos() : null));
 		return hits;
+	}
+
+	/** Level.clip, passing through the {@code broken} blocks. */
+	private static BlockHitResult clip(Level level, Entity shooter, Vec3 from, Vec3 to, Set<BlockPos> broken) {
+		ClipContext context = new ClipContext(from, to, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, shooter);
+		if (broken.isEmpty()) {
+			return level.clip(context);
+		}
+		return BlockGetter.traverseBlocks(from, to, context, (c, pos) -> {
+			if (broken.contains(pos)) {
+				return null;
+			}
+			BlockState state = level.getBlockState(pos);
+			return level.clipWithInteractionOverride(from, to, pos, c.getBlockShape(state, level, pos), state);
+		}, c -> {
+			Vec3 delta = from.subtract(to);
+			return BlockHitResult.miss(to, Direction.getApproximateNearest(delta.x, delta.y, delta.z), BlockPos.containing(to));
+		});
 	}
 
 	/** Minecraft mobs have one hitbox; the part around and above eye height counts as the head. */

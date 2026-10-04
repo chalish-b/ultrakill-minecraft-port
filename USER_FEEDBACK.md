@@ -9,7 +9,6 @@ Other feedback or ideas to discuss
 - Killing a whiplashed enemy doesn't give any HP. This is because of hard damage I think, but in Ultrakill, since we have style meter and hard damage refill, it sometimes does.
   - And I think ultrakill's hard damage takes some time to apply as well so immediately whiplash + kill still has some time to give HP. Not sure about this one though
 - Punches are also kinda OP. I can kill any enemy with 2 punches.
-- Being able to mine blocks by shooting would be cool
 - Only getting HP from killing hostile enemies would be more interesting imo
 - Revolvers are a bit too OP. Almost everything is one shot, or two shot at most. No reason to use other weapons other than pistols.
 - Similarly, the enemies seem too OP as well, I die from like 2 hits out of any hostile mob
@@ -19,7 +18,6 @@ Other feedback or ideas to discuss
 - Style meter could be cool
 - Enderman avoiding projectiles and whiplash might be cool
 - Explosions breaking blocks
-- Pressing punch to left click on blocks
 
 Features
 - Other weapons, one variant at a time.

@@ -3,6 +3,7 @@ package dev.ultracraft.client.combat;
 import dev.ultracraft.PlayerShape;
 import dev.ultracraft.client.UltraConfig;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.ClipContext;
@@ -41,7 +42,7 @@ final class Pellet {
 	interface Hits {
 		void enemy(Pellet pellet, LivingEntity enemy);
 
-		void wall(Pellet pellet);
+		void wall(Pellet pellet, BlockPos block);
 	}
 
 	Vec3 position;
@@ -111,7 +112,7 @@ final class Pellet {
 		} else if (wall.getType() != HitResult.Type.MISS) {
 			this.position = end;
 			this.removed = true;
-			hits.wall(this);
+			hits.wall(this, wall.getBlockPos());
 		} else {
 			this.position = next;
 		}

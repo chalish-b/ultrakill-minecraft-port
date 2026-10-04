@@ -5,6 +5,7 @@ import dev.ultracraft.PlayerShape;
 import dev.ultracraft.client.UltraConfig;
 import dev.ultracraft.client.movement.UltraSounds;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -63,6 +64,9 @@ final class ThrownSaw {
 
 		/** It bounced off a wall here, facing out of it; only the first bounce of a step makes a sound. */
 		void sawRicochet(Vec3 at, Direction face, boolean sound);
+
+		/** It hit a block on a bounce. */
+		void sawWall(BlockPos block);
 
 		/** Chainsaw.TurnIntoSawblade: the chain snapped. */
 		void sawSnapped(ThrownSaw saw);
@@ -240,6 +244,7 @@ final class ThrownSaw {
 			this.position = wall.getLocation();
 			this.velocity = reflect(direction, wall.getDirection()).scale(speed / 2);
 			hits.sawRicochet(wall.getLocation(), wall.getDirection(), true);
+			hits.sawWall(wall.getBlockPos());
 			this.sinceIgnoringPlayer = 1;
 			checkMultipleRicochets(level, player, hits);
 		}
@@ -275,6 +280,7 @@ final class ThrownSaw {
 			this.position = wall.getLocation();
 			this.velocity = reflect(direction, wall.getDirection()).scale(speed / 2);
 			hits.sawRicochet(wall.getLocation(), wall.getDirection(), i == 0);
+			hits.sawWall(wall.getBlockPos());
 		}
 	}
 

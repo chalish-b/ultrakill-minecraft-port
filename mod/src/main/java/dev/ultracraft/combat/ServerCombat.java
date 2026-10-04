@@ -36,7 +36,10 @@ import net.minecraft.world.entity.projectile.ProjectileDeflection;
 import net.minecraft.world.entity.projectile.arrow.AbstractArrow;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.HashMap;
@@ -199,9 +202,20 @@ public final class ServerCombat {
 		if (!active(player)) {
 			return;
 		}
-		if (!tryPunch(player, type)) {
+		if (!tryPunch(player, type) && !punchBlock(player, type)) {
 			PUNCHES.put(player.getUUID(), new ActivePunch(type, PUNCH_ACTIVE_TICKS));
 		}
+	}
+
+	/** A punch that meets nothing else lands on the block in reach, if there is one, plants included. */
+	private static boolean punchBlock(ServerPlayer player, FistType type) {
+		Vec3 eye = player.getEyePosition();
+		BlockHitResult block = player.level().clip(new ClipContext(eye, eye.add(player.getLookAngle().scale(PUNCH_REACH)), ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player));
+		if (block.getType() == HitResult.Type.MISS) {
+			return false;
+		}
+		BlockDamage.hit(player, block.getBlockPos(), type.damage);
+		return true;
 	}
 
 	/** A punch still looking for something to hit. */

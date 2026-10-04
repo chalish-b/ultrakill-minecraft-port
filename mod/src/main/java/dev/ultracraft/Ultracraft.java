@@ -1,7 +1,9 @@
 package dev.ultracraft;
 
+import dev.ultracraft.combat.BlockDamage;
 import dev.ultracraft.combat.ServerCombat;
 import dev.ultracraft.combat.ServerWhiplash;
+import dev.ultracraft.net.BlockHitPayload;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
@@ -33,6 +35,7 @@ public class Ultracraft implements ModInitializer {
 	public void onInitialize() {
 		PayloadTypeRegistry.serverboundPlay().register(UltraStatePayload.TYPE, UltraStatePayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(WeaponHitPayload.TYPE, WeaponHitPayload.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(BlockHitPayload.TYPE, BlockHitPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(PunchPayload.TYPE, PunchPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(CycleVariantPayload.TYPE, CycleVariantPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(ExplosionHitPayload.TYPE, ExplosionHitPayload.CODEC);
@@ -48,6 +51,7 @@ public class Ultracraft implements ModInitializer {
 		UltraItems.init();
 		ServerCombat.init();
 		ServerWhiplash.init();
+		BlockDamage.init();
 	}
 
 	public static Identifier id(String path) {

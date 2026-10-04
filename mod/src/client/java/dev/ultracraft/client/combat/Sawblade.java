@@ -5,6 +5,7 @@ import dev.ultracraft.PlayerShape;
 import dev.ultracraft.client.UltraConfig;
 import dev.ultracraft.client.movement.UltraSounds;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -54,6 +55,9 @@ final class Sawblade {
 
 		/** It bounced off a wall here, facing out of it, with a sound if it's the step's first, and maybe bits. */
 		void sawRicochet(Vec3 at, Direction face, boolean sound, boolean gibs);
+
+		/** It hit a block on a bounce, twice as hard if punched. */
+		void sawbladeWall(BlockPos block, boolean punched);
 
 		/** Nail.SawBreak. */
 		void sawbladeBroke(Sawblade sawblade);
@@ -206,6 +210,7 @@ final class Sawblade {
 			this.sinceLastGibs = 0;
 		}
 		hits.sawRicochet(wall.getLocation(), wall.getDirection(), first, gibs);
+		hits.sawbladeWall(wall.getBlockPos(), this.punched);
 		this.punchable = true;
 		this.sameEnemyHitCooldown = 0;
 		this.currentHitEnemy = null;
