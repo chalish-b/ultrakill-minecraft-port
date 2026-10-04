@@ -17,7 +17,6 @@ Other feedback or ideas to discuss
   - Melee parry ideas: Parrying creepers before they explode
 - Style meter could be cool
 - Enderman avoiding projectiles and whiplash might be cool
-- Explosions breaking blocks
 
 Features
 - Other weapons, one variant at a time.

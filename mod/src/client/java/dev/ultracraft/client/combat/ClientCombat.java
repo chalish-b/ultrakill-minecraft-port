@@ -18,6 +18,7 @@ import dev.ultracraft.combat.Gore;
 import dev.ultracraft.combat.ServerCombat;
 import dev.ultracraft.net.BlockHitPayload;
 import dev.ultracraft.net.CycleVariantPayload;
+import dev.ultracraft.net.ExplosionBlocksPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
 import dev.ultracraft.net.HitstopPayload;
@@ -1057,6 +1058,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		Quaternionf rotation = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
 		Explosion explosion = new Explosion(blast.getFirst(), position, rotation, look);
 		this.explosions.add(explosion);
+		ClientPlayNetworking.send(new ExplosionBlocksPayload(position, BLAST_BLOCK_POWER));
 		this.effects.wave(explosion);
 		movement.shake(explosion.cameraShake(eye));
 		// The blast's RandomPitch: up to a quarter either way.
@@ -1243,7 +1245,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		Vec3 at = wall.getType() == HitResult.Type.MISS
 			? reach
 			: eye.add(look.scale(Math.max(eye.distanceTo(wall.getLocation()) - 0.1 * S, 0)));
-		explode(EXPLOSION, at, look, false, settings -> settings.overridden(OVERPUMP_SIZE, OVERPUMP_DAMAGE, 1));
+		explode(EXPLOSION, at, look, false, OVERPUMP_BLOCK_POWER, settings -> settings.overridden(OVERPUMP_SIZE, OVERPUMP_DAMAGE, 1));
 	}
 
 	/** Shotgun.Pump: the gun's pump animation. */
@@ -1783,7 +1785,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			return;
 		}
 		if (pellet.boosted) {
-			explode(EXPLOSION, pellet.position, pellet.direction(), true);
+			explode(EXPLOSION, pellet.position, pellet.direction(), true, CORE_BLOCK_POWER);
 			return;
 		}
 		shotgunHit(level, enemy, PELLET_DAMAGE, pellet.position);
@@ -1793,7 +1795,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	@Override
 	public void wall(Pellet pellet, BlockPos block) {
 		if (pellet.boosted) {
-			explode(EXPLOSION, pellet.position, pellet.direction(), true);
+			explode(EXPLOSION, pellet.position, pellet.direction(), true, CORE_BLOCK_POWER);
 		} else {
 			bulletSpark(pellet.position);
 			hitBlock(block, PELLET_DAMAGE);
@@ -1923,21 +1925,31 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	static final String EXPLOSION = "explosion";
 	/** "Explosion Super": a core shot with a revolver. */
 	static final String EXPLOSION_SUPER = "explosion_super";
+	/**
+	 * The powers of the Minecraft explosions that break blocks for each of the player's: a ghast's fireball is 1,
+	 * a creeper 3 and TNT 4.
+	 */
+	private static final float BLAST_BLOCK_POWER = 1;
+	private static final float CORE_BLOCK_POWER = 2;
+	private static final float OVERPUMP_BLOCK_POWER = 3;
+	private static final float SUPER_BLOCK_POWER = 4;
 
 	/**
 	 * An explosion prefab where something blew up, facing the way it was going (or the world's way): its
-	 * Explosions, each shaking the camera, its sound and its look.
+	 * Explosions, each shaking the camera, its sound and its look, and the blocks it breaks as a Minecraft
+	 * explosion of {@code blockPower}.
 	 */
-	private void explode(String prefab, Vec3 at, @Nullable Vec3 facing, boolean boosted) {
-		explode(prefab, at, facing, boosted, UnaryOperator.identity());
+	private void explode(String prefab, Vec3 at, @Nullable Vec3 facing, boolean boosted, float blockPower) {
+		explode(prefab, at, facing, boosted, blockPower, UnaryOperator.identity());
 	}
 
 	/** An explosion prefab whose Explosions the weapon setting it off changes first. */
-	private void explode(String prefab, Vec3 at, @Nullable Vec3 facing, boolean boosted, UnaryOperator<Explosion.Settings> setUp) {
+	private void explode(String prefab, Vec3 at, @Nullable Vec3 facing, boolean boosted, float blockPower, UnaryOperator<Explosion.Settings> setUp) {
 		UltraModel model = UltraModel.get(prefab);
 		if (model == null) {
 			return;
 		}
+		ClientPlayNetworking.send(new ExplosionBlocksPayload(at, blockPower));
 		Quaternionf rotation = facing == null ? new Quaternionf()
 			: new Quaternionf().lookAlong((float)facing.x, (float)facing.y, (float)facing.z, 0, 1, 0).conjugate();
 		List<Explosion> parts = new ArrayList<>();
@@ -2010,7 +2022,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			this.hitstopLeft = Math.max(this.hitstopLeft, CORE_HITSTOP);
 			ClientPlayNetworking.send(new HitstopPayload((int)(CORE_HITSTOP * 1000)));
 		}
-		explode(EXPLOSION, core.position, null, false);
+		explode(EXPLOSION, core.position, null, false, CORE_BLOCK_POWER);
 	}
 
 	/** RevolverBeam on a core: the parry flash, and a super explosion. */
@@ -2029,7 +2041,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			return;
 		}
 		core.removed = true;
-		explode(EXPLOSION_SUPER, core.position, null, false);
+		explode(EXPLOSION_SUPER, core.position, null, false, SUPER_BLOCK_POWER);
 	}
 
 	@Override
@@ -2037,7 +2049,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		return this.cores;
 	}
 
-	@Override
+		@Override
 	public void touched(Explosion explosion) {
 		UltraMovement movement = UltraController.INSTANCE.movement();
 		if (movement != null && explosion.settings.touchShake() > 0) {
@@ -2085,7 +2097,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			return;
 		}
 		core.removed = true;
-		explode(EXPLOSION, core.position, null, false);
+		explode(EXPLOSION, core.position, null, false, CORE_BLOCK_POWER);
 	}
 
 	/** HookArm's clinkSparks and clinkObjectSparks: sparks out of {@code facing}, with their clink. */
