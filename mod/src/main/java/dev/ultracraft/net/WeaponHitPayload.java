@@ -33,7 +33,11 @@ public record WeaponHitPayload(int entityId, float damage, boolean head, Vec3 po
 		/** A tick of the Screwdriver's drill: the enemy doesn't flinch, and its blood is twice the size. */
 		DRILL,
 		/** The drill punched out of an enemy: an enemy it kills bursts. */
-		DRILL_PUNCH
+		DRILL_PUNCH,
+		/** A nail: the enemy isn't knocked back, and flinches no more often than Minecraft's damage cooldown allows. */
+		NAIL,
+		/** A nail bomb's nail: as a nail, and an enemy it kills bursts. */
+		NAIL_BOMB
 	}
 
 	@Override

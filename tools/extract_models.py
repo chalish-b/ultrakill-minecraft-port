@@ -45,6 +45,8 @@ MODELS = {
     "railcannon_electric": ("Railcannon Electric", "Railcannon", (0, 0, 0)),
     "railcannon_screwdriver": ("Railcannon Harpoon", "Railcannon", (0, 0, 0)),
     "railcannon_malicious": ("Railcannon Malicious", "Railcannon", (0, 0, 0)),
+    "nailgun_attractor": ("Nailgun Magnet", "Nailgun", (0, 0, 0)),
+    "nailgun_overheat": ("Nailgun Overheat", "Nailgun", (0, 0, 0)),
     "feedbacker": ("Arm Blue", "Punch", (0, -0.225, 0)),
     "knuckleblaster": ("Arm Red", "Punch", (0, -0.225, 0)),
     "whiplash": ("Hook Arm", "HookArm", (0, -0.225, 0)),
@@ -70,6 +72,12 @@ REFERENCED = {
     "railcannon_beam": ("Railcannon", "Railcannon Electric", "beam"),
     "railcannon_beam_malicious": ("Railcannon", "Railcannon Malicious", "beam"),
     "drill": ("Railcannon", "Railcannon Harpoon", "beam"),
+    "nail": ("Nailgun", "Nailgun Overheat", "nail"),
+    "nail_fodder": ("Nailgun", "Nailgun Magnet", "nail"),
+    "nail_heated": ("Nailgun", "Nailgun Overheat", "heatedNail"),
+    "magnet": ("Nailgun", "Nailgun Magnet", "magnetNail"),
+    "nailgun_muzzle_flash": ("Nailgun", "Nailgun Overheat", "muzzleFlash"),
+    "nailgun_muzzle_flash_heated": ("Nailgun", "Nailgun Overheat", "muzzleFlash2"),
 }
 NESTED = {
     "explosion_chunk": ("explosion", "Explosion", "explosionChunk"),
@@ -78,6 +86,8 @@ NESTED = {
     "explosion_malicious_railcannon": ("railcannon_beam_malicious", "RevolverBeam", "hitParticle"),
     "drill_beeper": ("drill", "TimeBomb", "beepLight"),
     "drill_break": ("drill", "TimeBomb", "explosion"),
+    "magnet_beeper": ("magnet", "TimeBomb", "beepLight"),
+    "magnet_break": ("magnet", "TimeBomb", "explosion"),
 }
 
 # AnimatorControllerParameterType and AnimatorConditionMode values.
@@ -309,9 +319,15 @@ def file_name(name):
     return re.sub(r"[^a-z0-9_]", "_", name.lower()).strip("_")
 
 
+# Minecraft draws a TrueType font this many of its text units to the em, rasterized this many times finer.
+FONT_SIZE = 9
+FONT_OVERSAMPLE = 8
+
+
 class Exporter:
     def __init__(self):
         self.textures = {}
+        self.fonts = {}
 
     def texture(self, pptr):
         tex = pptr.deref().read()
@@ -348,6 +364,19 @@ class Exporter:
             names.append(f"{NAMESPACE}:textures/viewmodel/{frame}.png")
         return names
 
+    def font(self, pptr):
+        """A UI Text's font, as a Minecraft TrueType font: its TTF under font/, and a definition naming it."""
+        font = pptr.deref().read()
+        name = file_name(font.m_Name)
+        if name not in self.fonts:
+            folder = OUT / "font"
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / f"{name}.ttf").write_bytes(bytes(font.m_FontData))
+            definition = {"providers": [{"type": "ttf", "file": f"{NAMESPACE}:{name}.ttf", "size": FONT_SIZE, "oversample": FONT_OVERSAMPLE}]}
+            (folder / f"{name}.json").write_text(json.dumps(definition, indent=1))
+            self.fonts[name] = True
+        return f"{NAMESPACE}:{name}"
+
     def sprite(self, pptr):
         """A Sprite's own pixels (cut out of its texture), as a texture."""
         sprite = pptr.deref().read()
@@ -367,8 +396,9 @@ class Exporter:
         handler = MeshHandler(mesh)
         handler.process()
         positions = np.array(handler.m_Vertices, dtype=float).reshape(-1, 3)
-        normals = np.array(handler.m_Normals, dtype=float).reshape(-1, 3)
-        uv = np.array(handler.m_UV0, dtype=float)
+        # Normals come as three components a vertex, or four in some meshes.
+        normals = np.array(handler.m_Normals, dtype=float).reshape(len(positions), -1)[:, :3]
+        uv = np.array(handler.m_UV0, dtype=float) if handler.m_UV0 is not None and len(handler.m_UV0) else np.zeros((len(positions), 2))
         joint_indices, weights = influences
         parts = []
         for i, triangles in enumerate(handler.get_triangles()):
@@ -568,6 +598,7 @@ def export_canvases(exporter, rig):
         size, pivot = root.m_SizeDelta, root.m_Pivot
         rect = (-pivot.x * size.x, -pivot.y * size.y, (1 - pivot.x) * size.x, (1 - pivot.y) * size.y)
         images = []
+        texts = []
 
         def layout(transform, parent_rect):
             x0, y0, x1, y1 = parent_rect
@@ -585,6 +616,24 @@ def export_canvases(exporter, rig):
                 return
             for c in child_go.m_Component:
                 obj = c.component.deref()
+                if obj.type.name == "MonoBehaviour" and script_name(obj) == "Text":
+                    tree = obj.read_typetree()
+                    if tree["m_Enabled"]:
+                        color = tree["m_Color"]
+                        font = tree["m_FontData"]
+                        placed[obj.path_id] = (len(canvases), len(texts))
+                        texts.append({
+                            "name": child_go.m_Name,
+                            "rect": [round(v, 6) for v in own_rect],
+                            "pivot": [transform.m_Pivot.x, transform.m_Pivot.y],
+                            "scale": transform.m_LocalScale.x,
+                            "color": [color["r"], color["g"], color["b"], color["a"]],
+                            "font": exporter.font(obj.read().m_FontData.m_Font),
+                            "fontSize": font["m_FontSize"],
+                            "alignment": font["m_Alignment"],
+                            "text": tree["m_Text"],
+                        })
+                    continue
                 if obj.type.name != "MonoBehaviour" or script_name(obj) != "Image":
                     continue
                 tree = obj.read_typetree()
@@ -625,7 +674,7 @@ def export_canvases(exporter, rig):
                 walk(t, layout(t, own_rect))
 
         walk(root, rect)
-        canvases.append({"bone": rig.index[root.object_reader.path_id], "images": images})
+        canvases.append({"bone": rig.index[root.object_reader.path_id], "images": images, "texts": texts})
     return canvases, placed
 
 
@@ -842,6 +891,71 @@ def export_scripts(exporter, rig, colors, placed):
                     "hook": rig.index[hook_arm.hook.path_id],
                     "hookModel": hook_arm.hookModel.deref().read().m_Name,
                 }
+            elif kind == "Nailgun":
+                nailgun = obj.read()
+                tree = obj.read_typetree()
+                color = lambda c: [c["r"], c["g"], c["b"], c["a"]]  # noqa: E731
+                # Nailgun.CorrectVariation: its first two variations swap colors.
+                color_index = {0: 1, 1: 0}.get(tree["variation"], tree["variation"])
+                scripts["nailgun"] = {
+                    "variation": tree["variation"],
+                    "variationColor": list(colors[color_index]),
+                    "fireRate": tree["fireRate"],
+                    "spread": tree["spread"],
+                    "shootPoints": [rig.index[transform_of(p.deref().read()).object_reader.path_id] for p in nailgun.shootPoints],
+                    "barrelHeats": [go_name_of(r) for r in nailgun.barrelHeats],
+                    "heatSinkImages": [list(placed[p.path_id]) if p.path_id in placed else None for p in nailgun.heatSinkImages],
+                    "ammoText": list(placed[nailgun.ammoText.path_id]) if nailgun.ammoText.path_id in placed else None,
+                    "emptyColor": color(tree["emptyColor"]),
+                    "fullColor": color(tree["fullColor"]),
+                }
+            elif kind == "Spin" and active:
+                tree = obj.read_typetree()
+                axis = tree["spinDirection"]
+                scripts.setdefault("spins", []).append({"bone": rig.index[transform_of(go).object_reader.path_id],
+                                                       "axis": [axis["x"], axis["y"], axis["z"]]})
+            elif kind == "Slider" and active:
+                slider = obj.read()
+                fill = slider.m_FillRect.deref().read()
+                image = next((c.component.deref() for c in fill.m_GameObject.read().m_Component
+                              if c.component.deref().type.name == "MonoBehaviour" and script_name(c.component.deref()) == "Image"), None)
+                if image is not None and image.path_id in placed:
+                    # The background its value tints (Nailgun's sliderBg): the nearest Image at or above the slider.
+                    background = None
+                    transform = transform_of(go)
+                    while transform is not None and background is None:
+                        owner = transform.m_GameObject.read()
+                        background = next((c.component.deref().path_id for c in owner.m_Component
+                                           if c.component.deref().type.name == "MonoBehaviour" and script_name(c.component.deref()) == "Image"), None)
+                        transform = transform.m_Father.deref().read() if transform.m_Father.path_id else None
+                    scripts.setdefault("sliders", []).append({
+                        "fill": list(placed[image.path_id]),
+                        "background": list(placed[background]) if background in placed else None,
+                        "direction": obj.read_typetree()["m_Direction"],
+                        "fillExtra": [fill.m_SizeDelta.x, fill.m_SizeDelta.y],
+                    })
+            elif kind == "CopyColor" and active:
+                copy = obj.read()
+                own = next(c.component.deref().path_id for c in go.m_Component
+                           if c.component.deref().type.name == "MonoBehaviour" and script_name(c.component.deref()) == "Image")
+                if own in placed and copy.target.path_id in placed:
+                    scripts.setdefault("copyColors", []).append({"image": list(placed[own]), "target": list(placed[copy.target.path_id])})
+            elif kind == "Nail" and not obj.read_typetree()["sawblade"]:
+                tree = obj.read_typetree()
+                body = next(c.component.deref().read() for c in go.m_Component if c.component.deref().type.name == "Rigidbody")
+                trigger = next(c.component.deref().read() for c in go.m_Component if c.component.deref().type.name == "SphereCollider")
+                capsule = next(c.component.deref().read() for c in go.m_Component if c.component.deref().type.name == "CapsuleCollider")
+                scale = transform_of(go).m_LocalScale.x
+                scripts["nail"] = {**{k: tree[k] for k in ("damage", "fodderDamageBoost", "heated")},
+                                   "mass": body.m_Mass, "triggerRadius": trigger.m_Radius * scale, "radius": capsule.m_Radius * scale,
+                                   "trail": trail_values(exporter, go)}
+            elif kind == "Magnet":
+                tree = obj.read_typetree()
+                collider = next(c.component.deref().read() for c in go.m_Component if c.component.deref().type.name == "SphereCollider")
+                scripts["magnet"] = {**{k: tree[k] for k in ("strength", "maxWeight", "health")}, "radius": collider.m_Radius,
+                                     "bone": rig.index[transform_of(go).object_reader.path_id]}
+            elif kind == "Breakable" and active:
+                scripts.setdefault("breakables", []).append({"bone": rig.index[transform_of(go).object_reader.path_id], "box": box_values(go)})
             elif kind == "Nail" and obj.read_typetree()["sawblade"]:
                 tree = obj.read_typetree()
                 scripts["sawblade"] = {k: tree[k] for k in ("damage", "hitAmount", "multiHitAmount")}
@@ -969,7 +1083,7 @@ def export_clip(clip_pptr, paths):
 
 
 def export_controller(controller_obj):
-    """The base layer's state machine: Animator layers above it only play in ULTRAKILL's shop."""
+    """The base layer's state machine, and the one clip each layer above it plays, if it plays just one."""
     tree = controller_obj.read_typetree()
     names = {h: n for h, n in tree["m_TOS"]}
     c = tree["m_Controller"]
@@ -1025,8 +1139,21 @@ def export_controller(controller_obj):
             "cycleOffset": state["m_CycleOffset"],
             "transitions": [transition(t) for t in state["m_TransitionConstantArray"]],
         })
+    # Layers above the base that play one clip, overriding the base by a weight the game sets (Nailgun's layer 1).
+    layers = []
+    for extra in c["m_LayerArray"][1:]:
+        extra = extra["data"]
+        extra_machine = c["m_StateMachineArray"][extra["m_StateMachineIndex"]]["data"]
+        extra_states = extra_machine["m_StateConstantArray"]
+        clip = -1
+        if (len(extra_states) == 1 and not extra_states[0]["data"]["m_TransitionConstantArray"]
+                and not extra_machine["m_AnyStateTransitionConstantArray"] and extra["(int&)m_LayerBlendingMode"] == 0):
+            nodes = extra_states[0]["data"]["m_BlendTreeConstantArray"][0]["data"]["m_NodeArray"]
+            clip = nodes[0]["data"]["m_ClipID"] if len(nodes) == 1 and nodes[0]["data"]["m_ClipID"] != 0xFFFFFFFF else -1
+        layers.append({"clip": clip, "weight": extra["m_DefaultWeight"]})
     return {
         "parameters": parameters,
+        "layers": layers,
         "defaultState": machine["m_DefaultState"],
         "states": states,
         "anyStateTransitions": [transition(t) for t in machine["m_AnyStateTransitionConstantArray"]],
@@ -1261,7 +1388,7 @@ def main():
     if missing:
         sys.exit(f"models not found: {sorted(missing)}")
 
-    for folder in ("viewmodels", "textures/viewmodel", "textures/item"):
+    for folder in ("viewmodels", "textures/viewmodel", "textures/item", "font"):
         if (OUT / folder).exists():
             shutil.rmtree(OUT / folder)
     (OUT / "viewmodels").mkdir(parents=True)

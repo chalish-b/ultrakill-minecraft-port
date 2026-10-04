@@ -7,13 +7,23 @@ import org.jspecify.annotations.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 
-/** The base layer of a Unity AnimatorController: parameters, states, and the transitions between them. */
-public record AnimatorController(List<Parameter> parameters, int defaultState, List<State> states, List<Transition> anyStateTransitions) {
+/**
+ * A Unity AnimatorController: its base layer's parameters, states and the transitions between them, and the layers
+ * above it that each play one clip.
+ */
+public record AnimatorController(List<Parameter> parameters, int defaultState, List<State> states, List<Transition> anyStateTransitions, List<Layer> layers) {
 	public enum ParameterType {
 		FLOAT,
 		INT,
 		BOOL,
 		TRIGGER
+	}
+
+	/**
+	 * A layer above the base that loops one clip ({@code clip} is -1 if it doesn't), overriding what the layers below
+	 * it animate by its weight.
+	 */
+	public record Layer(int clip, float defaultWeight) {
 	}
 
 	public record Parameter(String name, ParameterType type, float defaultValue) {
@@ -80,7 +90,14 @@ public record AnimatorController(List<Parameter> parameters, int defaultState, L
 				transitions(state.getAsJsonArray("transitions"))
 			));
 		}
-		return new AnimatorController(parameters, json.get("defaultState").getAsInt(), states, transitions(json.getAsJsonArray("anyStateTransitions")));
+		List<Layer> layers = new ArrayList<>();
+		if (json.has("layers")) {
+			for (JsonElement element : json.getAsJsonArray("layers")) {
+				JsonObject layer = element.getAsJsonObject();
+				layers.add(new Layer(layer.get("clip").getAsInt(), layer.get("weight").getAsFloat()));
+			}
+		}
+		return new AnimatorController(parameters, json.get("defaultState").getAsInt(), states, transitions(json.getAsJsonArray("anyStateTransitions")), layers);
 	}
 
 	private static List<Transition> transitions(Iterable<JsonElement> array) {

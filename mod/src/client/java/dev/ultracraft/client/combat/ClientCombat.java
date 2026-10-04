@@ -22,6 +22,7 @@ import dev.ultracraft.net.ExplosionBlocksPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
 import dev.ultracraft.net.HitstopPayload;
+import dev.ultracraft.net.MagnetPullPayload;
 import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.SlamHitPayload;
@@ -36,6 +37,8 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.particles.BlockParticleOption;
+import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.util.LightCoordsUtil;
 import net.minecraft.util.RandomSource;
@@ -46,6 +49,7 @@ import net.minecraft.world.entity.projectile.Projectile;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
@@ -73,12 +77,12 @@ import java.util.function.UnaryOperator;
 
 /**
  * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the shotgun's pellets, the
- * railcannon's beams, the arms' punches (and boosting pellets with them) and the Knuckleblaster's blast, the
- * Whiplash, explosions, weapon charges (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the
- * server, which applies them.
+ * nailgun's nails and magnets, the railcannon's beams, the arms' punches (and boosting pellets with them) and the
+ * Knuckleblaster's blast, the Whiplash, explosions, weapon charges (WeaponCharges) and the hitstops after a parry
+ * or a punch. Hits go to the server, which applies them.
  */
-public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Railcannon.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events, Explosion.Hits,
-	SawZone.Hits, ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits, Drill.Hits {
+public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Nailgun.Actions, Railcannon.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events,
+	Explosion.Hits, SawZone.Hits, ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits, Drill.Hits, Nail.Hits, Magnet.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
@@ -168,6 +172,23 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 	private static final double RAIL_STEP_DEAD = 0.01;
 	/** The Electric railcannon's beam bores through the blocks it breaks, up to this far past the first one it meets. */
 	private static final double RAIL_TUNNEL_DEPTH = 12;
+	/** The nails: the Overheat's, the Attractor's, and the burnout's heated ones. */
+	private static final String NAIL = "nail";
+	private static final String NAIL_FODDER = "nail_fodder";
+	private static final String NAIL_HEATED = "nail_heated";
+	/** The nailgun's muzzle flashes (a burnout's is bigger), gone after a tenth of a second (RemoveOnTime). */
+	private static final String NAILGUN_MUZZLE_FLASH = "nailgun_muzzle_flash";
+	private static final String NAILGUN_MUZZLE_FLASH_HEATED = "nailgun_muzzle_flash_heated";
+	private static final double NAILGUN_MUZZLE_FLASH_LIFETIME = 0.1;
+	/** The nailgun's muzzle flash shows smaller than its prefab makes it: half its size, by eye against ULTRAKILL. */
+	private static final double NAILGUN_MUZZLE_FLASH_SIZE = 0.5;
+	/** Nail.HitEnemy and OnCollisionEnter play their sounds at this volume. */
+	private static final float NAIL_HIT_VOLUME = 0.2F;
+	/** An enemy keeps this many of the nails stuck in it (EnemyIdentifier.DeliverDamage). */
+	private static final int MAX_STUCK_NAILS = 10;
+	/** The Attractor's magnet, and its TimeBomb's explosion: debris that falls off as it breaks. */
+	private static final String MAGNET = "magnet";
+	private static final String MAGNET_BREAK = "magnet_break";
 
 	private final UltraSounds sounds = new UltraSounds();
 	private final Effects effects = new Effects();
@@ -192,6 +213,18 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 	private final List<RailShot> railShots = new ArrayList<>();
 	/** The Screwdriver's drills. */
 	private final List<Drill> drills = new ArrayList<>();
+	/** The nailguns, and the charges they share. */
+	private final Nailgun.Charges nailgunCharges = new Nailgun.Charges();
+	private final Map<Nailgun.Variant, Nailgun> nailguns = new EnumMap<>(Nailgun.Variant.class);
+	private final List<Nail> nails = new ArrayList<>();
+	private final List<Magnet> magnets = new ArrayList<>();
+	private final List<Nail.Burst> nailBursts = new ArrayList<>();
+	/**
+	 * How many nails each enemy has had stuck in it (EnemyIdentifier.nailsAmount), and those still in it, oldest
+	 * first.
+	 */
+	private final Map<Integer, Integer> nailCounts = new HashMap<>();
+	private final Map<Integer, List<Nail>> stuckNails = new HashMap<>();
 	/** The Feedbacker's punch is still active and hasn't punched a chainsaw yet. */
 	private boolean sawPunchPending;
 	/** The chainsaw idling on the gun, and grinding a wall. */
@@ -233,6 +266,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 		for (Revolver.Variant variant : Revolver.Variant.values()) {
 			this.revolvers.put(variant, new Revolver(variant, this.sounds));
 		}
+		for (Nailgun.Variant variant : Nailgun.Variant.values()) {
+			this.nailguns.put(variant, new Nailgun(variant, this.nailgunCharges, this.sounds));
+		}
 	}
 
 	public static void init() {
@@ -271,6 +307,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 			this.railShots.clear();
 			this.drills.forEach(drill -> drill.drillSound.stop());
 			this.drills.clear();
+			this.nails.clear();
+			this.magnets.clear();
+			this.nailBursts.clear();
+			this.nailCounts.clear();
+			this.stuckNails.clear();
 			return;
 		}
 		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
@@ -301,6 +342,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 		}
 		this.readyShots = shots;
 		this.railcannon.recharge(dt);
+		this.nailgunCharges.recharge(dt, this.magnets.size());
 		updateRicochets(dt, minecraft.level, player);
 		updateRailShots(dt, minecraft.level, player);
 		this.punchStamina = Math.min(this.punchStamina + 1.25 * dt, 2);
@@ -340,6 +382,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 			drill.update(dt, partialTick, minecraft.level, player, this);
 		}
 		this.drills.removeIf(drill -> drill.removed);
+		updateNails(dt, partialTick, minecraft.level, player);
 		for (Shockwave shockwave : List.copyOf(this.shockwaves)) {
 			shockwave.update(dt, minecraft.level, player, this);
 		}
@@ -384,6 +427,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 			if (shotgun != null) {
 				shotgun.update(dt, this.input, this);
 			}
+			Nailgun nailgun = nailgun(this.held);
+			if (nailgun != null) {
+				nailgun.update(dt, this.input, this);
+			}
 			if (railcannonVariant(this.held) != null) {
 				this.railcannon.update(dt, this.input, this);
 			}
@@ -416,7 +463,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 			: new FirstPersonWeapons.ShotgunState(shotgun.heat(), shotgun.meter(), shotgun.tint(), shotgun.reddening(), shotgun.jitter(), new FirstPersonWeapons.SawState(
 				shotgun.variant == Shotgun.Variant.SAWED_ON && shotgun.sawAttached(), shotgun.sawing(), shotgun.sawBroken(), shotgun.bladeScroll()
 			));
-		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, this.railcannon.charge(), this);
+		Nailgun nailgun = nailgun(this.held);
+		FirstPersonWeapons.NailgunState nailgunDisplay = nailgun == null ? FirstPersonWeapons.NailgunState.NONE : nailgun.display();
+		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, nailgunDisplay, this.railcannon.charge(), this);
 	}
 
 	private void updateHeld(FirstPersonWeapons.@Nullable Weapon weapon) {
@@ -430,6 +479,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 		Shotgun shotgun = shotgun(this.held);
 		if (shotgun != null) {
 			shotgun.holster();
+		}
+		Nailgun nailgun = nailgun(this.held);
+		if (nailgun != null) {
+			nailgun.holster();
 		}
 		if (railcannonVariant(this.held) != null) {
 			this.railcannon.holster(this);
@@ -445,6 +498,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 			shotgun = shotgun(weapon);
 			if (shotgun != null) {
 				shotgun.equip();
+			}
+			nailgun = nailgun(weapon);
+			if (nailgun != null) {
+				nailgun.equip();
 			}
 			Railcannon.Variant variant = railcannonVariant(weapon);
 			if (variant != null) {
@@ -478,6 +535,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 				boolean tinted = shotgun != null && shotgun.meterTinted();
 				this.sounds.play(tinted ? "shotgun_click_charge" : "shotgun_click", 0.5F, this.sounds.randomPitch(0.95F, 1.05F));
 			}
+			// NailgunAnimationReceiver.CanShoot, as the Equip animation brings the nailgun up.
+			case "CanShoot" -> {
+				Nailgun nailgun = nailgun(weapon);
+				if (nailgun != null) {
+					nailgun.canShoot();
+				}
+			}
 			// Shotgun.Smack, as the reload knocks the next core in.
 			case "Smack" -> this.sounds.play("shotgun_smack", 0.75F, this.sounds.randomPitch(2, 2.2F));
 			// Shotgun.Pump1Sound and Pump2Sound: the pump slides back and forth; going back, a tone rises with the pumps.
@@ -500,6 +564,24 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 			case REVOLVER_MARKSMAN -> this.revolvers.get(Revolver.Variant.MARKSMAN);
 			case REVOLVER_SHARPSHOOTER -> this.revolvers.get(Revolver.Variant.SHARPSHOOTER);
 			default -> null;
+		};
+	}
+
+	private @Nullable Nailgun nailgun(FirstPersonWeapons.@Nullable Weapon weapon) {
+		if (weapon == null) {
+			return null;
+		}
+		return switch (weapon) {
+			case NAILGUN_ATTRACTOR -> this.nailguns.get(Nailgun.Variant.ATTRACTOR);
+			case NAILGUN_OVERHEAT -> this.nailguns.get(Nailgun.Variant.OVERHEAT);
+			default -> null;
+		};
+	}
+
+	private static FirstPersonWeapons.Weapon weapon(Nailgun.Variant variant) {
+		return switch (variant) {
+			case ATTRACTOR -> FirstPersonWeapons.Weapon.NAILGUN_ATTRACTOR;
+			case OVERHEAT -> FirstPersonWeapons.Weapon.NAILGUN_OVERHEAT;
 		};
 	}
 
@@ -578,6 +660,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 		}
 		if (stack.is(UltraItems.SHOTGUN_PUMP_CHARGE)) {
 			return FirstPersonWeapons.Weapon.SHOTGUN_PUMP_CHARGE;
+		}
+		if (stack.is(UltraItems.NAILGUN_ATTRACTOR)) {
+			return FirstPersonWeapons.Weapon.NAILGUN_ATTRACTOR;
+		}
+		if (stack.is(UltraItems.NAILGUN_OVERHEAT)) {
+			return FirstPersonWeapons.Weapon.NAILGUN_OVERHEAT;
 		}
 		if (stack.is(UltraItems.RAILCANNON_ELECTRIC)) {
 			return FirstPersonWeapons.Weapon.RAILCANNON_ELECTRIC;
@@ -741,7 +829,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 				}
 			}
 		}
-		this.effects.beam(muzzle(eye, look, player), end, charged ? Effects.BeamStyle.SUPER : Effects.BeamStyle.REVOLVER);
+		beam(muzzle(eye, look, player), end, charged ? Effects.BeamStyle.SUPER : Effects.BeamStyle.REVOLVER);
+	}
+
+	/** A revolver beam (or a coin's, or a railcannon's) from one point to another: it breaks the magnets it goes through. */
+	private void beam(Vec3 from, Vec3 to, Effects.BeamStyle style) {
+		breakMagnets(from, to);
+		this.effects.beam(from, to, style);
 	}
 
 	/** Roughly where the barrel is, for drawing the beam from it. */
@@ -785,7 +879,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 				break;
 			}
 		}
-		this.effects.beam(drawFrom, end, Effects.BeamStyle.SHARP);
+		beam(drawFrom, end, Effects.BeamStyle.SHARP);
 	}
 
 	/** A sharpshooter beam about to come off a wall. */
@@ -953,7 +1047,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 			.orElse(null);
 		if (next != null) {
 			next.hit(coin.power + 1, coin.chainHits, coin.beam);
-			this.effects.beam(coin.position, next.position, coin.beam);
+			beam(coin.position, next.position, coin.beam);
 			return;
 		}
 
@@ -965,7 +1059,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 			.min(Comparator.comparingDouble(c -> c.position.distanceToSqr(coin.position)))
 			.orElse(null);
 		if (core != null) {
-			this.effects.beam(coin.position, core.position, coin.beam);
+			beam(coin.position, core.position, coin.beam);
 			if (coin.beam == Effects.BeamStyle.COIN) {
 				superExplode(core);
 			} else {
@@ -979,14 +1073,14 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 			Vec3 head = target.getEyePosition();
 			coin.chainHits.add(target.getId());
 			damage(level, target, coin.power * 2, true, head);
-			this.effects.beam(coin.position, head, coin.beam);
+			beam(coin.position, head, coin.beam);
 			return;
 		}
 
 		Vec3 direction = new Vec3(this.random.nextGaussian(), this.random.nextGaussian(), this.random.nextGaussian()).normalize();
 		Vec3 end = coin.position.add(direction.scale(30));
 		BlockHitResult hit = level.clip(new ClipContext(coin.position, end, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
-		this.effects.beam(coin.position, hit.getLocation(), coin.beam);
+		beam(coin.position, hit.getLocation(), coin.beam);
 		if (hit.getType() != HitResult.Type.MISS) {
 			hitBlock(hit.getBlockPos(), coin.power);
 		}
@@ -1051,12 +1145,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 		if (target != null) {
 			Vec3 head = target.getEyePosition();
 			damage(level, target, coin.power * 2, true, head);
-			this.effects.beam(coin.position, head, Effects.BeamStyle.COIN);
+			beam(coin.position, head, Effects.BeamStyle.COIN);
 			landing = head;
 			power++;
 		} else {
 			BlockHitResult hit = level.clip(new ClipContext(eye, eye.add(look.scale(RANGE)), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
-			this.effects.beam(coin.position, hit.getLocation(), Effects.BeamStyle.COIN);
+			beam(coin.position, hit.getLocation(), Effects.BeamStyle.COIN);
 			if (hit.getType() != HitResult.Type.MISS) {
 				hitBlock(hit.getBlockPos(), coin.power);
 				landing = hit.getLocation().subtract(look.scale(S));
@@ -1080,6 +1174,192 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 			.min(Comparator.<LivingEntity>comparingInt(e -> e instanceof Enemy ? 0 : 1)
 				.thenComparingDouble(e -> e.distanceToSqr(coin.position)))
 			.orElse(null);
+	}
+
+	// ---- nailgun --------------------------------------------------------------------------------
+
+	/**
+	 * Nailgun.Shoot: a nail out of a unit ahead of the camera (or the camera, with a wall closer), turned up to the
+	 * spread about each axis and flying at 200 units a second; the muzzle flash at the barrel's shoot point with
+	 * the shot, the Shoot animation and a camera shake (stronger during a burnout).
+	 */
+	@Override
+	public void shootNail(Nailgun.Variant variant, int barrel, boolean heated, double spread, float volume, float pitch, int steps) {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		String prefab = heated ? NAIL_HEATED : variant == Nailgun.Variant.ATTRACTOR ? NAIL_FODDER : NAIL;
+		UltraModel model = UltraModel.get(prefab);
+		if (player == null || minecraft.level == null || movement == null || model == null) {
+			return;
+		}
+		FirstPersonWeapons.Weapon weapon = weapon(variant);
+		FirstPersonWeapons.Placement point = FirstPersonWeapons.INSTANCE.nailgunShootPoint(weapon, barrel);
+		if (point != null) {
+			this.effects.stepFlash(heated ? NAILGUN_MUZZLE_FLASH_HEATED : NAILGUN_MUZZLE_FLASH, point.position(), point.rotation(), NAILGUN_MUZZLE_FLASH_LIFETIME, point.scale() * NAILGUN_MUZZLE_FLASH_SIZE);
+		}
+		this.sounds.play("nailgun_shoot", volume, pitch);
+		Vec3 eye = movement.eyePosition();
+		Vec3 ahead = eye.add(player.getLookAngle().scale(S));
+		Vec3 from = Hitscan.clear(minecraft.level, player, eye, ahead) ? ahead : eye;
+		Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
+		double up = Math.toRadians(spread(spread / 3));
+		double yaw = Math.toRadians(spread(spread / 3));
+		Vector3f direction = camera.transform(new Vector3f(
+			(float)(Math.cos(up) * Math.sin(yaw)), (float)-Math.sin(up), (float)(-Math.cos(up) * Math.cos(yaw))
+		));
+		Nail nail = new Nail(prefab, model.script("nail"), from, new Vec3(direction.x, direction.y, direction.z).scale(Nail.SPEED));
+		this.nails.add(nail);
+		nail.fly(steps, minecraft.level, player, this);
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon);
+		if (animator != null) {
+			animator.setTrigger("Shoot");
+		}
+		movement.shake(heated ? 0.35 : 0.1);
+	}
+
+	/** Nailgun.ShootMagnet: the magnet thrown out of a unit ahead of the camera (or the camera) along the aim, with its throw. */
+	@Override
+	public void shootMagnet(Nailgun.Variant variant, boolean animate) {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		UltraModel model = UltraModel.get(MAGNET);
+		if (player == null || minecraft.level == null || movement == null || model == null) {
+			return;
+		}
+		Vec3 eye = movement.eyePosition();
+		Vec3 look = player.getLookAngle();
+		Vec3 ahead = eye.add(look.scale(S));
+		this.magnets.add(new Magnet(model, this.sounds, Hitscan.clear(minecraft.level, player, eye, ahead) ? ahead : eye, look));
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon(variant));
+		if (animator != null && animate) {
+			animator.setTrigger("Shoot");
+		}
+		this.sounds.play("magnet_shoot", 1, this.sounds.randomPitch(1.4F, 1.6F));
+	}
+
+	/** The magnets (each catching and letting go of nails), then the nails, and the nail bombs; enemies that are gone are forgotten. */
+	private void updateNails(double dt, float partialTick, Level level, LocalPlayer player) {
+		for (Magnet magnet : List.copyOf(this.magnets)) {
+			if (!magnet.removed) {
+				magnet.update(dt, partialTick, level, player, this.nails, this.magnets, this);
+			}
+		}
+		this.magnets.removeIf(magnet -> magnet.removed);
+		for (Nail nail : List.copyOf(this.nails)) {
+			if (!nail.removed) {
+				nail.update(dt, partialTick, level, player, this);
+			}
+		}
+		this.nails.removeIf(nail -> nail.removed);
+		for (Nail.Burst burst : this.nailBursts) {
+			burst.update(dt);
+		}
+		this.nailBursts.removeIf(Nail.Burst::over);
+		this.nailCounts.keySet().removeIf(id -> level.getEntity(id) == null);
+		this.stuckNails.keySet().removeIf(id -> level.getEntity(id) == null);
+	}
+
+	/**
+	 * Nail.HitEnemy: the nail's hit, with its sound. A nail bomb's nail does every nail's damage times half their
+	 * number, once for each enemy. The nail counts as stuck in the enemy, which keeps the ten latest.
+	 */
+	@Override
+	public void nailEnemy(Nail nail, LivingEntity enemy) {
+		Level level = Minecraft.getInstance().level;
+		if (level == null) {
+			return;
+		}
+		this.sounds.once().update("nail_hit_enemy", NAIL_HIT_VOLUME, this.sounds.randomPitch(0.9F, 1.1F), nail.position);
+		Nail.Burst burst = nail.burst != null && !nail.burst.over() ? nail.burst : null;
+		if (burst == null) {
+			nailHit(level, enemy, nail.damage, nail.position, WeaponHitPayload.Kind.NAIL);
+		} else if (burst.damaged.add(enemy.getId())) {
+			float damage = nail.damage * (burst.nails / 2);
+			if (damage > 0) {
+				nailHit(level, enemy, damage, nail.position, WeaponHitPayload.Kind.NAIL_BOMB);
+			}
+		}
+		this.nailCounts.merge(enemy.getId(), 1, Integer::sum);
+		List<Nail> stuck = this.stuckNails.computeIfAbsent(enemy.getId(), id -> new ArrayList<>());
+		stuck.removeIf(n -> n.removed);
+		stuck.add(nail);
+		while (stuck.size() > MAX_STUCK_NAILS) {
+			stuck.removeFirst().remove();
+		}
+	}
+
+	private void nailHit(Level level, LivingEntity enemy, float damage, Vec3 at, WeaponHitPayload.Kind kind) {
+		ClientPlayNetworking.send(new WeaponHitPayload(enemy.getId(), damage, false, at, kind));
+		Gore gore = Gore.of(false, damage, false);
+		this.effects.blood(level, at, gore);
+		this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
+	}
+
+	/**
+	 * Nail.OnCollisionEnter on a wall: its ricochet, a bit of the wall, and the hit on the block; a heated nail
+	 * shatters glass.
+	 */
+	@Override
+	public void nailWall(Nail nail, BlockPos block, Vec3 at) {
+		ClientLevel level = Minecraft.getInstance().level;
+		if (level == null) {
+			return;
+		}
+		this.sounds.once().update("nail_hit_wall", NAIL_HIT_VOLUME, this.sounds.randomPitch(0.9F, 1.1F), at);
+		BlockState state = level.getBlockState(block);
+		if (!state.isAir()) {
+			level.addParticle(new BlockParticleOption(ParticleTypes.BLOCK, state), at.x, at.y, at.z, 0, 0, 0);
+		}
+		float hardness = state.getDestroySpeed(level, block);
+		hitBlock(block, nail.heated && hardness >= 0 && state.getSoundType() == SoundType.GLASS ? hardness : nail.damage);
+	}
+
+	@Override
+	public int nailsIn(LivingEntity enemy) {
+		return this.nailCounts.getOrDefault(enemy.getId(), 0);
+	}
+
+	@Override
+	public void magnetPull(LivingEntity enemy, Vec3 change) {
+		ClientPlayNetworking.send(new MagnetPullPayload(enemy.getId(), change));
+	}
+
+	/** TimeBomb.Beep on a magnet: the beeper flashes, its beep as high as the magnet's load makes it. */
+	@Override
+	public void magnetBeep(Magnet magnet) {
+		this.sounds.once().update("magnet_beep", 1, magnet.beeperPitch, magnet.position);
+	}
+
+	/** The magnet broke: its debris and their sound (TimeBomb's explosion); the nails it threw out go as one nail bomb. */
+	@Override
+	public void magnetBroke(Magnet magnet, List<Nail> launched) {
+		this.effects.particles(MAGNET_BREAK, null, magnet.position);
+		this.sounds.once().update(MAGNET_BREAK, 1, this.sounds.randomPitch(0.9F, 1.1F), magnet.position);
+		if (!launched.isEmpty()) {
+			Nail.Burst burst = new Nail.Burst(launched.size());
+			this.nailBursts.add(burst);
+			for (Nail nail : launched) {
+				nail.burst = burst;
+			}
+		}
+	}
+
+	/** RevolverBeam through a magnet's cube: the magnet breaks, and the beam goes on. */
+	private void breakMagnets(Vec3 from, Vec3 to) {
+		Minecraft minecraft = Minecraft.getInstance();
+		double length = from.distanceTo(to);
+		if (minecraft.level == null || minecraft.player == null || length <= 0) {
+			return;
+		}
+		Vec3 direction = to.subtract(from).scale(1 / length);
+		for (Magnet magnet : List.copyOf(this.magnets)) {
+			OrientedBox cube = magnet.removed ? null : magnet.cube();
+			if (cube != null && cube.clip(from, direction, length).isPresent()) {
+				magnet.shot(minecraft.level, minecraft.player, this);
+			}
+		}
 	}
 
 	// ---- railcannon ----------------------------------------------------------------------------
@@ -1161,6 +1441,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 				break;
 			}
 		}
+		breakMagnets(drawFrom, end);
 		RailShot shot = new RailShot(hits, this.effects.heldBeam(drawFrom, end, Effects.BeamStyle.RAILCANNON), damage, coinPower, chainHits);
 		this.railShots.add(shot);
 		advance(shot, level, player);
@@ -1321,7 +1602,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 			movement.shake(2);
 		}
 		Hitscan.Hit hit = hits.isEmpty() ? wall : hits.getFirst();
-		this.effects.beam(drawFrom, hit.position(), Effects.BeamStyle.MALICIOUS);
+		beam(drawFrom, hit.position(), Effects.BeamStyle.MALICIOUS);
 		Vec3 back = direction.scale(-1);
 		switch (hit.kind()) {
 			case COIN -> hit.coin().hit(Float.isNaN(coinPower) ? hit.coin().power : coinPower, chainHits, Effects.BeamStyle.MALICIOUS);
@@ -2652,6 +2933,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 		this.effects.render(context, this.coins, this.shells, this.pellets, this.cores);
 		this.effects.renderSaws(context, this.saws, this.sawblades, chainStart());
 		this.effects.renderDrills(context, this.drills);
+		this.effects.renderNails(context, this.nails);
+		this.effects.renderMagnets(context, this.magnets);
 		this.effects.renderShockwaves(context, this.shockwaves);
 		renderWhiplash(context);
 	}

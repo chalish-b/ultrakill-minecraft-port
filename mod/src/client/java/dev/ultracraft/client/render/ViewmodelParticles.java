@@ -19,18 +19,22 @@ import java.util.List;
 
 /**
  * A ParticleSystem on a viewmodel, simulated in its own space so its particles move with the gun: a steady rate
- * out of a rectangle, each particle a still sprite facing the camera that fades over its life. Its AnimatedTexture
- * swaps the texture of all of them between an array's slices every so often. Its scaling mode is Local, so only
- * its own scale (1) counts, not the bones above it.
+ * out of a rectangle (still) or a cone (flying out at its speed), each particle a sprite facing the camera that
+ * fades over its life. Its AnimatedTexture swaps the texture of all of them between an array's slices every so
+ * often. Its scaling mode is Local, so only its own scale counts, not the bones above it.
  */
 final class ViewmodelParticles {
+	/** ParticleSystemShapeType.Cone: out of a disc of its radius, leaning out from its axis by up to its angle at the rim. */
+	private static final int CONE = 4;
 	/** ParticleSystemShapeType.Rectangle: a 1 by 1 square in the shape's XY plane, before its scale. */
 	private static final int RECTANGLE = 18;
 
-	private record Particle(Vector3f position, float roll, double born, double size, double lifetime) {
+	private record Particle(Vector3f position, Vector3f velocity, float roll, double born, double size, double lifetime) {
 	}
 
 	final int bone;
+	/** The system's own scale. */
+	private final float scale;
 	private final JsonObject settings;
 	private final List<Identifier> frames = new ArrayList<>();
 	private final double frameDelay;
@@ -42,8 +46,9 @@ final class ViewmodelParticles {
 	private double sinceFrame;
 	private int frame;
 
-	ViewmodelParticles(JsonObject settings) {
+	ViewmodelParticles(JsonObject settings, float scale) {
 		this.settings = settings;
+		this.scale = scale;
 		this.bone = settings.get("bone").getAsInt();
 		JsonObject animated = settings.has("animatedTexture") ? settings.getAsJsonObject("animatedTexture") : null;
 		if (animated != null) {
@@ -70,7 +75,12 @@ final class ViewmodelParticles {
 	}
 
 	void update(double dt) {
-		if (this.age < this.settings.get("duration").getAsDouble() || this.settings.get("looping").getAsBoolean()) {
+		update(dt, true);
+	}
+
+	/** Like {@link #update(double)}; while not {@code emitting} (ParticleSystem.Stop), its particles live out their lives. */
+	void update(double dt, boolean emitting) {
+		if (emitting && (this.age < this.settings.get("duration").getAsDouble() || this.settings.get("looping").getAsBoolean())) {
 			this.rateDue += constant(this.settings.getAsJsonObject("rate")) * dt;
 			while (this.rateDue >= 1) {
 				this.rateDue -= 1;
@@ -88,8 +98,17 @@ final class ViewmodelParticles {
 
 	private void emit() {
 		Vector3f position = new Vector3f();
+		Vector3f velocity = new Vector3f();
 		JsonObject shape = this.settings.has("shape") && !this.settings.get("shape").isJsonNull() ? this.settings.getAsJsonObject("shape") : null;
-		if (shape != null && shape.get("type").getAsInt() == RECTANGLE) {
+		if (shape != null && shape.get("type").getAsInt() == CONE) {
+			double angle = this.random.nextDouble() * Math.PI * 2;
+			double r = Math.sqrt(this.random.nextDouble());
+			double radius = shape.get("radius").getAsDouble();
+			position.set((float)(Math.cos(angle) * r * radius), (float)(Math.sin(angle) * r * radius), 0);
+			double lean = Math.toRadians(shape.get("angle").getAsDouble()) * r;
+			velocity.set((float)(Math.cos(angle) * Math.sin(lean)), (float)(Math.sin(angle) * Math.sin(lean)), (float)Math.cos(lean))
+				.mul((float)start(this.settings.getAsJsonObject("speed")));
+		} else if (shape != null && shape.get("type").getAsInt() == RECTANGLE) {
 			JsonArray scale = shape.getAsJsonArray("scale");
 			JsonArray rotation = shape.getAsJsonArray("rotation");
 			JsonArray offset = shape.getAsJsonArray("position");
@@ -102,7 +121,7 @@ final class ViewmodelParticles {
 				.transform(position);
 			position.add(offset.get(0).getAsFloat(), offset.get(1).getAsFloat(), offset.get(2).getAsFloat());
 		}
-		this.particles.add(new Particle(position, (float)start(this.settings.getAsJsonObject("rotation")), this.age,
+		this.particles.add(new Particle(position, velocity, (float)start(this.settings.getAsJsonObject("rotation")), this.age,
 			start(this.settings.getAsJsonObject("size")), start(this.settings.getAsJsonObject("lifetime"))));
 	}
 
@@ -140,9 +159,9 @@ final class ViewmodelParticles {
 				float green = startColor[1] * tint[1];
 				float blue = startColor[2] * tint[2];
 				float alpha = startColor[3] * tint[3];
-				Vector3f p = particle.position;
+				Vector3f p = new Vector3f(particle.velocity).mul((float)(this.age - particle.born)).add(particle.position).mul(this.scale);
 				Vector3f center = new Vector3f(origin).add(new Vector3f(x).mul(p.x)).add(new Vector3f(y).mul(p.y)).add(new Vector3f(z).mul(p.z));
-				float half = (float)(particle.size / 2);
+				float half = (float)(particle.size * this.scale / 2);
 				Quaternionf roll = new Quaternionf().rotationZ(particle.roll);
 				float[][] corners = {{-half, -half, 0, 1}, {half, -half, 1, 1}, {half, half, 1, 0}, {-half, half, 0, 0}};
 				// Both faces, so the winding doesn't matter.

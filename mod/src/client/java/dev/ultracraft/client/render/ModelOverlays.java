@@ -2,9 +2,14 @@ package dev.ultracraft.client.render;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.Font;
 import net.minecraft.client.renderer.SubmitNodeCollector;
 import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.renderer.texture.OverlayTexture;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.FontDescription;
+import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.util.LightCoordsUtil;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
@@ -13,8 +18,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Draws a model's built-in quads and canvas images on their bones, as Unity's renderers and UI would: unlit,
- * tinted by a color, and seen from either side.
+ * Draws a model's built-in quads and canvas images and texts on their bones, as Unity's renderers and UI would:
+ * unlit, tinted by a color, and seen from either side.
  */
 final class ModelOverlays {
 	/** A corner: x and y in the quad's or canvas's space, u and v in the texture (v down, as Minecraft reads it). */
@@ -23,6 +28,8 @@ final class ModelOverlays {
 
 	/** How far apart, in canvas units, images are layered. */
 	private static final float LAYER_DEPTH = 0.5F;
+	/** The extracted fonts' size: Minecraft text units to the em. */
+	private static final float TEXT_EM = 9;
 
 	private ModelOverlays() {
 	}
@@ -62,6 +69,44 @@ final class ModelOverlays {
 		float towardCamera = normal.dot(center) > 0 ? -1 : 1;
 		Matrix4f layered = new Matrix4f(canvas).translate(0, 0, towardCamera * layer * LAYER_DEPTH);
 		submit(poseStack, collector, type, layered, color, polygons);
+	}
+
+	/**
+	 * A UI Text showing {@code content}, aligned in its rect as its alignment says, in its color and at its font size,
+	 * over the canvas's images ({@code layer}). Seen from behind its canvas it still reads the right way round.
+	 */
+	static void text(PoseStack poseStack, SubmitNodeCollector collector, Matrix4f canvas, UltraModel.Text text, String content, int layer) {
+		Font font = Minecraft.getInstance().font;
+		FormattedCharSequence line = Component.literal(content).withStyle(style -> style.withFont(new FontDescription.Resource(text.font()))).getVisualOrderText();
+		float[] r = text.rect();
+		float pivotX = r[0] + (r[2] - r[0]) * text.pivot()[0];
+		float pivotY = r[1] + (r[3] - r[1]) * text.pivot()[1];
+		// The text's own scale shrinks its rect about its pivot, and its font size with it.
+		float left = pivotX + (r[0] - pivotX) * text.scale();
+		float right = pivotX + (r[2] - pivotX) * text.scale();
+		float bottom = pivotY + (r[1] - pivotY) * text.scale();
+		float top = pivotY + (r[3] - pivotY) * text.scale();
+		float em = text.fontSize() * text.scale();
+		float units = em / TEXT_EM;
+		int column = text.alignment() % 3;
+		int row = text.alignment() / 3;
+		float x = column == 0 ? left : column == 2 ? right : (left + right) / 2;
+		float y = row == 0 ? top : row == 2 ? bottom : (top + bottom) / 2;
+		float width = font.width(line);
+		float textX = column == 0 ? 0 : column == 2 ? -width : -width / 2;
+		float textY = row == 0 ? 0 : row == 2 ? -font.lineHeight : -font.lineHeight / 2F;
+
+		Vector3f center = canvas.transformPosition(new Vector3f());
+		float towardCamera = canvas.transformDirection(new Vector3f(0, 0, 1)).dot(center) > 0 ? -1 : 1;
+		// Its face (right cross up) turned away from the camera: drawn mirrored, so it reads from this side.
+		boolean behind = canvas.transformDirection(new Vector3f(1, 0, 0)).cross(canvas.transformDirection(new Vector3f(0, 1, 0))).dot(center) > 0;
+		Matrix4f placed = new Matrix4f(canvas).translate(x, y, towardCamera * layer * LAYER_DEPTH).scale(behind ? -units : units, -units, units);
+		float[] color = text.color();
+		int argb = Math.round(color[3] * 255) << 24 | Math.round(color[0] * 255) << 16 | Math.round(color[1] * 255) << 8 | Math.round(color[2] * 255);
+		poseStack.pushPose();
+		poseStack.mulPose(placed);
+		collector.submitText(poseStack, textX, textY, line, false, Font.DisplayMode.NORMAL, LightCoordsUtil.FULL_BRIGHT, argb, 0, 0);
+		poseStack.popPose();
 	}
 
 	private static List<Corner> rectangle(float[] r) {

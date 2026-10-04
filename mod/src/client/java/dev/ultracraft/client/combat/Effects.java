@@ -38,8 +38,8 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Beams, blood and impacts, muzzle flashes, explosions' looks, and drawing beams, coins, coin trails, pellets and
- * shells in the world.
+ * Beams, blood and impacts, muzzle flashes, explosions' looks, and drawing beams, coins, coin trails, pellets,
+ * shells, nails and magnets in the world.
  */
 final class Effects {
 	/**
@@ -112,8 +112,11 @@ final class Effects {
 	/** ElectricityLine swaps its pick this often. */
 	private static final double ARC_INTERVAL = 0.05;
 
-	/** A railcannon beam's muzzle flash (its SpriteController): turned a random whole number of degrees, it shrinks and fades. */
-	private record BeamFlash(Vec3 position, Quaternionf rotation, BeamStyle style, double start) {
+	/**
+	 * A muzzle flash prefab's sprite (its SpriteController): turned a random whole number of degrees, it shrinks and
+	 * fades, and is gone after its lifetime (RemoveOnTime) if it has one.
+	 */
+	private record PrefabFlash(Vec3 position, Quaternionf rotation, String prefab, double start, double lifetime, double scale) {
 	}
 
 	private static final BlockState GORE = Blocks.REDSTONE_BLOCK.defaultBlockState();
@@ -192,15 +195,18 @@ final class Effects {
 	private final List<Wave> waves = new ArrayList<>();
 	private final List<ExplosionLook> looks = new ArrayList<>();
 	private final List<MuzzleFlash> muzzleFlashes = new ArrayList<>();
-	private final List<BeamFlash> beamFlashes = new ArrayList<>();
+	private final List<PrefabFlash> prefabFlashes = new ArrayList<>();
 	private final List<BulletSpark> bulletSparks = new ArrayList<>();
 	/** Particle systems played on their own, out of a prefab. */
 	private final List<Particles> particles = new ArrayList<>();
 	private final RandomSource random = RandomSource.create();
 	private double clock;
+	/** How long the frame under way is. */
+	private double frameTime;
 
 	void update(double dt, Level level, Entity player) {
 		this.clock += dt;
+		this.frameTime = dt;
 		this.beams.removeIf(beam -> this.clock - beam.fadeStart > beam.style.life);
 		for (Beam beam : this.beams) {
 			beam.arcCooldown -= dt;
@@ -208,7 +214,7 @@ final class Effects {
 				pickArc(beam);
 			}
 		}
-		this.beamFlashes.removeIf(flash -> beamFlashScale(flash) <= 0 || beamFlashAlpha(flash) <= 0);
+		this.prefabFlashes.removeIf(flash -> flashScale(flash) <= 0 || flashAlpha(flash) <= 0 || this.clock - flash.start >= flash.lifetime);
 		this.waves.removeIf(wave -> wave.explosion.removed && spriteAlpha(wave.explosion) <= 0);
 		for (ExplosionLook look : this.looks) {
 			look.update(dt, level, player);
@@ -324,13 +330,25 @@ final class Effects {
 	 * flash sprite, facing along {@code rotation} (the camera's).
 	 */
 	void beamFlash(Vec3 position, Quaternionf rotation, BeamStyle style) {
-		Quaternionf rolled = new Quaternionf(rotation).rotateZ((float)Math.toRadians(this.random.nextInt(360)));
-		this.beamFlashes.add(new BeamFlash(position, rolled, style, this.clock));
+		if (style.prefab != null) {
+			Quaternionf rolled = new Quaternionf(rotation).rotateZ((float)Math.toRadians(this.random.nextInt(360)));
+			this.prefabFlashes.add(new PrefabFlash(position, rolled, style.prefab, this.clock, Double.POSITIVE_INFINITY, 1));
+		}
 	}
 
-	/** The flash sprite's world scale (its MuzzleFlash parent's, times its own as it shrinks), in units. */
-	private double beamFlashScale(BeamFlash flash) {
-		UltraModel model = flash.style.prefab == null ? null : UltraModel.get(flash.style.prefab);
+	/**
+	 * A muzzle flash made in a physics step: the prefab's flash sprite at {@code position}, facing along
+	 * {@code rotation}, drawn {@code scale} times its size, for at most {@code lifetime} seconds. Its SpriteController
+	 * has already shrunk and faded it by this frame's time when it's first drawn.
+	 */
+	void stepFlash(String prefab, Vec3 position, Quaternionf rotation, double lifetime, double scale) {
+		Quaternionf rolled = new Quaternionf(rotation).rotateZ((float)Math.toRadians(this.random.nextInt(360)));
+		this.prefabFlashes.add(new PrefabFlash(position, rolled, prefab, this.clock - this.frameTime, lifetime, scale));
+	}
+
+	/** The flash sprite's world scale (its parents', times its own as it shrinks), in units. */
+	private double flashScale(PrefabFlash flash) {
+		UltraModel model = UltraModel.get(flash.prefab);
 		if (model == null || model.sprites().isEmpty()) {
 			return 0;
 		}
@@ -342,8 +360,8 @@ final class Effects {
 		return parents * (model.rest().sx(bone) - spriteController(model, bone, "shrinkSpeed") * (this.clock - flash.start));
 	}
 
-	private double beamFlashAlpha(BeamFlash flash) {
-		UltraModel model = flash.style.prefab == null ? null : UltraModel.get(flash.style.prefab);
+	private double flashAlpha(PrefabFlash flash) {
+		UltraModel model = UltraModel.get(flash.prefab);
 		if (model == null || model.sprites().isEmpty()) {
 			return 0;
 		}
@@ -360,12 +378,12 @@ final class Effects {
 		return 0;
 	}
 
-	private void renderBeamFlashes(LevelRenderContext context, Vec3 camera) {
+	private void renderPrefabFlashes(LevelRenderContext context, Vec3 camera) {
 		PoseStack poseStack = context.poseStack();
-		for (BeamFlash flash : this.beamFlashes) {
-			UltraModel model = UltraModel.get(flash.style.prefab);
-			double scale = beamFlashScale(flash);
-			double alpha = beamFlashAlpha(flash);
+		for (PrefabFlash flash : this.prefabFlashes) {
+			UltraModel model = UltraModel.get(flash.prefab);
+			double scale = flashScale(flash);
+			double alpha = flashAlpha(flash);
 			if (model == null || scale <= 0 || alpha <= 0) {
 				continue;
 			}
@@ -373,7 +391,7 @@ final class Effects {
 			poseStack.pushPose();
 			poseStack.translate(flash.position.x - camera.x, flash.position.y - camera.y, flash.position.z - camera.z);
 			poseStack.rotate(flash.rotation);
-			float size = (float)(scale * PlayerShape.BLOCKS_PER_UNIT);
+			float size = (float)(scale * flash.scale * PlayerShape.BLOCKS_PER_UNIT);
 			poseStack.scale(size, size, size);
 			float[] color = sprite.color();
 			quad(context, RenderTypes.beaconBeam(sprite.texture(), true), sprite.rect(), color[0], color[1], color[2], (float)alpha);
@@ -454,7 +472,7 @@ final class Effects {
 		renderPellets(context, camera, pellets);
 		renderCores(context, camera, cores);
 		renderMuzzleFlashes(context, camera);
-		renderBeamFlashes(context, camera);
+		renderPrefabFlashes(context, camera);
 		renderBulletSparks(context, camera);
 		UltraModel shell = UltraModel.get("shotgun_shell");
 		if (shell != null) {
@@ -571,6 +589,66 @@ final class Effects {
 				float size = (float)drill.beeperScale;
 				poseStack.scale(size, size, size);
 				float[] c = sprite.color();
+				quad(context, RenderTypes.beaconBeam(sprite.texture(), true), sprite.rect(), c[0], c[1], c[2], c[3]);
+			}
+			poseStack.popPose();
+		}
+	}
+
+	/** The nails: each one's trail, and its model pointing the way it does. */
+	void renderNails(LevelRenderContext context, List<Nail> nails) {
+		Minecraft minecraft = Minecraft.getInstance();
+		if (minecraft.level == null || nails.isEmpty()) {
+			return;
+		}
+		Vec3 camera = minecraft.gameRenderer.mainCamera().position();
+		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.lightning(), (pose, buffer) -> {
+			for (Nail nail : nails) {
+				sawTrail(pose, buffer, nail.position, nail.trail, camera, nail.script.getAsJsonObject("trail"));
+			}
+		});
+		PoseStack poseStack = context.poseStack();
+		float units = (float)PlayerShape.BLOCKS_PER_UNIT;
+		for (Nail nail : nails) {
+			UltraModel model = UltraModel.get(nail.model);
+			if (model == null) {
+				continue;
+			}
+			poseStack.pushPose();
+			poseStack.translate(nail.position.x - camera.x, nail.position.y - camera.y, nail.position.z - camera.z);
+			poseStack.rotate(facing(nail.forward));
+			poseStack.scale(units, units, units);
+			model.submit(poseStack, context.submitNodeCollector(), LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(nail.position)));
+			poseStack.popPose();
+		}
+	}
+
+	/** The magnets: each one's trail and model, and its TimeBomb's beeper flashing on it in the color its load gives it. */
+	void renderMagnets(LevelRenderContext context, List<Magnet> magnets) {
+		Minecraft minecraft = Minecraft.getInstance();
+		if (minecraft.level == null || magnets.isEmpty()) {
+			return;
+		}
+		Vec3 camera = minecraft.gameRenderer.mainCamera().position();
+		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.lightning(), (pose, buffer) -> {
+			for (Magnet magnet : magnets) {
+				sawTrail(pose, buffer, magnet.position, magnet.trail, camera, magnet.model.script("harpoon").getAsJsonObject("trail"));
+			}
+		});
+		UltraModel beeper = UltraModel.get("magnet_beeper");
+		PoseStack poseStack = context.poseStack();
+		float units = (float)PlayerShape.BLOCKS_PER_UNIT;
+		for (Magnet magnet : magnets) {
+			poseStack.pushPose();
+			poseStack.translate(magnet.position.x - camera.x, magnet.position.y - camera.y, magnet.position.z - camera.z);
+			poseStack.rotate(facing(magnet.forward));
+			poseStack.scale(units, units, units);
+			magnet.model.submit(poseStack, context.submitNodeCollector(), LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(magnet.position)));
+			if (beeper != null && !beeper.sprites().isEmpty() && magnet.beeperScale > 0.01) {
+				UltraModel.Sprite sprite = beeper.sprites().getFirst();
+				float size = (float)magnet.beeperScale;
+				poseStack.scale(size, size, size);
+				float[] c = magnet.beeperColor;
 				quad(context, RenderTypes.beaconBeam(sprite.texture(), true), sprite.rect(), c[0], c[1], c[2], c[3]);
 			}
 			poseStack.popPose();

@@ -295,6 +295,7 @@ def combat(env, x):
     x.add_clip("whiplash_pull_loop", hook.pullLoop, arm_volume)
 
     railcannon(env, x)
+    nailgun(env, x)
 
     ground = next(g for g in (o.read() for o in env.objects if o.type.name == "MonoBehaviour" and script_class(o) == "GroundCheck") if g.shockwave.path_id)
     shockwave = next(m for m in components(ground.shockwave.deref().read(), "MonoBehaviour") if hasattr(m, "soundEffect"))
@@ -366,6 +367,51 @@ def railcannon(env, x):
     charges = next(o.read() for o in env.objects if o.type.name == "MonoBehaviour" and script_class(o) == "WeaponCharges"
                    and o.read().railCannonFullChargeSound.path_id)
     x.add_source("railcannon_full_charge", next(components(charges.railCannonFullChargeSound.deref().read(), "AudioSource")))
+
+
+def nailgun(env, x):
+    """The nailguns' shot (their muzzle flash's; its pitch and volume are set by the code), the barrels' whir, the
+    Overheat's steam, the meter's chime as a heat sink or magnet charge fills, the Attractor's empty clicks; a nail's
+    hits on a wall and an enemy, from where it hit; the magnet's throw, hits, beep and break."""
+    overheat = find_class(env, "Nailgun", "Nailgun Overheat", altVersion=0)
+    attractor = find_class(env, "Nailgun", "Nailgun Magnet", altVersion=0)
+    overheat_go = overheat.m_GameObject.read()
+    shot = next(components(overheat.muzzleFlash.deref().read(), "AudioSource"))
+    x.add_clip("nailgun_shoot", shot.m_audioClip)
+    whir = named_source(overheat_go, "Barrel_L")
+    x.add_clip("nailgun_spin", whir.m_audioClip, whir.m_Volume)
+    x.add_source("nailgun_steam", named_source(overheat_go, "Particle System"))
+    chime = next(components(overheat_go, "AudioSource"))
+    x.add_clip("nailgun_charge", chime.m_audioClip, chime.m_Volume)
+    # The no-ammo click's RandomPitch replaces its AudioSource's pitch.
+    no_ammo = source_ref(attractor.noAmmoSound)
+    x.add_clip("nailgun_no_ammo", no_ammo.m_audioClip, no_ammo.m_Volume)
+    x.add_source("nailgun_last_shot", source_ref(attractor.lastShotSound))
+    nail_go = overheat.nail.deref().read()
+    nail = next(s for s in components(nail_go, "MonoBehaviour") if hasattr(s, "zapMaterial"))
+    reach = round(next(audio_sources_tree(nail_go))["MaxDistance"] * BLOCKS_PER_UNIT)
+    for event, pptr in [("nail_hit_wall", nail.environmentHitSound), ("nail_hit_enemy", nail.enemyHitSound)]:
+        x.add_clip(event, pptr, mono=True)
+        x.events[event]["sounds"][0]["attenuation_distance"] = reach
+    shoot = source_ref(attractor.magnetShotSound)
+    x.add_clip("magnet_shoot", shoot.m_audioClip, shoot.m_Volume)
+    magnet_go = attractor.magnetNail.deref().read()
+    harpoon = next(s for s in components(magnet_go, "MonoBehaviour") if hasattr(s, "drillHits"))
+    reach = round(next(audio_sources_tree(magnet_go))["MaxDistance"] * BLOCKS_PER_UNIT)
+    for event, pptr in [("magnet_hit_wall", harpoon.environmentHitSound), ("magnet_hit_enemy", harpoon.enemyHitSound)]:
+        x.add_clip(event, pptr, 0.4, mono=True)
+        x.events[event]["sounds"][0]["attenuation_distance"] = reach
+    bomb = next(s for s in components(magnet_go, "MonoBehaviour") if hasattr(s, "beepLight"))
+    beep_go = bomb.beepLight.deref().read()
+    beep = next(components(beep_go, "AudioSource"))
+    x.add_clip("magnet_beep", beep.m_audioClip, beep.m_Volume, mono=True)
+    x.events["magnet_beep"]["sounds"][0]["attenuation_distance"] = round(next(audio_sources_tree(beep_go))["MaxDistance"] * BLOCKS_PER_UNIT)
+    break_go = bomb.explosion.deref().read()
+    debris = next(components(break_go, "AudioSource"))
+    x.add_clip("magnet_break", debris.m_audioClip, debris.m_Volume, mono=True)
+    x.events["magnet_break"]["sounds"][0]["attenuation_distance"] = round(next(audio_sources_tree(break_go))["MaxDistance"] * BLOCKS_PER_UNIT)
+    pitch = next(s for s in components(break_go, "MonoBehaviour") if hasattr(s, "pitchVariation"))
+    print("magnet_break pitch", debris.m_Pitch, "RandomPitch", pitch.defaultPitch, pitch.pitchVariation)
 
 
 def main():

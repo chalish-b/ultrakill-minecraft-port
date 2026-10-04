@@ -82,7 +82,20 @@ public final class UltraModel {
 		FILLED
 	}
 
-	public record Canvas(int bone, List<Image> images) {
+	/** A world-space canvas: its images, back to front, and its texts. */
+	public record Canvas(int bone, List<Image> images, List<Text> texts) {
+	}
+
+	/**
+	 * A UI Text on a world-space canvas.
+	 *
+	 * @param rect left, bottom, right, top, in the canvas's units
+	 * @param pivot where in the rect it's scaled about, 0 to 1 across and up
+	 * @param scale its own scale, which its font size is drawn at
+	 * @param font the Minecraft font made from its font
+	 * @param alignment Unity's TextAnchor: 0 to 8, top left to bottom right
+	 */
+	public record Text(String name, float[] rect, float[] pivot, float scale, float[] color, Identifier font, float fontSize, int alignment, String text) {
 	}
 
 	/**
@@ -467,7 +480,24 @@ public final class UltraModel {
 						image.get("fillAmount").getAsFloat()
 					));
 				}
-				canvases.add(new Canvas(canvas.get("bone").getAsInt(), images));
+				List<Text> texts = new ArrayList<>();
+				if (canvas.has("texts")) {
+					for (JsonElement t : canvas.getAsJsonArray("texts")) {
+						JsonObject text = t.getAsJsonObject();
+						texts.add(new Text(
+							text.get("name").getAsString(),
+							floats(text.getAsJsonArray("rect")),
+							floats(text.getAsJsonArray("pivot")),
+							text.get("scale").getAsFloat(),
+							floats(text.getAsJsonArray("color")),
+							Identifier.parse(text.get("font").getAsString()),
+							text.get("fontSize").getAsFloat(),
+							text.get("alignment").getAsInt(),
+							text.get("text").getAsString()
+						));
+					}
+				}
+				canvases.add(new Canvas(canvas.get("bone").getAsInt(), images, texts));
 			}
 			Animator.Data animation = json.has("animator") ? Animator.Data.fromJson(json.getAsJsonObject("animator")) : null;
 			return Optional.of(new UltraModel(new Vector3f(origin), names, parents, rest, parts, quads, sprites, canvases, json.getAsJsonObject("scripts"),

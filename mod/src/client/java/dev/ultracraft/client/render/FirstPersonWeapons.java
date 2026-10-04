@@ -30,7 +30,7 @@ import java.util.Set;
 import java.util.function.IntPredicate;
 
 /**
- * The first-person viewmodels: the held revolver, shotgun or railcannon, the current arm (the Feedbacker or the
+ * The first-person viewmodels: the held revolver, shotgun, nailgun or railcannon, the current arm (the Feedbacker or the
  * Knuckleblaster) and the Whiplash's arm, each played by its own Animator. The arm is always there; its idle pose
  * keeps it below the screen until it punches or flips a coin. The Whiplash's arm shows from a throw until it has
  * caught its hook again.
@@ -67,6 +67,8 @@ public final class FirstPersonWeapons {
 		SHOTGUN_CORE_EJECT("shotgun_core_eject"),
 		SHOTGUN_PUMP_CHARGE("shotgun_pump_charge"),
 		SHOTGUN_SAWED_ON("shotgun_sawed_on"),
+		NAILGUN_ATTRACTOR("nailgun_attractor"),
+		NAILGUN_OVERHEAT("nailgun_overheat"),
 		RAILCANNON_ELECTRIC("railcannon_electric"),
 		RAILCANNON_SCREWDRIVER("railcannon_screwdriver"),
 		RAILCANNON_MALICIOUS("railcannon_malicious");
@@ -83,6 +85,10 @@ public final class FirstPersonWeapons {
 
 		boolean railcannon() {
 			return this.model.startsWith("railcannon_");
+		}
+
+		boolean nailgun() {
+			return this.model.startsWith("nailgun_");
 		}
 	}
 
@@ -133,6 +139,26 @@ public final class FirstPersonWeapons {
 	 */
 	public record ShotgunState(double heat, double meter, MeterTint tint, double reddening, Vec3 jitter, SawState saw) {
 		public static final ShotgunState NONE = new ShotgunState(0, 60, MeterTint.VARIANT, 0, Vec3.ZERO, SawState.NONE);
+	}
+
+	/**
+	 * What the held nailgun shows.
+	 *
+	 * @param barrelAngle degrees its barrels have spun, each about its own axis (Spin)
+	 * @param heat how much its barrels glow (Nailgun.SetHeat), 0 to 1
+	 * @param heatMeter the Overheat's heat meter (its Slider's value), 0 to 1
+	 * @param heatMeterBackground the heat meter's background color (Nailgun's sliderBg)
+	 * @param charges how full each heat sink or magnet charge shows, 0 to 1
+	 * @param chargesFull whether each shows full, in the variant's color rather than the empty gray
+	 * @param ammo the Attractor's nails
+	 * @param layerWeight how much its Animator's second layer holds the gun steady
+	 * @param steam whether the Overheat's barrels let off steam
+	 */
+	public record NailgunState(
+		double barrelAngle, double heat, double heatMeter, float[] heatMeterBackground, double[] charges, boolean[] chargesFull, int ammo,
+		float layerWeight, boolean steam
+	) {
+		public static final NailgunState NONE = new NailgunState(0, 0, 0, new float[]{0, 0, 0, 0}, new double[0], new boolean[0], 0, 0, false);
 	}
 
 	/** The shotgun's meter Slider: 0 to 60, filling from the right, its fill 10 units wider than its share. */
@@ -207,6 +233,8 @@ public final class FirstPersonWeapons {
 		final List<Pip> pips = new ArrayList<>();
 		/** A railcannon's FullCharge particle systems, which only run at full charge. */
 		final List<ViewmodelParticles> fullChargeParticles = new ArrayList<>();
+		/** A nailgun's heat steam. */
+		final List<ViewmodelParticles> steamParticles = new ArrayList<>();
 
 		Viewmodel(UltraModel model, Animator animator) {
 			this.model = model;
@@ -226,8 +254,13 @@ public final class FirstPersonWeapons {
 						bone = model.parent(bone);
 					}
 					if (bone == fullCharge) {
-						this.fullChargeParticles.add(new ViewmodelParticles(system.getAsJsonObject()));
+						this.fullChargeParticles.add(new ViewmodelParticles(system.getAsJsonObject(), model.rest().sx(system.getAsJsonObject().get("bone").getAsInt())));
 					}
+				}
+			}
+			if (model.script("nailgun") != null) {
+				for (JsonElement system : model.particles()) {
+					this.steamParticles.add(new ViewmodelParticles(system.getAsJsonObject(), model.rest().sx(system.getAsJsonObject().get("bone").getAsInt())));
 				}
 			}
 		}
@@ -254,6 +287,7 @@ public final class FirstPersonWeapons {
 	private @Nullable Weapon held;
 	private RevolverState state = RevolverState.NONE;
 	private ShotgunState shotgun = ShotgunState.NONE;
+	private NailgunState nailgun = NailgunState.NONE;
 	/** The arm's parent (FistControl's "Punch"), turned towards what it last hit. */
 	private final Quaternionf armRotation = new Quaternionf();
 	private boolean returnToOrigRot;
@@ -375,10 +409,19 @@ public final class FirstPersonWeapons {
 	/** The world point that shows where a point of a viewmodel (camera space, units) is drawn, at its depth. */
 	private Vec3 drawnAt(Vector3f point) {
 		Camera camera = Minecraft.getInstance().gameRenderer.mainCamera();
-		float spread = (float)(fovScale() * Math.tan(Math.toRadians(camera.getFov() / 2)) / Math.tan(Math.toRadians(HUD_FOV / 2)));
+		float spread = drawnSpread();
 		point.mul(spread, spread, 1).mul((float)PlayerShape.BLOCKS_PER_UNIT);
 		Vector3f world = new Quaternionf(camera.rotation()).transform(point);
 		return camera.position().add(world.x, world.y, world.z);
+	}
+
+	/**
+	 * How much wider the viewmodels show than they would in the world at the same depth: what sizes across the view
+	 * are scaled by to show in the world as the HUD camera shows them.
+	 */
+	private float drawnSpread() {
+		Camera camera = Minecraft.getInstance().gameRenderer.mainCamera();
+		return (float)(fovScale() * Math.tan(Math.toRadians(camera.getFov() / 2)) / Math.tan(Math.toRadians(HUD_FOV / 2)));
 	}
 
 	/**
@@ -421,6 +464,7 @@ public final class FirstPersonWeapons {
 		Viewmodel viewmodel = weapon(weapon);
 		if (viewmodel != null) {
 			viewmodel.fullChargeParticles.forEach(ViewmodelParticles::stop);
+			viewmodel.steamParticles.forEach(ViewmodelParticles::stop);
 		}
 	}
 
@@ -535,10 +579,11 @@ public final class FirstPersonWeapons {
 	 *
 	 * @param railcannonCharge the railcannons' charge, 0 to 5
 	 */
-	public void update(double dt, @Nullable Weapon held, RevolverState state, ShotgunState shotgun, double railcannonCharge, Events events) {
+	public void update(double dt, @Nullable Weapon held, RevolverState state, ShotgunState shotgun, NailgunState nailgun, double railcannonCharge, Events events) {
 		this.held = held;
 		this.state = state;
 		this.shotgun = shotgun;
+		this.nailgun = nailgun;
 		this.railcannonCharge = railcannonCharge;
 		double fovTarget = this.zooming ? Minecraft.getInstance().options.fov().get() / 2.0 : WEAPON_FOV;
 		double fovStep = 300 * dt;
@@ -549,11 +594,19 @@ public final class FirstPersonWeapons {
 				if (held.revolver()) {
 					weapon.animator.setBool("Spinning", state.spinning());
 					weapon.animator.setFloat("TwirlSpeed", (float)state.twirlSpeed());
+				} else if (held.nailgun()) {
+					weapon.animator.setLayerWeight(1, nailgun.layerWeight());
 				} else if (!held.railcannon()) {
 					weapon.animator.setBool("Sawing", shotgun.saw().sawing());
 				}
 				weapon.update(dt, function -> events.weaponEvent(held, function));
 				twirl(weapon, state.twirlAngle());
+				if (held.nailgun()) {
+					spinBarrels(weapon, nailgun.barrelAngle());
+					for (ViewmodelParticles system : weapon.steamParticles) {
+						system.update(dt, nailgun.steam());
+					}
+				}
 				for (Pip pip : weapon.pips) {
 					pip.update(dt, railcannonCharge, weapon.pose);
 				}
@@ -590,6 +643,19 @@ public final class FirstPersonWeapons {
 			if (RevolverCylinder.angle(this.armRotation, identity) == 0) {
 				this.returnToOrigRot = false;
 			}
+		}
+	}
+
+	/** Spin on the nailgun's barrels: each turned about its own axis by how far they've spun. */
+	private static void spinBarrels(Viewmodel weapon, double angle) {
+		for (JsonElement element : weapon.model.scripts("spins")) {
+			JsonObject spin = element.getAsJsonObject();
+			int bone = spin.get("bone").getAsInt();
+			JsonArray axis = spin.getAsJsonArray("axis");
+			Vector3f direction = new Vector3f(axis.get(0).getAsFloat(), axis.get(1).getAsFloat(), axis.get(2).getAsFloat()).normalize();
+			Quaternionf rotation = new Quaternionf(weapon.pose.qx(bone), weapon.pose.qy(bone), weapon.pose.qz(bone), weapon.pose.qw(bone))
+				.rotateAxis((float)Math.toRadians(angle % 360), direction);
+			weapon.pose.setRotation(bone, rotation.x, rotation.y, rotation.z, rotation.w);
 		}
 	}
 
@@ -665,6 +731,8 @@ public final class FirstPersonWeapons {
 			submitRevolver(poseStack, collector, light, weapon);
 		} else if (weapon != null && this.held.railcannon()) {
 			submitRailcannon(poseStack, collector, light, weapon);
+		} else if (weapon != null && this.held.nailgun()) {
+			submitNailgun(poseStack, collector, light, weapon);
 		} else if (weapon != null) {
 			submitShotgun(poseStack, collector, light, weapon);
 		}
@@ -762,6 +830,132 @@ public final class FirstPersonWeapons {
 			}
 		}
 		poseStack.popPose();
+	}
+
+	/** The nailgun's barrels' heat glow. */
+	private static final String BARREL_HEAT = "BarrelHeat";
+	/** The steam's start color, which its material's tint (0.5, doubled) leaves as it is. */
+	private static final float[] STEAM_COLOR = {0.35849059F, 0.35849059F, 0.35849059F, 1};
+
+	/**
+	 * The nailgun, its barrels glowing with their heat (BarrelHeat's color, its alpha the heat, adds its orange), and
+	 * its screen: the Overheat's heat meter over a background going from gray to orange, its heat sinks and the
+	 * Attractor's magnet charges filling up gray and showing in the variant's color once full, the Attractor's nail
+	 * count, and the Overheat's steam.
+	 */
+	private void submitNailgun(PoseStack poseStack, SubmitNodeCollector collector, int light, Viewmodel weapon) {
+		JsonObject script = weapon.model.script("nailgun");
+		if (script == null) {
+			return;
+		}
+		NailgunState state = this.nailgun;
+		Matrix4f[] world = weapon.model.boneMatrices(weapon.pose, new Quaternionf());
+		weapon.model.submit(poseStack, collector, light, world, Set.of(BARREL_HEAT));
+		float heat = (float)Math.clamp(state.heat(), 0, 1);
+		if (heat > 0) {
+			int color = 0xFF000000 | channel(heat) << 16 | channel(heat) << 8 | channel(heat);
+			weapon.model.submitMaterial(poseStack, collector, world, BARREL_HEAT, texture -> RenderTypes.energySwirl(texture, 0, 0), color, LightCoordsUtil.FULL_BRIGHT);
+		}
+		float[] variation = variationColor(script);
+		float[] empty = color(script.getAsJsonArray("emptyColor"));
+		JsonArray charges = script.getAsJsonArray("heatSinkImages");
+		JsonObject slider = weapon.model.scripts("sliders").isEmpty() ? null : weapon.model.scripts("sliders").get(0).getAsJsonObject();
+		for (int c = 0; c < weapon.model.canvases().size(); c++) {
+			UltraModel.Canvas canvas = weapon.model.canvases().get(c);
+			// Each image's color and fill, then CopyColor gives its images their targets' colors.
+			float[][] colors = new float[canvas.images().size()][];
+			float[] fills = new float[colors.length];
+			for (int i = 0; i < colors.length; i++) {
+				colors[i] = canvas.images().get(i).color();
+				fills[i] = canvas.images().get(i).fillAmount();
+				for (int k = 0; k < charges.size() && k < state.charges().length; k++) {
+					if (at(charges.get(k), c, i)) {
+						fills[i] = (float)state.charges()[k];
+						colors[i] = state.chargesFull()[k] ? variation : empty;
+					}
+				}
+				if (slider != null && at(slider.get("background"), c, i)) {
+					colors[i] = state.heatMeterBackground();
+				}
+			}
+			for (JsonElement element : weapon.model.scripts("copyColors")) {
+				JsonArray image = element.getAsJsonObject().getAsJsonArray("image");
+				JsonArray target = element.getAsJsonObject().getAsJsonArray("target");
+				if (image.get(0).getAsInt() == c && target.get(0).getAsInt() == c) {
+					colors[image.get(1).getAsInt()] = colors[target.get(1).getAsInt()];
+				}
+			}
+			for (int i = 0; i < colors.length; i++) {
+				UltraModel.Image image = canvas.images().get(i);
+				if (slider != null && at(slider.get("fill"), c, i)) {
+					image = sliderFill(image, slider, state.heatMeter());
+				}
+				ModelOverlays.image(poseStack, collector, RenderTypes.text(image.texture()), world[canvas.bone()], image, colors[i], fills[i], i);
+			}
+			for (int t = 0; t < canvas.texts().size(); t++) {
+				UltraModel.Text text = canvas.texts().get(t);
+				String content = at(script.get("ammoText"), c, t) ? Integer.toString(state.ammo()) : text.text();
+				ModelOverlays.text(poseStack, collector, world[canvas.bone()], text, content, colors.length + t);
+			}
+		}
+		for (ViewmodelParticles system : weapon.steamParticles) {
+			system.submit(poseStack, collector, world[system.bone], STEAM_COLOR);
+		}
+	}
+
+	/** Whether {@code place} (a canvas and an index on it, or null) is {@code canvas}'s {@code index}th. */
+	private static boolean at(@Nullable JsonElement place, int canvas, int index) {
+		if (place == null || place.isJsonNull()) {
+			return false;
+		}
+		JsonArray pair = place.getAsJsonArray();
+		return pair.get(0).getAsInt() == canvas && pair.get(1).getAsInt() == index;
+	}
+
+	/**
+	 * A Slider's fill at {@code value}: its anchors run from the start of the fill area to {@code value} of the way
+	 * across it, in the slider's direction, and it keeps its extra size.
+	 */
+	private static UltraModel.Image sliderFill(UltraModel.Image full, JsonObject slider, double value) {
+		float[] r = full.rect();
+		int direction = slider.get("direction").getAsInt();
+		boolean vertical = direction >= 2;
+		float more = slider.getAsJsonArray("fillExtra").get(vertical ? 1 : 0).getAsFloat();
+		float size = vertical ? r[3] - r[1] : r[2] - r[0];
+		float length = (size - more) * (float)Math.clamp(value, 0, 1) + more;
+		return switch (direction) {
+			case 1 -> full.withRect(new float[]{r[2] - length, r[1], r[2], r[3]});
+			case 2 -> full.withRect(new float[]{r[0], r[1], r[2], r[1] + length});
+			case 3 -> full.withRect(new float[]{r[0], r[3] - length, r[2], r[3]});
+			default -> full.withRect(new float[]{r[0], r[1], r[0] + length, r[3]});
+		};
+	}
+
+	private static float[] color(JsonArray color) {
+		return new float[]{color.get(0).getAsFloat(), color.get(1).getAsFloat(), color.get(2).getAsFloat(), color.get(3).getAsFloat()};
+	}
+
+	/**
+	 * A point in the world and a rotation there (as Minecraft draws a prefab put on it), and how much bigger a
+	 * prefab put there is drawn to show as the HUD camera would show it.
+	 */
+	public record Placement(Vec3 position, Quaternionf rotation, float scale) {
+	}
+
+	/** Where the nailgun's {@code point}th shoot point shows in the world as it's posed now, and which way it faces there. */
+	public @Nullable Placement nailgunShootPoint(Weapon weapon, int point) {
+		Viewmodel viewmodel = weapon(weapon);
+		JsonObject script = viewmodel == null ? null : viewmodel.model.script("nailgun");
+		if (script == null) {
+			return null;
+		}
+		JsonArray points = script.getAsJsonArray("shootPoints");
+		Matrix4f matrix = viewmodel.model.boneMatrices(viewmodel.pose, new Quaternionf())[points.get(point % points.size()).getAsInt()];
+		Quaternionf facing = new Matrix3f(
+			matrix.getColumn(0, new Vector3f()).normalize(), matrix.getColumn(1, new Vector3f()).normalize(), matrix.getColumn(2, new Vector3f()).normalize()
+		).mul(new Matrix3f().scaling(1, 1, -1)).getNormalizedRotation(new Quaternionf());
+		Quaternionf camera = new Quaternionf(Minecraft.getInstance().gameRenderer.mainCamera().rotation());
+		return new Placement(drawnAt(matrix.getTranslation(new Vector3f())), camera.mul(facing), drawnSpread());
 	}
 
 	/** Whether {@code bone} is {@code ancestor} or under it. */

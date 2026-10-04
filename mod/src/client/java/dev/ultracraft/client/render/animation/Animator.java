@@ -15,9 +15,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Unity's Animator, for one layer of generic transform animation: parameters set by gameplay code drive the
- * controller's state machine, transitions cross-fade between states, and clip events call back into gameplay.
- * Every state writes defaults, so bones a state doesn't animate return to the model's rest pose.
+ * Unity's Animator, for generic transform animation: parameters set by gameplay code drive the base layer's state
+ * machine, transitions cross-fade between states, and clip events call back into gameplay. Every state writes
+ * defaults, so bones a state doesn't animate return to the model's rest pose. Layers above the base loop one clip
+ * each, overriding the base by the weight gameplay code gives them.
  */
 public final class Animator {
 	/** A controller and the clips its states play. */
@@ -71,12 +72,19 @@ public final class Animator {
 	private double transitionElapsed;
 	private double transitionDuration;
 	private @Nullable Play pendingPlay;
+	/** Each layer above the base: its weight, and seconds into its clip. */
+	private final float[] layerWeights;
+	private final double[] layerTimes;
+	private final Pose layerScratch;
 
 	public Animator(Data data, Pose rest) {
 		this.controller = data.controller();
 		this.clips = data.clips();
 		this.rest = rest;
 		this.scratch = new Pose(rest.bones());
+		this.layerScratch = new Pose(rest.bones());
+		this.layerWeights = new float[this.controller.layers().size()];
+		this.layerTimes = new double[this.layerWeights.length];
 		for (Parameter parameter : this.controller.parameters()) {
 			this.parameters.put(parameter.name(), parameter);
 		}
@@ -97,6 +105,17 @@ public final class Animator {
 		this.next = null;
 		this.transition = null;
 		this.pendingPlay = null;
+		for (int i = 0; i < this.layerWeights.length; i++) {
+			this.layerWeights[i] = this.controller.layers().get(i).defaultWeight();
+			this.layerTimes[i] = 0;
+		}
+	}
+
+	/** Animator.SetLayerWeight, for layer {@code layer} (1 is the first above the base). */
+	public void setLayerWeight(int layer, float weight) {
+		if (layer >= 1 && layer <= this.layerWeights.length) {
+			this.layerWeights[layer - 1] = weight;
+		}
 	}
 
 	public void setTrigger(String name) {
@@ -149,6 +168,9 @@ public final class Animator {
 			this.pendingPlay = null;
 		}
 		checkTransitions();
+		for (int i = 0; i < this.layerTimes.length; i++) {
+			this.layerTimes[i] += dt;
+		}
 		if (this.frozen == null) {
 			advance(this.current, dt, events);
 		}
@@ -171,6 +193,17 @@ public final class Animator {
 		if (this.next != null) {
 			sample(this.next, this.scratch);
 			out.blend(this.scratch, (float)Math.min(this.transitionElapsed / this.transitionDuration, 1));
+		}
+		for (int i = 0; i < this.layerWeights.length; i++) {
+			int clipIndex = this.controller.layers().get(i).clip();
+			if (clipIndex < 0 || this.layerWeights[i] <= 0) {
+				continue;
+			}
+			AnimationClip clip = this.clips.get(clipIndex);
+			double time = clip.length <= 0 ? 0 : clip.loop ? this.layerTimes[i] % clip.length : Math.min(this.layerTimes[i], clip.length);
+			this.layerScratch.set(out);
+			clip.sample(time, this.layerScratch);
+			out.blend(this.layerScratch, Math.min(this.layerWeights[i], 1));
 		}
 	}
 

@@ -11,6 +11,7 @@ import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
 import dev.ultracraft.net.HitstopPayload;
+import dev.ultracraft.net.MagnetPullPayload;
 import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.SlamHitPayload;
@@ -73,6 +74,8 @@ public final class ServerCombat {
 	private static final double SLAM_PUSH = 50;
 	/** How far from the player a slam can reach an enemy (blocks). */
 	private static final double SLAM_REACH = 8;
+	/** LivingEntity.hurtServer: an entity hit with more of its damage cooldown left than this doesn't react. */
+	private static final int DAMAGE_COOLDOWN_REACTS = 10;
 	/** How far from the player an explosion can reach something. */
 	private static final double EXPLOSION_REACH = 64;
 	/**
@@ -95,6 +98,7 @@ public final class ServerCombat {
 		ServerPlayNetworking.registerGlobalReceiver(ExplosionHitPayload.TYPE, (payload, context) -> onExplosionHit(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(ExplosionHurtPayload.TYPE, (payload, context) -> onExplosionHurt(context.player(), payload.damage()));
 		ServerPlayNetworking.registerGlobalReceiver(SlamHitPayload.TYPE, (payload, context) -> onSlamHit(context.player(), payload));
+		ServerPlayNetworking.registerGlobalReceiver(MagnetPullPayload.TYPE, (payload, context) -> onMagnetPull(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(HitstopPayload.TYPE, (payload, context) -> {
 			if (active(context.player())) {
 				hitstop(context.player().level().getServer(), Math.clamp(payload.millis(), 0, PARRY_HITSTOP_MILLIS));
@@ -138,7 +142,49 @@ public final class ServerCombat {
 			case HIT -> damage(player, target, hit.damage(), hit.head(), hit.position(), false, false);
 			case DRILL -> drillDamage(player, target, hit.damage(), hit.position());
 			case DRILL_PUNCH -> damage(player, target, hit.damage(), hit.head(), hit.position(), true, false);
+			case NAIL -> nailDamage(player, target, hit.damage(), hit.position(), false);
+			case NAIL_BOMB -> nailDamage(player, target, hit.damage(), hit.position(), true);
 		}
+	}
+
+	/**
+	 * A nail (Nail.DamageEnemy): ULTRAKILL's nails don't knock enemies back. They come many a second, so one that
+	 * lands within the enemy's damage cooldown, and doesn't kill it, does its full damage without the reaction.
+	 */
+	private static void nailDamage(ServerPlayer player, LivingEntity target, float damage, Vec3 position, boolean tryForExplode) {
+		ServerLevel level = player.level();
+		if (boss(target) && UltraDifficulty.of(level.getDifficulty()) >= UltraDifficulty.BRUTAL) {
+			damage /= 1.5F;
+		}
+		Vec3 velocity = target.getDeltaMovement();
+		float health = damage * HEALTH_PER_DAMAGE;
+		DamageSource source = player.damageSources().playerAttack(player);
+		if (target.damageCooldownTime > DAMAGE_COOLDOWN_REACTS && health < target.getHealth() + target.getAbsorptionAmount()) {
+			LivingEntityAccessor accessor = (LivingEntityAccessor)target;
+			float lastHurt = accessor.ultracraft$getLastHurt();
+			accessor.ultracraft$setLastHurt(0);
+			target.hurtServer(level, source, health);
+			accessor.ultracraft$setLastHurt(lastHurt);
+		} else {
+			target.damageCooldownTime = 0;
+			target.hurtServer(level, source, health);
+		}
+		target.setDeltaMovement(velocity);
+		target.needsSync = true;
+		boolean killed = !target.isAlive();
+		BloodZones.add(level, position, tryForExplode && killed ? Gore.HEAD : Gore.of(false, damage, killed), false);
+	}
+
+	/** A magnet's pull on an enemy with nails in it. */
+	private static void onMagnetPull(ServerPlayer player, MagnetPullPayload pull) {
+		if (!active(player) || !(player.level().getEntity(pull.entityId()) instanceof LivingEntity target) || target == player || !target.isAlive()) {
+			return;
+		}
+		if (target.distanceToSqr(player) > EXPLOSION_REACH * EXPLOSION_REACH) {
+			return;
+		}
+		target.setDeltaMovement(target.getDeltaMovement().add(pull.change().scale(S / 20)));
+		target.needsSync = true;
 	}
 
 	/**
