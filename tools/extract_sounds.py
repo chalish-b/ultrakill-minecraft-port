@@ -217,6 +217,11 @@ def combat(env, x):
     x.add_clip("shotgun_core_throw", next(components(shotgun.grenadeSoundBubble.deref().read(), "AudioSource")).m_audioClip)
     core = next(s for s in components(shotgun.grenade.deref().read(), "MonoBehaviour") if hasattr(s, "superExplosion"))
     x.add_source("explosion_super", next(components(core.superExplosion.deref().read(), "AudioSource")))
+    pump = find_class(env, "Shotgun", "Shotgun Pump", variation=1)
+    x.add_clip("shotgun_pump1", pump.pump1sound)
+    x.add_clip("shotgun_pump2", pump.pump2sound)
+    x.add_source("shotgun_pump_charge", next(components(pump.pumpChargeSound.deref().read(), "AudioSource")))
+    x.add_source("shotgun_warning_beep", next(components(pump.warningBeep.deref().read(), "AudioSource")))
 
     movement = find_script(env, "walkSpeed", "jumpSound")
     x.add_source("hurt", source_ref(movement.hurtScreen.deref().read().m_GameObject))

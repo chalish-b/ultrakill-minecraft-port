@@ -1,8 +1,8 @@
 package dev.ultracraft.combat;
 
+import dev.ultracraft.UltraDifficulty;
 import dev.ultracraft.UltraPlayer;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.Difficulty;
 
 /**
  * ULTRAKILL's health on a player driven by ULTRAKILL movement (NewMovement's hp, antiHp and GetHealth).
@@ -19,14 +19,8 @@ public final class UltraHealth {
 	private UltraHealth() {
 	}
 
-	/** ULTRAKILL difficulty from Minecraft's: 1 (lenient) on peaceful and easy, 2 (standard), 3 (violent). */
 	static int difficulty(ServerPlayer player) {
-		Difficulty difficulty = player.level().getDifficulty();
-		return switch (difficulty) {
-			case PEACEFUL, EASY -> 1;
-			case NORMAL -> 2;
-			case HARD -> 3;
-		};
+		return UltraDifficulty.of(player.level().getDifficulty());
 	}
 
 	/** NewMovement.GetHurt's hard damage, for a hit of {@code health} Minecraft health. */
@@ -34,14 +28,14 @@ public final class UltraHealth {
 		State state = state(player);
 		float damage = health * HP_PER_HEALTH;
 		int difficulty = difficulty(player);
-		if (difficulty < 2 || hp(player) > MAX_HP) {
+		if (difficulty < UltraDifficulty.STANDARD || hp(player) > MAX_HP) {
 			return;
 		}
 		state.hardDamage = Math.min(state.hardDamage + damage * HARD_DAMAGE_SHARE, 99);
 		if (state.hardDamageCooldown == 0) {
 			state.hardDamageCooldown++;
 		}
-		if (difficulty >= 3) {
+		if (difficulty >= UltraDifficulty.VIOLENT) {
 			state.hardDamageCooldown++;
 		}
 		state.hardDamageCooldown += damage / 20;
@@ -79,7 +73,7 @@ public final class UltraHealth {
 	public static void tick(ServerPlayer player, float dt) {
 		State state = state(player);
 		state.explodedTime = Math.max(state.explodedTime - dt, 0);
-		if (difficulty(player) <= 1) {
+		if (difficulty(player) <= UltraDifficulty.LENIENT) {
 			state.hardDamage = 0;
 			state.hardDamageCooldown = 0;
 		} else if (state.hardDamageCooldown > 0) {

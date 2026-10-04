@@ -17,8 +17,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * Stores the ULTRAKILL movement state and applies its rules: ULTRAKILL's pose, no fall damage, no hunger, and
- * hard damage from every hit.
+ * Stores the ULTRAKILL movement state and applies its rules: ULTRAKILL's pose, no fall damage, no hunger, hits
+ * that cost the same on every difficulty, and hard damage from every hit.
  */
 @Mixin(Player.class)
 public abstract class PlayerMixin implements UltraPlayer {
@@ -89,6 +89,15 @@ public abstract class PlayerMixin implements UltraPlayer {
 		if (this.ultracraft$active && (Object)this instanceof ServerPlayer player) {
 			UltraHealth.onHurt(player, damage);
 		}
+	}
+
+	/** ULTRAKILL's enemies hit as hard on every difficulty: mobs deal their normal-difficulty damage. */
+	@WrapOperation(
+		method = "hurtServer",
+		at = @At(value = "INVOKE", target = "Lnet/minecraft/world/damagesource/DamageSource;scalesWithDifficulty()Z")
+	)
+	private boolean ultracraft$constantDamage(DamageSource source, Operation<Boolean> original) {
+		return !this.ultracraft$active && original.call(source);
 	}
 
 	@Inject(method = "causeFoodExhaustion", at = @At("HEAD"), cancellable = true)

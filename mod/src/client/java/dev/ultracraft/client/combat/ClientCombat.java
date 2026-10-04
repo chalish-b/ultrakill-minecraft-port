@@ -35,6 +35,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix3f;
@@ -50,6 +51,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.UnaryOperator;
 
 /**
  * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the shotgun's pellets, the
@@ -82,6 +84,17 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	/** Shotgun.Shoot: pellets per shot, and how far each is turned about every axis, in degrees. */
 	private static final int PELLETS = 12;
 	private static final double PELLET_SPREAD = 10;
+	/**
+	 * The Pump Charge's shot by its pumps: its pellets, its spread's multiplier, and the middle of the shot's
+	 * pitch. Fully pumped, it's an explosion instead.
+	 */
+	private static final int[] PUMP_PELLETS = {10, 16, 24, 0};
+	private static final double[] PUMP_SPREAD = {1 / 1.5, 1, 2, 0};
+	private static final float[] PUMP_PITCH = {1.2F, 1, 0.8F, 0.8F};
+	/** The overpumped explosion: a unit ahead of the camera, half again as big, and with this damage. */
+	private static final double OVERPUMP_REACH = 1 * S;
+	private static final double OVERPUMP_SIZE = 1.5;
+	private static final int OVERPUMP_DAMAGE = 50;
 	/** A pellet's damage (its Projectile damage of 1, quartered for the player's projectiles). */
 	private static final float PELLET_DAMAGE = 0.25F;
 	/** The shotgun's point-blank zone: enemies within this many units of the aim take this much. */
@@ -271,7 +284,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		Shotgun shotgun = shotgun(this.held);
 		FirstPersonWeapons.ShotgunState shotgunDisplay = shotgun == null
 			? FirstPersonWeapons.ShotgunState.NONE
-			: new FirstPersonWeapons.ShotgunState(shotgun.heat(), shotgun.meter(), shotgun.charge(), shotgun.reloadingCore(), shotgun.jitter());
+			: new FirstPersonWeapons.ShotgunState(shotgun.heat(), shotgun.meter(), shotgun.tint(), shotgun.reddening(), shotgun.jitter());
 		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, this);
 	}
 
@@ -328,6 +341,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			}
 			// Shotgun.Smack, as the reload knocks the next core in.
 			case "Smack" -> this.sounds.play("shotgun_smack", 0.75F, this.sounds.randomPitch(2, 2.2F));
+			// Shotgun.Pump1Sound and Pump2Sound: the pump slides back and forth; going back, a tone rises with the pumps.
+			case "Pump1Sound" -> {
+				this.sounds.play("shotgun_pump1", 1, this.sounds.randomPitch(0.95F, 1.05F));
+				this.sounds.play("shotgun_pump_charge", 1, 1 + (shotgun == null ? 0 : shotgun.pumps()) / 5F);
+			}
+			case "Pump2Sound" -> this.sounds.play("shotgun_pump2", 1, this.sounds.randomPitch(0.95F, 1.05F));
 			default -> {
 			}
 		}
@@ -346,7 +365,14 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	}
 
 	private @Nullable Shotgun shotgun(FirstPersonWeapons.@Nullable Weapon weapon) {
-		return weapon == FirstPersonWeapons.Weapon.SHOTGUN_CORE_EJECT ? this.shotguns.get(Shotgun.Variant.CORE_EJECT) : null;
+		if (weapon == null) {
+			return null;
+		}
+		return switch (weapon) {
+			case SHOTGUN_CORE_EJECT -> this.shotguns.get(Shotgun.Variant.CORE_EJECT);
+			case SHOTGUN_PUMP_CHARGE -> this.shotguns.get(Shotgun.Variant.PUMP_CHARGE);
+			default -> null;
+		};
 	}
 
 	@Override
@@ -397,7 +423,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		if (stack.is(UltraItems.REVOLVER_SHARPSHOOTER)) {
 			return FirstPersonWeapons.Weapon.REVOLVER_SHARPSHOOTER;
 		}
-		return stack.is(UltraItems.SHOTGUN_CORE_EJECT) ? FirstPersonWeapons.Weapon.SHOTGUN_CORE_EJECT : null;
+		if (stack.is(UltraItems.SHOTGUN_CORE_EJECT)) {
+			return FirstPersonWeapons.Weapon.SHOTGUN_CORE_EJECT;
+		}
+		return stack.is(UltraItems.SHOTGUN_PUMP_CHARGE) ? FirstPersonWeapons.Weapon.SHOTGUN_PUMP_CHARGE : null;
 	}
 
 	/** Whether the held item is an ULTRAKILL weapon in use, so attacking and using belong to it. */
@@ -954,6 +983,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		ClientPlayNetworking.send(new ExplosionHitPayload(object.getId(), 0, velocity));
 	}
 
+	/** Explosion.Collide on the player: it launches them, and hurts them unless they're dashing. */
 	@Override
 	public void player(Explosion explosion) {
 		UltraMovement movement = UltraController.INSTANCE.movement();
@@ -962,7 +992,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		}
 		Explosion.Settings settings = explosion.settings;
 		movement.explosionLaunch(explosion.origin, settings.pushForceMultiplier(), settings.maxSize(), settings.rocketExplosion(), explosion.boosted, explosion.harmful());
-		if (explosion.harmful()) {
+		if (explosion.harmful() && !movement.invincible()) {
 			movement.hurtByExplosion(explosion.playerDamage());
 			ClientPlayNetworking.send(new ExplosionHurtPayload(explosion.playerDamage()));
 		}
@@ -1019,17 +1049,22 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	// ---- shotgun --------------------------------------------------------------------------------
 
 	/**
-	 * Shotgun.Shoot: twelve pellets out of the camera, each turned up to 10 degrees about every axis; the
-	 * point-blank zone; a small push forwards; the shot sound, a camera shake and a muzzle flash.
+	 * Shotgun.Shoot: pellets out of the camera, each turned up to 10 degrees about every axis (the Pump Charge's
+	 * pumps make them more and wider, and a full pump makes an explosion instead); the point-blank zone; a small
+	 * push forwards; the shot sound, a camera shake and a muzzle flash.
 	 */
 	@Override
-	public void shootShotgun(Shotgun.Variant variant) {
+	public void shootShotgun(Shotgun.Variant variant, int pumps) {
 		Minecraft minecraft = Minecraft.getInstance();
 		LocalPlayer player = minecraft.player;
 		UltraMovement movement = UltraController.INSTANCE.movement();
 		if (player == null || minecraft.level == null || movement == null) {
 			return;
 		}
+		boolean pump = variant == Shotgun.Variant.PUMP_CHARGE;
+		int pellets = pump ? PUMP_PELLETS[pumps] : PELLETS;
+		double spread = pump ? PELLET_SPREAD * PUMP_SPREAD[pumps] : PELLET_SPREAD;
+		float pitch = pump ? PUMP_PITCH[pumps] : 1;
 		Vec3 eye = movement.eyePosition();
 		Vec3 look = player.getLookAngle();
 		Vec3 flat = new Vec3(look.x, 0, look.z);
@@ -1038,24 +1073,56 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		}
 		pointBlank(minecraft.level, player, eye, look);
 		Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
-		for (int i = 0; i < PELLETS; i++) {
+		for (int i = 0; i < pellets; i++) {
 			// Transform.Rotate by up to the spread about each axis; turning about its own length changes nothing.
-			double pitch = Math.toRadians(spread(PELLET_SPREAD));
-			double yaw = Math.toRadians(spread(PELLET_SPREAD));
+			double up = Math.toRadians(spread(spread));
+			double yaw = Math.toRadians(spread(spread));
 			Vector3f direction = camera.transform(new Vector3f(
-				(float)(Math.cos(pitch) * Math.sin(yaw)), (float)-Math.sin(pitch), (float)(-Math.cos(pitch) * Math.cos(yaw))
+				(float)(Math.cos(up) * Math.sin(yaw)), (float)-Math.sin(up), (float)(-Math.cos(up) * Math.cos(yaw))
 			));
 			this.pellets.add(new Pellet(eye, new Vec3(direction.x, direction.y, direction.z), Pellet.SPEED + spread(Pellet.SPEED_RANDOMIZER)));
 		}
-		this.sounds.play("shotgun_shoot", 0.45F, this.sounds.randomPitch(0.95F, 1.05F));
+		if (pump && pumps == Shotgun.MAX_PUMPS) {
+			overpump(minecraft.level, player, eye, look);
+		}
+		this.sounds.play("shotgun_shoot", 0.45F, this.sounds.randomPitch(pitch - 0.05F, pitch + 0.05F));
 		movement.stopShake();
 		movement.shake(1);
-		FirstPersonWeapons.Weapon weapon = FirstPersonWeapons.Weapon.SHOTGUN_CORE_EJECT;
+		FirstPersonWeapons.Weapon weapon = weapon(variant);
 		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon);
 		if (animator != null) {
-			animator.setTrigger("Fire");
+			animator.setTrigger(pump ? "PumpFire" : "Fire");
 		}
 		muzzleFlash(weapon);
+	}
+
+	/**
+	 * The overpumped shot: the shotgun's explosion a unit ahead of the camera (or just short of a wall within
+	 * it), half again as big, and with 50 damage that enemies take in full.
+	 */
+	private void overpump(Level level, LocalPlayer player, Vec3 eye, Vec3 look) {
+		Vec3 reach = eye.add(look.scale(OVERPUMP_REACH));
+		BlockHitResult wall = level.clip(new ClipContext(eye, reach, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+		Vec3 at = wall.getType() == HitResult.Type.MISS
+			? reach
+			: eye.add(look.scale(Math.max(eye.distanceTo(wall.getLocation()) - 0.1 * S, 0)));
+		explode(EXPLOSION, at, look, false, settings -> settings.overridden(OVERPUMP_SIZE, OVERPUMP_DAMAGE, 1));
+	}
+
+	/** Shotgun.Pump: the gun's pump animation. */
+	@Override
+	public void pump(Shotgun.Variant variant) {
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon(variant));
+		if (animator != null) {
+			animator.setTrigger("Pump");
+		}
+	}
+
+	private static FirstPersonWeapons.Weapon weapon(Shotgun.Variant variant) {
+		return switch (variant) {
+			case CORE_EJECT -> FirstPersonWeapons.Weapon.SHOTGUN_CORE_EJECT;
+			case PUMP_CHARGE -> FirstPersonWeapons.Weapon.SHOTGUN_PUMP_CHARGE;
+		};
 	}
 
 	private double spread(double range) {
@@ -1239,6 +1306,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	 * Explosions, each shaking the camera, its sound and its look.
 	 */
 	private void explode(String prefab, Vec3 at, @Nullable Vec3 facing, boolean boosted) {
+		explode(prefab, at, facing, boosted, UnaryOperator.identity());
+	}
+
+	/** An explosion prefab whose Explosions the weapon setting it off changes first. */
+	private void explode(String prefab, Vec3 at, @Nullable Vec3 facing, boolean boosted, UnaryOperator<Explosion.Settings> setUp) {
 		UltraModel model = UltraModel.get(prefab);
 		if (model == null) {
 			return;
@@ -1247,7 +1319,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			: new Quaternionf().lookAlong((float)facing.x, (float)facing.y, (float)facing.z, 0, 1, 0).conjugate();
 		List<Explosion> parts = new ArrayList<>();
 		for (Explosion.Settings settings : Explosion.prefab(prefab)) {
-			parts.add(new Explosion(settings, at, rotation, null, boosted));
+			parts.add(new Explosion(setUp.apply(settings), at, rotation, null, boosted));
 		}
 		this.explosions.addAll(parts);
 		this.effects.explosion(new ExplosionLook(model, parts, at, rotation));
@@ -1290,7 +1362,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		this.sounds.play("shotgun_core_throw", (float)(0.45 * Math.sqrt(1 - share * share)), this.sounds.randomPitch(0.95F, 1.05F));
 		this.sounds.play("shotgun_shoot", (float)(0.45 * share), this.sounds.randomPitch(0.75F, 0.85F));
 		movement.shake(1);
-		FirstPersonWeapons.Weapon weapon = FirstPersonWeapons.Weapon.SHOTGUN_CORE_EJECT;
+		FirstPersonWeapons.Weapon weapon = weapon(variant);
 		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon);
 		if (animator != null) {
 			animator.setTrigger("Secondary Fire");

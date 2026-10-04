@@ -1,6 +1,7 @@
 package dev.ultracraft.client.movement;
 
 import dev.ultracraft.PlayerShape;
+import dev.ultracraft.UltraDifficulty;
 import dev.ultracraft.UltraPlayer;
 import dev.ultracraft.client.UltraConfig;
 import dev.ultracraft.client.movement.UltraSounds.Channel;
@@ -490,7 +491,9 @@ public final class UltraMovement {
 		handleSlideState(dt);
 		this.walking = (this.input.moveX != 0 || this.input.moveY != 0) && !this.sliding && this.onGround;
 		if (this.boostCharge != 300 && !this.sliding && !this.slowMode) {
-			this.boostCharge = U.moveTowards(this.boostCharge, 300, 70 * dt);
+			// Stamina comes back half again as fast on Lenient.
+			double rate = UltraDifficulty.of(this.player.level().getDifficulty()) == UltraDifficulty.LENIENT ? 1.5 : 1;
+			this.boostCharge = U.moveTowards(this.boostCharge, 300, 70 * dt * rate);
 		}
 		if (this.slamCooldown > 0) {
 			this.slamCooldown = U.moveTowards(this.slamCooldown, 0, dt);
@@ -891,6 +894,11 @@ public final class UltraMovement {
 	/** Whether an explosion has just hurt the player, so another can neither hurt nor launch them yet. */
 	public boolean exploded() {
 		return this.explodedTime > 0;
+	}
+
+	/** Whether the player is dashing, which nothing can hurt them through. */
+	public boolean invincible() {
+		return this.invincible;
 	}
 
 	/** NewMovement.GetHurt from an explosion: sets {@link #explodedTime} to the hurt invincibility it brings. */

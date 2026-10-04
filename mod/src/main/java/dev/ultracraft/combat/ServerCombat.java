@@ -1,6 +1,8 @@
 package dev.ultracraft.combat;
 
 import dev.ultracraft.PlayerShape;
+import dev.ultracraft.UltraDifficulty;
+import dev.ultracraft.Ultracraft;
 import dev.ultracraft.UltraItems;
 import dev.ultracraft.UltraPlayer;
 import dev.ultracraft.mixin.AbstractArrowAccessor;
@@ -13,6 +15,8 @@ import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.WeaponHitPayload;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.ServerTickRateManager;
 import net.minecraft.server.level.ServerLevel;
@@ -20,6 +24,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Util;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.damagesource.DamageType;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityReference;
 import net.minecraft.world.entity.LivingEntity;
@@ -58,6 +63,11 @@ public final class ServerCombat {
 	private static final long PUNCH_HITSTOP_MILLIS = 100;
 	/** How far from the player an explosion can reach something. */
 	private static final double EXPLOSION_REACH = 64;
+	/**
+	 * The player's own explosions: vanilla's player explosion, without the knock that would undo their launch, and
+	 * the same on every difficulty.
+	 */
+	private static final ResourceKey<DamageType> EXPLOSION = ResourceKey.create(Registries.DAMAGE_TYPE, Ultracraft.id("explosion"));
 
 	private static final Map<UUID, ActivePunch> PUNCHES = new HashMap<>();
 	private static boolean hitstopFroze;
@@ -95,7 +105,8 @@ public final class ServerCombat {
 	}
 
 	/**
-	 * EnemyIdentifier.DeliverDamage: no invulnerability frames, and the blood it spills heals. With
+	 * EnemyIdentifier.DeliverDamage: no invulnerability frames, and the blood it spills heals. Bosses take two
+	 * thirds of it on Brutal. With
 	 * tryForExplode, an enemy it kills bursts (EnemyIdentifier.Explode): its head and limbs come off, leaving the
 	 * head's blood.
 	 *
@@ -104,6 +115,9 @@ public final class ServerCombat {
 	private static Gore damage(ServerPlayer player, LivingEntity target, float damage, boolean head, Vec3 position, boolean tryForExplode, boolean fromExplosion) {
 		ServerLevel level = player.level();
 		DamageSource source = player.damageSources().playerAttack(player);
+		if (boss(target) && UltraDifficulty.of(level.getDifficulty()) >= UltraDifficulty.BRUTAL) {
+			damage /= 1.5F;
+		}
 		target.setInvulnerableTime(0);
 		target.hurtServer(level, source, damage * HEALTH_PER_DAMAGE);
 		boolean killed = !target.isAlive();
@@ -144,12 +158,12 @@ public final class ServerCombat {
 		}
 	}
 
-	/** NewMovement.GetHurt from the player's own explosion. */
+	/** NewMovement.GetHurt from the player's own explosion. It leaves their velocity to their launch. */
 	private static void onExplosionHurt(ServerPlayer player, int damage) {
 		if (!active(player) || damage <= 0 || damage > 1000) {
 			return;
 		}
-		player.hurtServer(player.level(), player.damageSources().explosion(player, player), damage / UltraHealth.HP_PER_HEALTH);
+		player.hurtServer(player.level(), player.damageSources().source(EXPLOSION, player, player), damage / UltraHealth.HP_PER_HEALTH);
 		UltraHealth.onExplosionHurt(player, damage);
 	}
 
@@ -243,6 +257,11 @@ public final class ServerCombat {
 		return true;
 	}
 
+	/** Minecraft's bosses, as ULTRAKILL's (EnemyIdentifier.isBoss). */
+	private static boolean boss(LivingEntity target) {
+		return target instanceof WitherBoss || target instanceof EnderDragon;
+	}
+
 	/**
 	 * Enemy.KnockBack, in place of Minecraft's knockback from the hit: the enemy stops falling, rises a little if
 	 * it's in the air, and is sent along the force. Bosses stand their ground, as ULTRAKILL's heaviest enemies do.
@@ -251,7 +270,7 @@ public final class ServerCombat {
 	 * @param force units per second
 	 */
 	private static void knockBack(LivingEntity target, Vec3 velocity, Vec3 force) {
-		if (target instanceof WitherBoss || target instanceof EnderDragon) {
+		if (boss(target)) {
 			target.setDeltaMovement(velocity);
 			target.needsSync = true;
 			return;

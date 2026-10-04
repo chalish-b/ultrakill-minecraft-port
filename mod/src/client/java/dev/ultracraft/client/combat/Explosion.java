@@ -87,6 +87,14 @@ final class Explosion {
 				Subjects.values()[explosion.get("canHit").getAsInt()], false, -1, touchShake
 			);
 		}
+
+		/** As a weapon sets it up after making it: {@code sizeMultiplier} times as big, with this damage. */
+		Settings overridden(double sizeMultiplier, int damage, double enemyDamageMultiplier) {
+			return new Settings(
+				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize * sizeMultiplier, damage, enemyDamageMultiplier,
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake
+			);
+		}
 	}
 
 	/** The Explosions of an extracted prefab, in its model's order; none if it hasn't been extracted. */

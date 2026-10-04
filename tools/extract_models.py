@@ -39,6 +39,7 @@ MODELS = {
     "revolver_marksman": ("Revolver Ricochet", "Revolver", (0, 0, 0)),
     "revolver_sharpshooter": ("Revolver Twirl", "Revolver", (0, 0, 0)),
     "shotgun_core_eject": ("Shotgun Grenade", "Shotgun", (0, 0, 0)),
+    "shotgun_pump_charge": ("Shotgun Pump", "Shotgun", (0, 0, 0)),
     "feedbacker": ("Arm Blue", "Punch", (0, -0.225, 0)),
     "knuckleblaster": ("Arm Red", "Punch", (0, -0.225, 0)),
     "coin": ("Coin", "Coin", None),
@@ -621,6 +622,9 @@ def export_scripts(exporter, rig, colors, placed):
                     "twirlBone": rig.index[revolver.twirlBone.path_id] if revolver.twirlBone.path_id else None,
                     "twirlSprite": go_name_of(revolver.twirlSprite),
                 }
+            elif kind == "Shotgun":
+                variation = obj.read_typetree()["variation"]
+                scripts["shotgun"] = {"variation": variation, "variationColor": list(colors[variation])}
             elif kind == "Coin":
                 scripts["coin"] = {"flash": coin_flash(exporter, obj.read().flash.deref().read())}
             elif kind == "Explosion" and active:

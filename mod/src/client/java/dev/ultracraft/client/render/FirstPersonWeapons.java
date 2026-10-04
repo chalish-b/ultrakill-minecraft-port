@@ -37,9 +37,10 @@ public final class FirstPersonWeapons {
 	public static final FirstPersonWeapons INSTANCE = new FirstPersonWeapons();
 	/** ULTRAKILL draws weapons with a 90 degree camera and Minecraft draws hands with a 70 degree one. */
 	private static final float FOV_SCALE = (float)(Math.tan(Math.toRadians(35)) / Math.tan(Math.toRadians(45)));
-	/** Unity's Color.red and Color.yellow. */
+	/** Unity's Color.red, Color.yellow and Color.black. */
 	private static final float[] RED = {1, 0, 0, 1};
 	private static final float[] YELLOW = {1, 0.92156863F, 0.015686275F, 1};
+	private static final float[] BLACK = {0, 0, 0, 1};
 	private static final float[] GRAY = {0.5F, 0.5F, 0.5F, 1};
 
 	/** The shotgun's heat sink glow (HeatSinkHeat). */
@@ -51,7 +52,8 @@ public final class FirstPersonWeapons {
 		REVOLVER_PIERCER("revolver_piercer"),
 		REVOLVER_MARKSMAN("revolver_marksman"),
 		REVOLVER_SHARPSHOOTER("revolver_sharpshooter"),
-		SHOTGUN_CORE_EJECT("shotgun_core_eject");
+		SHOTGUN_CORE_EJECT("shotgun_core_eject"),
+		SHOTGUN_PUMP_CHARGE("shotgun_pump_charge");
 
 		final String model;
 
@@ -60,7 +62,7 @@ public final class FirstPersonWeapons {
 		}
 
 		boolean revolver() {
-			return this != SHOTGUN_CORE_EJECT;
+			return this != SHOTGUN_CORE_EJECT && this != SHOTGUN_PUMP_CHARGE;
 		}
 	}
 
@@ -81,23 +83,29 @@ public final class FirstPersonWeapons {
 		public static final RevolverState NONE = new RevolverState(0, 100, true, 400, 0, false, 0, 0, 0);
 	}
 
+	/** The shotgun meter fill's color: its variant's (reddened by some amount), or red or black. */
+	public enum MeterTint {
+		VARIANT,
+		RED,
+		BLACK
+	}
+
 	/**
 	 * What the held shotgun shows.
 	 *
 	 * @param heat its heat sink's glow, 1 after a shot and fading once the animation releases the heat
 	 * @param meter its meter's Slider value, 0 to 60
-	 * @param charge how far a core is charged, 0 to 1: the meter reddens with it
-	 * @param reloadingCore the meter is black while a core's throw reloads
+	 * @param reddening how far a {@link MeterTint#VARIANT} meter has reddened, 0 to 1
 	 * @param jitter how far the gun shakes from its place, in units
 	 */
-	public record ShotgunState(double heat, double meter, double charge, boolean reloadingCore, Vec3 jitter) {
-		public static final ShotgunState NONE = new ShotgunState(0, 60, 0, false, Vec3.ZERO);
+	public record ShotgunState(double heat, double meter, MeterTint tint, double reddening, Vec3 jitter) {
+		public static final ShotgunState NONE = new ShotgunState(0, 60, MeterTint.VARIANT, 0, Vec3.ZERO);
 	}
 
 	/** The shotgun's meter Slider: 0 to 60, filling from the right, its fill 10 units wider than its share. */
 	private static final double METER_MAX = 60;
 	private static final float METER_FILL_EXTRA = 10;
-	/** The color a charging core's meter reddens towards. */
+	/** The color a shotgun's meter reddens towards as it charges. */
 	private static final float[] METER_CHARGED = {1, 0.25F, 0.25F, 1};
 
 	/** Clip events from the held weapon and from the arm, and the held revolver's cylinder clicking into place. */
@@ -379,7 +387,7 @@ public final class FirstPersonWeapons {
 				UltraModel.Image image = canvas.images().get(i);
 				float[] color = image.color();
 				if (image.name().equals("Fill")) {
-					color = meterColor(image.color());
+					color = meterColor(variationColor(weapon.model.script("shotgun")));
 					image = meterFill(image);
 				}
 				ModelOverlays.image(poseStack, collector, RenderTypes.text(image.texture()), world[canvas.bone()], image, color, image.fillAmount(), i);
@@ -388,17 +396,20 @@ public final class FirstPersonWeapons {
 		poseStack.popPose();
 	}
 
-	/** Shotgun.UpdateMeter's color: the variant's, reddening with a core's charge, or black while its throw reloads. */
+	/** Shotgun.UpdateMeter's color. */
 	private float[] meterColor(float[] variation) {
-		if (this.shotgun.reloadingCore()) {
-			return new float[]{0, 0, 0, 1};
-		}
-		float t = (float)this.shotgun.charge();
-		float[] color = new float[4];
-		for (int c = 0; c < 4; c++) {
-			color[c] = variation[c] + (METER_CHARGED[c] - variation[c]) * t;
-		}
-		return color;
+		return switch (this.shotgun.tint()) {
+			case RED -> RED;
+			case BLACK -> BLACK;
+			case VARIANT -> {
+				float t = (float)Math.clamp(this.shotgun.reddening(), 0, 1);
+				float[] color = new float[4];
+				for (int c = 0; c < 4; c++) {
+					color[c] = variation[c] + (METER_CHARGED[c] - variation[c]) * t;
+				}
+				yield color;
+			}
+		};
 	}
 
 	/** The Slider's fill at the meter's value: it keeps its right edge and spans its share of the width. */
@@ -514,8 +525,9 @@ public final class FirstPersonWeapons {
 		}
 	}
 
-	private static float[] variationColor(JsonObject revolver) {
-		JsonArray color = revolver.getAsJsonArray("variationColor");
+	/** ColorBlindSettings' color for the weapon's variation, as its script names it. */
+	private static float[] variationColor(JsonObject weapon) {
+		JsonArray color = weapon.getAsJsonArray("variationColor");
 		return new float[]{color.get(0).getAsFloat(), color.get(1).getAsFloat(), color.get(2).getAsFloat(), 1};
 	}
 }
