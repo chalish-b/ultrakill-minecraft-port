@@ -58,9 +58,12 @@ REFERENCED = {
     "bullet_spark": ("Projectile", "Shotgun Projectile", "explosionEffect"),
     "explosion_super": ("Grenade", "Grenade", "superExplosion"),
     "chainsaw_break": ("Shotgun", "Shotgun Saw", "chainsawBreakEffect"),
+    "chainsaw_thrown": ("Shotgun", "Shotgun Saw", "chainsaw"),
 }
 NESTED = {
     "explosion_chunk": ("explosion", "Explosion", "explosionChunk"),
+    "chainsaw_ricochet": ("chainsaw_thrown", "Chainsaw", "ricochetEffect"),
+    "chainsaw_sawblade": ("chainsaw_thrown", "Chainsaw", "sawbladeVersion"),
 }
 
 # AnimatorControllerParameterType and AnimatorConditionMode values.
@@ -614,6 +617,56 @@ def chainsaw_values(exporter, rig, shotgun):
     }
 
 
+def renderer_material(exporter, renderer):
+    """A line or trail renderer's material: its texture (white if it has none), colors and blending."""
+    material = renderer.m_Materials[0]
+    tex_pptr = texture_name(material.deref().read())[0]
+    texture, name = exporter.texture(tex_pptr) if tex_pptr else (f"{NAMESPACE}:textures/viewmodel/blank.png", None)
+    values = material_values(material, exporter.textures[name]) if name else {**material_values_untextured(material), "textureAlpha": 1}
+    return {"texture": texture, **values}
+
+
+def material_values_untextured(material_pptr):
+    tree = material_pptr.deref().read_typetree()
+    props = tree["m_SavedProperties"]
+    return {"colors": {k: [v["r"], v["g"], v["b"], v["a"]] for k, v in props["m_Colors"] if k in ("_Color", "_EmissionColor", "_TintColor")},
+            "floats": {k: v for k, v in props["m_Floats"] if k in ("_SrcBlend", "_DstBlend", "_Mode")},
+            "keywords": tree.get("m_ValidKeywords") or []}
+
+
+def box_values(go):
+    """The object's BoxCollider, in its own space."""
+    box = next(c.component.deref().read() for c in go.m_Component if c.component.deref().type.name == "BoxCollider")
+    return {"center": [box.m_Center.x, box.m_Center.y, box.m_Center.z], "size": [box.m_Size.x, box.m_Size.y, box.m_Size.z]}
+
+
+def trail_values(exporter, go):
+    """The object's TrailRenderer: how long points last, its width over the trail (times the multiplier), its
+    color over the trail and its material."""
+    renderer = next(c.component.deref() for c in go.m_Component if c.component.deref().type.name == "TrailRenderer")
+    tree = renderer.read_typetree()
+    params = tree["m_Parameters"]
+    return {"time": tree["m_Time"], "minVertexDistance": tree["m_MinVertexDistance"], "width": params["widthMultiplier"],
+            "widthCurve": [[k["time"], k["value"]] for k in params["widthCurve"]["m_Curve"]],
+            "color": gradient_value(params["colorGradient"]), "material": renderer_material(exporter, renderer.read())}
+
+
+def line_values(exporter, go):
+    """The LineRenderer under the object: its width and material."""
+    def find(transform):
+        for c in transform.m_GameObject.read().m_Component:
+            if c.component.deref().type.name == "LineRenderer":
+                return c.component.deref()
+        for child in transform.m_Children:
+            found = find(child.deref().read())
+            if found is not None:
+                return found
+        return None
+    renderer = find(transform_of(go))
+    params = renderer.read_typetree()["m_Parameters"]
+    return {"width": params["widthMultiplier"] * params["widthCurve"]["m_Curve"][0]["value"], "material": renderer_material(exporter, renderer.read())}
+
+
 def go_name_of(component_pptr):
     """The name of the GameObject a referenced component sits on, or None."""
     return component_pptr.deref().read().m_GameObject.read().m_Name if component_pptr.path_id else None
@@ -654,6 +707,15 @@ def export_scripts(exporter, rig, colors, placed):
                 shotgun = obj.read()
                 if shotgun.sawZone.path_id:
                     scripts["shotgun"].update(chainsaw_values(exporter, rig, shotgun))
+            elif kind == "Chainsaw":
+                tree = obj.read_typetree()
+                scripts["chainsaw"] = {"damage": tree["damage"], "hitAmount": tree["hitAmount"], "box": box_values(go),
+                                       "trail": trail_values(exporter, go), "line": line_values(exporter, go)}
+            elif kind == "Nail" and obj.read_typetree()["sawblade"]:
+                tree = obj.read_typetree()
+                scripts["sawblade"] = {k: tree[k] for k in ("damage", "hitAmount", "multiHitAmount")}
+                scripts["sawblade"]["box"] = box_values(go)
+                scripts["sawblade"]["trail"] = trail_values(exporter, go)
             elif kind == "Coin":
                 scripts["coin"] = {"flash": coin_flash(exporter, obj.read().flash.deref().read())}
             elif kind == "Explosion" and active:
@@ -894,7 +956,7 @@ def export_model(exporter, root_go, offset, colors):
     model = {"origin": list(offset or (0, 0, 0)), "bones": rig.bones, "parts": parts, "quads": quads, "sprites": sprites, "particles": particles,
              "canvases": canvases, "scripts": export_scripts(exporter, rig, colors, placed)}
     animator = find_animator(rig)
-    if animator is not None:
+    if animator is not None and animator.m_Controller.path_id:
         model["animator"] = export_animator(animator, rig)
     return model
 

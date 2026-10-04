@@ -1,5 +1,6 @@
 package dev.ultracraft.client.combat;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mojang.blaze3d.vertex.PoseStack;
@@ -25,12 +26,14 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Beams, blood and impacts, muzzle flashes, explosions' looks, and drawing beams, coins, coin trails, pellets and
@@ -136,6 +139,11 @@ final class Effects {
 	private record BulletSpark(Vec3 start, Vec3 velocity, double born) {
 	}
 
+	/** The saws' running blade material; and the chainsaw's glint, spinning (its Spin) and shrunk back at the player. */
+	private static final String SAW_BLADE = "ChainsawBladeMotion";
+	private static final double SAW_GLINT_SPIN = 3600;
+	private static final float SAW_GLINT_SHRUNK = 0.2F;
+
 	private final List<Beam> beams = new ArrayList<>();
 	private final List<Wave> waves = new ArrayList<>();
 	private final List<ExplosionLook> looks = new ArrayList<>();
@@ -164,6 +172,11 @@ final class Effects {
 
 	/** A prefab's particle systems (or just the one called {@code name}), played once from {@code at}, unturned. */
 	void particles(String prefab, @Nullable String name, Vec3 at) {
+		particles(prefab, name, at, new Quaternionf());
+	}
+
+	/** Like {@link #particles(String, String, Vec3)}, with the prefab turned to {@code rotation} (as Minecraft draws it). */
+	void particles(String prefab, @Nullable String name, Vec3 at, Quaternionf rotation) {
 		UltraModel model = UltraModel.get(prefab);
 		if (model == null) {
 			return;
@@ -171,7 +184,7 @@ final class Effects {
 		for (JsonElement element : model.particles()) {
 			JsonObject system = element.getAsJsonObject();
 			if (name == null || name.equals(system.get("name").getAsString())) {
-				this.particles.add(new Particles(system, at, new Quaternionf(), ExplosionLook.unityRotation(model, system.get("bone").getAsInt())));
+				this.particles.add(new Particles(system, at, rotation, ExplosionLook.unityRotation(model, system.get("bone").getAsInt())));
 			}
 		}
 	}
@@ -316,6 +329,168 @@ final class Effects {
 				}
 			}
 		}
+	}
+
+	/**
+	 * The thrown chainsaws and sawblades: each one's trail and model, its blade running. A chainsaw also has its
+	 * chain from {@code chainStart} and its spinning glint, which is all that shows (and smaller) while it's back
+	 * at the player.
+	 */
+	void renderSaws(LevelRenderContext context, List<ThrownSaw> saws, List<Sawblade> sawblades, @Nullable Vec3 chainStart) {
+		Minecraft minecraft = Minecraft.getInstance();
+		UltraModel thrown = UltraModel.get("chainsaw_thrown");
+		UltraModel blade = UltraModel.get("chainsaw_sawblade");
+		if (minecraft.level == null || thrown == null || blade == null || saws.isEmpty() && sawblades.isEmpty()) {
+			return;
+		}
+		Vec3 camera = minecraft.gameRenderer.mainCamera().position();
+		JsonObject thrownTrail = thrown.script("chainsaw").getAsJsonObject("trail");
+		JsonObject bladeTrail = blade.script("sawblade").getAsJsonObject("trail");
+		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.lightning(), (pose, buffer) -> {
+			for (ThrownSaw saw : saws) {
+				sawTrail(pose, buffer, saw.position, saw.trail, camera, thrownTrail);
+			}
+			for (Sawblade sawblade : sawblades) {
+				sawTrail(pose, buffer, sawblade.position, sawblade.trail, camera, bladeTrail);
+			}
+		});
+		if (chainStart != null) {
+			JsonObject line = thrown.script("chainsaw").getAsJsonObject("line");
+			Identifier texture = Identifier.parse(line.getAsJsonObject("material").get("texture").getAsString());
+			double width = line.get("width").getAsDouble() * PlayerShape.BLOCKS_PER_UNIT;
+			context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.entityCutout(texture), (pose, buffer) -> {
+				for (ThrownSaw saw : saws) {
+					chain(pose, buffer, chainStart.subtract(camera), saw.position.subtract(camera), width);
+				}
+			});
+		}
+		for (ThrownSaw saw : saws) {
+			submitSaw(context, thrown, saw.position, saw.forward, saw.bladeScroll, camera, !saw.inPlayer, saw.inPlayer ? SAW_GLINT_SHRUNK : 1, saw.age());
+		}
+		for (Sawblade sawblade : sawblades) {
+			submitSaw(context, blade, sawblade.position, sawblade.forward(), sawblade.bladeScroll, camera, true, 0, sawblade.age());
+		}
+	}
+
+	/** A saw's model at {@code position} facing {@code forward}, its blade's texture scrolled, and its glint (if it has one, at {@code glint} of its size). */
+	private static void submitSaw(LevelRenderContext context, UltraModel model, Vec3 position, Vec3 forward, double scroll, Vec3 camera, boolean showModel, float glint, double age) {
+		PoseStack poseStack = context.poseStack();
+		float units = (float)PlayerShape.BLOCKS_PER_UNIT;
+		int light = LightCoordsUtil.getLightCoords(Minecraft.getInstance().level, BlockPos.containing(position));
+		poseStack.pushPose();
+		poseStack.translate(position.x - camera.x, position.y - camera.y, position.z - camera.z);
+		Vector3f up = Math.abs(forward.y) > 0.999 ? new Vector3f(0, 0, 1) : new Vector3f(0, 1, 0);
+		poseStack.rotate(new Quaternionf().lookAlong((float)forward.x, (float)forward.y, (float)forward.z, up.x, up.y, up.z).conjugate());
+		poseStack.scale(units, units, units);
+		Matrix4f[] world = model.boneMatrices(model.rest(), new Quaternionf());
+		if (showModel) {
+			model.submit(poseStack, context.submitNodeCollector(), light, world, Set.of(SAW_BLADE));
+			model.submitMaterial(poseStack, context.submitNodeCollector(), world, SAW_BLADE, RenderTypes::entityCutout, 0xFFFFFFFF, light, (float)scroll);
+		}
+		if (glint > 0 && !model.sprites().isEmpty()) {
+			UltraModel.Sprite sprite = model.sprites().getFirst();
+			poseStack.mulPose(world[sprite.bone()]);
+			poseStack.rotate(Axis.ZP.rotationDegrees((float)(age * SAW_GLINT_SPIN % 360)));
+			poseStack.scale(glint, glint, glint);
+			float[] c = sprite.color();
+			quad(context, RenderTypes.text(sprite.texture()), sprite.rect(), c[0], c[1], c[2], c[3]);
+		}
+		poseStack.popPose();
+	}
+
+	/**
+	 * A saw's TrailRenderer: from it back along its points, narrowing as its width curve says, colored by its
+	 * gradient and its Legacy Particles/Additive material (twice its tint).
+	 */
+	private static void sawTrail(PoseStack.Pose pose, VertexConsumer buffer, Vec3 head, Iterable<Pellet.TrailPoint> trail, Vec3 camera, JsonObject settings) {
+		List<Vec3> points = new ArrayList<>();
+		points.add(head.subtract(camera));
+		for (Pellet.TrailPoint point : trail) {
+			if (!point.position().equals(head)) {
+				points.add(point.position().subtract(camera));
+			}
+		}
+		if (points.size() < 2) {
+			return;
+		}
+		double[] along = new double[points.size()];
+		for (int i = 1; i < points.size(); i++) {
+			along[i] = along[i - 1] + points.get(i).distanceTo(points.get(i - 1));
+		}
+		double length = along[along.length - 1];
+		if (length <= 0) {
+			return;
+		}
+		JsonObject material = settings.getAsJsonObject("material");
+		float tint = material.getAsJsonObject("colors").has("_TintColor") ? 2 * material.getAsJsonObject("colors").getAsJsonArray("_TintColor").get(0).getAsFloat() : 1;
+		double width = settings.get("width").getAsDouble() * PlayerShape.BLOCKS_PER_UNIT;
+		JsonArray curve = settings.getAsJsonArray("widthCurve");
+		Vec3[] left = new Vec3[points.size()];
+		Vec3[] right = new Vec3[points.size()];
+		float[][] colors = new float[points.size()][];
+		for (int j = 0; j < points.size(); j++) {
+			double t = along[j] / length;
+			Vec3 tangent = points.get(Math.min(j + 1, points.size() - 1)).subtract(points.get(Math.max(j - 1, 0)));
+			Vec3 side = tangent.cross(points.get(j)).normalize().scale(width * curve(curve, t) / 2);
+			if (!Double.isFinite(side.x)) {
+				side = Vec3.ZERO;
+			}
+			left[j] = points.get(j).add(side);
+			right[j] = points.get(j).subtract(side);
+			float[] c = Particles.gradient(settings.getAsJsonObject("color"), t);
+			colors[j] = new float[]{c[0] * tint, c[1] * tint, c[2] * tint, c[3]};
+		}
+		for (int i = 0; i + 1 < points.size(); i++) {
+			Vec3[] quad = {left[i], right[i], right[i + 1], left[i + 1]};
+			float[][] quadColors = {colors[i], colors[i], colors[i + 1], colors[i + 1]};
+			// Both faces: the additive type culls back faces.
+			for (int k = 0; k < 4; k++) {
+				buffer.addVertex(pose, new Vector3f((float)quad[k].x, (float)quad[k].y, (float)quad[k].z)).setColor(quadColors[k][0], quadColors[k][1], quadColors[k][2], quadColors[k][3]);
+			}
+			for (int k = 3; k >= 0; k--) {
+				buffer.addVertex(pose, new Vector3f((float)quad[k].x, (float)quad[k].y, (float)quad[k].z)).setColor(quadColors[k][0], quadColors[k][1], quadColors[k][2], quadColors[k][3]);
+			}
+		}
+	}
+
+	/** A width curve's value at {@code t}, between its keys. */
+	private static double curve(JsonArray keys, double t) {
+		JsonArray previous = keys.get(0).getAsJsonArray();
+		if (t <= previous.get(0).getAsDouble()) {
+			return previous.get(1).getAsDouble();
+		}
+		for (int i = 1; i < keys.size(); i++) {
+			JsonArray key = keys.get(i).getAsJsonArray();
+			if (t <= key.get(0).getAsDouble()) {
+				double t0 = previous.get(0).getAsDouble();
+				double t1 = key.get(0).getAsDouble();
+				double share = t1 > t0 ? (t - t0) / (t1 - t0) : 1;
+				return previous.get(1).getAsDouble() + (key.get(1).getAsDouble() - previous.get(1).getAsDouble()) * share;
+			}
+			previous = key;
+		}
+		return previous.get(1).getAsDouble();
+	}
+
+	/** The chain: a flat strip from {@code from} to {@code to}, turned to the camera, its texture stretched along it. */
+	private static void chain(PoseStack.Pose pose, VertexConsumer buffer, Vec3 from, Vec3 to, double width) {
+		Vec3 side = to.subtract(from).cross(from.add(to).scale(0.5)).normalize().scale(width / 2);
+		if (!Double.isFinite(side.x)) {
+			return;
+		}
+		Vec3[] corners = {from.add(side), from.subtract(side), to.subtract(side), to.add(side)};
+		float[][] uvs = {{0, 0}, {0, 1}, {1, 1}, {1, 0}};
+		for (int k = 0; k < 4; k++) {
+			chainVertex(pose, buffer, corners[k], uvs[k]);
+		}
+		for (int k = 3; k >= 0; k--) {
+			chainVertex(pose, buffer, corners[k], uvs[k]);
+		}
+	}
+
+	private static void chainVertex(PoseStack.Pose pose, VertexConsumer buffer, Vec3 at, float[] uv) {
+		buffer.addVertex(pose, (float)at.x, (float)at.y, (float)at.z).setColor(-1).setUv(uv[0], uv[1])
+			.setOverlay(OverlayTexture.NO_OVERLAY).setLight(LightCoordsUtil.FULL_BRIGHT).setNormal(pose, 0, 1, 0);
 	}
 
 	/** Each pellet: a small glowing ball and its trail. */

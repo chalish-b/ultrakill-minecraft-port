@@ -10,6 +10,7 @@ import net.minecraft.client.sounds.SoundManager;
 import net.minecraft.resources.Identifier;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.util.RandomSource;
+import net.minecraft.world.phys.Vec3;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -142,15 +143,20 @@ public final class UltraSounds {
 		}
 
 		public void update(String event, double volume, double pitch) {
+			update(event, volume, pitch, null);
+		}
+
+		/** Like {@link #update(String, double, double)}, coming from {@code at} in the world (fading with distance), if given. */
+		public void update(String event, double volume, double pitch, @Nullable Vec3 at) {
 			if (this.instance == null || this.instance.isStopped()) {
 				Identifier id = Ultracraft.id(event);
 				if (manager().getSoundEvent(id) == null) {
 					return;
 				}
-				this.instance = new LoopInstance(id, UltraSounds.this.random, this.looping);
+				this.instance = new LoopInstance(id, UltraSounds.this.random, this.looping, at);
 				manager().play(this.instance);
 			}
-			this.instance.set((float)volume, (float)pitch);
+			this.instance.set((float)volume, (float)pitch, at);
 		}
 
 		public void stop() {
@@ -164,17 +170,23 @@ public final class UltraSounds {
 	private static final class LoopInstance extends AbstractSoundInstance implements TickableSoundInstance {
 		private boolean stopped;
 
-		LoopInstance(Identifier id, RandomSource random, boolean looping) {
+		LoopInstance(Identifier id, RandomSource random, boolean looping, @Nullable Vec3 at) {
 			super(id, SoundSource.PLAYERS, random);
 			this.looping = looping;
-			this.relative = true;
-			this.attenuation = SoundInstance.Attenuation.NONE;
+			this.relative = at == null;
+			this.attenuation = at == null ? SoundInstance.Attenuation.NONE : SoundInstance.Attenuation.LINEAR;
 			this.volume = 0;
+			set(0, 1, at);
 		}
 
-		void set(float volume, float pitch) {
+		void set(float volume, float pitch, @Nullable Vec3 at) {
 			this.volume = volume;
 			this.pitch = pitch;
+			if (at != null) {
+				this.x = at.x;
+				this.y = at.y;
+				this.z = at.z;
+			}
 		}
 
 		void finish() {

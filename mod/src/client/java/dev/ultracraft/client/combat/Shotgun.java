@@ -59,7 +59,7 @@ final class Shotgun {
 	private static final double BEEP_RATE = 5;
 	/** Revving, the Sawed-On shakes by up to this fraction of the force, in units. */
 	private static final double SAW_JITTER = 1 / 12000.0;
-	/** WeaponCharges: the chainsaw recharges this much a second, from 0 to 1. */
+	/** WeaponCharges: the chainsaw recharges this much a second, from 0 to 1, and half that while one is out. */
 	private static final double SAW_RECHARGE = 0.25;
 	/** Hits that don't kill wear the chainsaw out past this many, and break it past this many. */
 	private static final int SAW_WEAR_HITS = 40;
@@ -279,13 +279,13 @@ final class Shotgun {
 
 	/**
 	 * Whether or not the gun is held, the heat sink cools, and (WeaponCharges) the chainsaw recharges in four
-	 * seconds and its hits' time runs out.
+	 * seconds (eight while {@code sawsOut} thrown chainsaws are still about) and its hits' time runs out.
 	 */
-	void cool(double dt) {
+	void cool(double dt, int sawsOut) {
 		if (this.releasingHeat) {
 			this.heat -= HEAT_FADE * dt;
 		}
-		this.sawCharge = Math.min(this.sawCharge + SAW_RECHARGE * dt, 1);
+		this.sawCharge = Math.min(this.sawCharge + SAW_RECHARGE * (sawsOut == 0 ? 1 : 0.5) * dt, 1);
 		this.sawHitsReset = Math.max(this.sawHitsReset - dt, 0);
 	}
 

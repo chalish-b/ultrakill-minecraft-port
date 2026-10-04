@@ -22,6 +22,8 @@ from ultrakill_paths import BUNDLES, REPO  # noqa: E402
 
 OUT = REPO / "mod" / "src" / "generated" / "resources" / "assets" / "ultracraft"
 NAMESPACE = "ultracraft"
+# PlayerShape.BLOCKS_PER_UNIT: the player is 3.5 units tall in ULTRAKILL and 1.8 blocks in Minecraft.
+BLOCKS_PER_UNIT = 1.8 / 3.5
 
 # ULTRAKILL's SurfaceType enum.
 SURFACES = {
@@ -40,12 +42,15 @@ class Extractor:
         self.files = {}
         self.events = {}
 
-    def clip(self, pptr):
-        """Exports an AudioClip once and returns its sound name."""
+    def clip(self, pptr, mono=False):
+        """Exports an AudioClip once and returns its sound name. Minecraft only places and fades mono sounds, so
+        a sound that comes from somewhere in the world is mixed down to one channel."""
         clip = pptr.deref().read()
-        name = file_name(clip.m_Name)
+        name = file_name(clip.m_Name) + ("_mono" if mono else "")
         if name not in self.files:
             data, rate = soundfile.read(io.BytesIO(next(iter(clip.samples.values()))))
+            if mono and data.ndim > 1:
+                data = data.mean(axis=1)
             ogg = OUT / "sounds" / f"{name}.ogg"
             soundfile.write(ogg, data, rate, format="OGG", subtype="VORBIS")
             self.files[name] = ogg
@@ -54,8 +59,8 @@ class Extractor:
     def event(self, event, sounds):
         self.events[event] = {"sounds": sounds}
 
-    def add_clip(self, event, pptr, volume=1.0, pitch=1.0):
-        self.event(event, [sound(self.clip(pptr), volume, pitch)])
+    def add_clip(self, event, pptr, volume=1.0, pitch=1.0, mono=False):
+        self.event(event, [sound(self.clip(pptr, mono), volume, pitch)])
 
     def add_source(self, event, source):
         self.add_clip(event, source.m_audioClip, source.m_Volume, source.m_Pitch)
@@ -232,6 +237,13 @@ def combat(env, x):
     x.add_clip("chainsaw_hit", source.m_audioClip, source.m_Volume)
     source = named_source(hit, "SparksSawblade")
     x.add_clip("chainsaw_spark", source.m_audioClip, source.m_Volume)
+    thrown = saw.chainsaw.deref().read()
+    # The thrown chainsaw's hum comes from where it is, fading out over its AudioSource's range (in blocks).
+    spin = thrown.stoppedAud.deref()
+    x.add_clip("chainsaw_spin", spin.read().m_audioClip, mono=True)
+    x.events["chainsaw_spin"]["sounds"][0]["attenuation_distance"] = round(spin.read_typetree()["MaxDistance"] * BLOCKS_PER_UNIT)
+    x.add_source("chainsaw_snap", thrown.ropeSnapSound.deref().read())
+    blade = next(s for s in components(thrown.sawbladeVersion.deref().read().m_GameObject.read(), "MonoBehaviour") if hasattr(s, "sawblade"))
     pump = find_class(env, "Shotgun", "Shotgun Pump", variation=1)
     x.add_clip("shotgun_pump1", pump.pump1sound)
     x.add_clip("shotgun_pump2", pump.pump2sound)

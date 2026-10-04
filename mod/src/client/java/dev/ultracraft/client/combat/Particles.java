@@ -33,6 +33,9 @@ final class Particles {
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	/** Physics.gravity, units per second squared. */
 	private static final double GRAVITY = 40;
+	/** ParticleSystemShapeType's hemispheres. */
+	private static final int HEMISPHERE = 2;
+	private static final int HEMISPHERE_SHELL = 3;
 
 	/** How a particle material blends: Legacy Particles/Multiply (Double) has no counterpart, so it's laid over. */
 	private enum Blend {
@@ -174,7 +177,8 @@ final class Particles {
 	}
 
 	/** A gradient's color at {@code t}: its color and alpha keys joined straight. */
-	private static float[] gradient(JsonObject gradient, double t) {
+	/** An extracted Gradient's color at {@code t}, 0 to 1. */
+	static float[] gradient(JsonObject gradient, double t) {
 		float[] rgb = keyed(gradient.getAsJsonArray("colors"), t, 3);
 		float[] a = keyed(gradient.getAsJsonArray("alphas"), t, 1);
 		return new float[]{rgb[0], rgb[1], rgb[2], a[0]};
@@ -230,11 +234,14 @@ final class Particles {
 				double lean = Math.toRadians(shape.get("angle").getAsDouble()) * r;
 				direction.set((float)(Math.cos(angle) * Math.sin(lean)), (float)(Math.sin(angle) * Math.sin(lean)), (float)Math.cos(lean));
 			} else {
-				// Sphere: anywhere inside it, flying straight out.
+				// Sphere: anywhere inside it, flying straight out; a hemisphere keeps the half ahead.
 				Vector3f point;
 				do {
 					point = new Vector3f(this.random.nextFloat() * 2 - 1, this.random.nextFloat() * 2 - 1, this.random.nextFloat() * 2 - 1);
 				} while (point.lengthSquared() > 1 || point.lengthSquared() == 0);
+				if ((type == HEMISPHERE || type == HEMISPHERE_SHELL) && point.z < 0) {
+					point.z = -point.z;
+				}
 				position.set(point).mul((float)radius);
 				direction.set(point).normalize();
 			}

@@ -29,6 +29,8 @@ import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Options;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
@@ -56,6 +58,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.function.UnaryOperator;
 
 /**
@@ -63,7 +66,8 @@ import java.util.function.UnaryOperator;
  * arms' punches (and boosting pellets with them) and the Knuckleblaster's blast, explosions, weapon charges
  * (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the server, which applies them.
  */
-public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events, Explosion.Hits, SawZone.Hits {
+public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events, Explosion.Hits, SawZone.Hits,
+	ThrownSaw.Hits, Sawblade.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
@@ -118,6 +122,17 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	/** The chainsaw's hits land where the aim meets the enemy, if it does within this far. */
 	private static final double SAW_AIM_REACH = 15 * S;
 	private static final String SAWED_ON = "shotgun_sawed_on";
+	/** The thrown chainsaw, and the sawblade it becomes off its chain. */
+	private static final String THROWN_SAW = "chainsaw_thrown";
+	private static final String SAWBLADE = "chainsaw_sawblade";
+	/** The sawblade's chainsaw hums at this volume (its AudioSource's). */
+	private static final float SAWBLADE_SPIN_VOLUME = 0.25F;
+	/** Punches find a thrown chainsaw within this far of the camera, and along the aim within the punch's reach. */
+	private static final double SAW_PUNCH_TOUCH = 0.01 * S;
+	private static final double SAW_HEAVY_PUNCH_TOUCH = 0.1 * S;
+	private static final double SAW_PUNCH_BOX = 0.3 * S;
+	/** A Feedbacker punch sends on punchable sawblades within a sphere this big, this far ahead. */
+	private static final double SAWBLADE_PUNCH_RADIUS = 3 * S;
 
 	private final UltraSounds sounds = new UltraSounds();
 	private final Effects effects = new Effects();
@@ -131,6 +146,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	private final RandomSource random = RandomSource.create();
 	private final Map<Shotgun.Variant, Shotgun> shotguns = new EnumMap<>(Shotgun.Variant.class);
 	private final SawZone sawZone = new SawZone();
+	private final List<ThrownSaw> saws = new ArrayList<>();
+	private final List<Sawblade> sawblades = new ArrayList<>();
+	/** The Feedbacker's punch is still active and hasn't punched a chainsaw yet. */
+	private boolean sawPunchPending;
 	/** The chainsaw idling on the gun, and grinding a wall. */
 	private final UltraSounds.Loop sawIdle = this.sounds.loop();
 	private final UltraSounds.Loop sawGrind = this.sounds.loop();
@@ -188,6 +207,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			this.shells.clear();
 			this.pellets.clear();
 			this.cores.clear();
+			this.saws.forEach(saw -> saw.spin.stop());
+			this.saws.clear();
+			this.sawblades.forEach(sawblade -> sawblade.spin.stop());
+			this.sawblades.clear();
 			return;
 		}
 		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
@@ -223,6 +246,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		if (this.punchActiveLeft > 0) {
 			this.punchActiveLeft -= dt;
 			punchCoin(minecraft.level, player);
+			if (this.sawPunchPending && punchChainsaws(player)) {
+				this.sawPunchPending = false;
+			}
 		}
 		for (Coin coin : this.coins) {
 			coin.update(dt, minecraft.level, player);
@@ -246,6 +272,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			}
 		}
 		this.cores.removeIf(core -> core.removed);
+		updateSaws(dt, minecraft.level, player);
 		for (Explosion explosion : List.copyOf(this.explosions)) {
 			explosion.update(dt, minecraft.level, player, this);
 		}
@@ -288,7 +315,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			saw(dt, minecraft.level, player, null);
 		}
 		for (Shotgun shotgun : this.shotguns.values()) {
-			shotgun.cool(dt);
+			shotgun.cool(dt, this.saws.size());
 		}
 		// Animators run after gameplay code, as Unity's do, so what it set this frame plays this frame.
 		updateViewmodels(dt);
@@ -405,10 +432,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		switch (function) {
 			case "ActiveStart" -> {
 				Minecraft minecraft = Minecraft.getInstance();
-				// A boosted pellet takes the punch: it hits nothing else.
-				if (this.arm != FistType.STANDARD || minecraft.player == null || !boostPellet(minecraft.player)) {
+				LocalPlayer player = minecraft.player;
+				// A boosted pellet, or a chainsaw or sawblade punched on, takes the punch: it hits nothing else.
+				boolean taken = player != null && (this.arm == FistType.STANDARD ? boostPellet(player) || punchSaws(player) : detachSaw(player));
+				if (!taken) {
 					ClientPlayNetworking.send(new PunchPayload(this.arm));
 				}
+				this.sawPunchPending = this.arm == FistType.STANDARD && !taken;
 				if (this.arm == FistType.STANDARD && minecraft.level != null && minecraft.player != null) {
 					this.punchActiveLeft = PUNCH_ACTIVE_TIME;
 					punchCoin(minecraft.level, minecraft.player);
@@ -1262,6 +1292,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	@Override
 	public void shootSaw(Shotgun.Variant variant, double force, boolean thrown) {
 		if (thrown) {
+			throwSaw(force);
 			double share = force / Shotgun.MAX_FORCE;
 			this.sounds.play("shotgun_core_throw", (float)(0.45 * Math.sqrt(1 - share * share)), this.sounds.randomPitch(0.95F, 1.05F));
 			this.sounds.play("shotgun_shoot", (float)(0.45 * Math.max(0.5, share)), this.sounds.randomPitch(0.75F, 0.85F));
@@ -1274,6 +1305,265 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		if (movement != null) {
 			movement.shake(1);
 		}
+	}
+
+	/**
+	 * Shotgun.ShootSaw's chainsaw: half a unit out of the camera (or as far as a wall allows), thrown along the aim
+	 * at 15 to 105 units a second with the charge.
+	 */
+	private void throwSaw(double force) {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		UltraModel model = UltraModel.get(THROWN_SAW);
+		if (player == null || minecraft.level == null || movement == null || model == null) {
+			return;
+		}
+		Vec3 eye = movement.eyePosition();
+		Vec3 look = player.getLookAngle();
+		Vec3 reach = eye.add(look.scale(0.5 * S));
+		BlockHitResult wall = minecraft.level.clip(new ClipContext(eye, reach, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+		Vec3 at = wall.getType() == HitResult.Type.MISS ? reach : eye.add(look.scale(Math.max(eye.distanceTo(wall.getLocation()) - 0.5 * S, 0)));
+		ThrownSaw saw = new ThrownSaw(model.script("chainsaw"), at, this.sounds.loop());
+		saw.launch(minecraft.level, player, look.scale((force + 10) * 1.5), this);
+		this.saws.add(saw);
+	}
+
+	/** The thrown chainsaws and the sawblades, with their spinning sound where each is. */
+	private void updateSaws(double dt, Level level, LocalPlayer player) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		Vec3 eye = movement != null ? movement.eyePosition() : player.getEyePosition();
+		Vec3 look = player.getLookAngle();
+		for (ThrownSaw saw : List.copyOf(this.saws)) {
+			if (!saw.removed) {
+				saw.update(dt, level, player, eye, look, this);
+			}
+			if (saw.removed) {
+				saw.spin.stop();
+			} else {
+				saw.spin.update("chainsaw_spin", saw.spinVolume(), saw.spinPitch(), saw.position);
+			}
+		}
+		this.saws.removeIf(saw -> saw.removed);
+		for (Sawblade sawblade : List.copyOf(this.sawblades)) {
+			if (!sawblade.removed) {
+				sawblade.update(dt, level, player, this);
+			}
+			if (sawblade.removed) {
+				sawblade.spin.stop();
+			} else {
+				sawblade.spin.update("chainsaw_spin", SAWBLADE_SPIN_VOLUME, 1, sawblade.position);
+			}
+		}
+		this.sawblades.removeIf(sawblade -> sawblade.removed);
+	}
+
+	/**
+	 * Where the chain starts: the chainsaw's place on the Sawed-On while it's held, or else the player
+	 * (Shotgun.OnEnable and OnDisable).
+	 */
+	private @Nullable Vec3 chainStart() {
+		Minecraft minecraft = Minecraft.getInstance();
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (this.saws.isEmpty() || movement == null) {
+			return null;
+		}
+		if (this.held == FirstPersonWeapons.Weapon.SHOTGUN_SAWED_ON) {
+			FirstPersonWeapons.Frame point = FirstPersonWeapons.INSTANCE.weaponBone(this.held, "ChainSawAttachPoint");
+			if (point != null) {
+				Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
+				return world(camera, point.position()).scale(S).add(minecraft.gameRenderer.mainCamera().position());
+			}
+		}
+		return movement.rootPosition();
+	}
+
+	/** Chainsaw.DamageEnemy: the hit, with a grind. */
+	@Override
+	public void sawEnemy(LivingEntity enemy) {
+		sawHitEnemy(enemy, sawScript(THROWN_SAW, "chainsaw").get("damage").getAsFloat());
+	}
+
+	/** Nail.DamageEnemy for a sawblade: twice the damage while punched. */
+	@Override
+	public void sawbladeEnemy(LivingEntity enemy, boolean punched) {
+		sawHitEnemy(enemy, sawScript(SAWBLADE, "sawblade").get("damage").getAsFloat() * (punched ? 2 : 1));
+	}
+
+	private void sawHitEnemy(LivingEntity enemy, float damage) {
+		Level level = Minecraft.getInstance().level;
+		if (level == null) {
+			return;
+		}
+		this.sounds.play("chainsaw_hit", 1, this.sounds.randomPitch(0.75F, 1.25F));
+		this.sounds.play("chainsaw_spark", 1, this.sounds.randomPitch(0.75F, 1.25F));
+		shotgunHit(level, enemy, damage, enemy.getBoundingBox().getCenter());
+	}
+
+	private static JsonObject sawScript(String model, String script) {
+		return UltraModel.get(model).script(script);
+	}
+
+	@Override
+	public void sawRicochet(Vec3 at, Direction face, boolean sound) {
+		sawRicochet(at, face, sound, true);
+	}
+
+	/** A chainsaw or sawblade off a wall: sparks out of it, their ricochet, and bits of the wall. */
+	@Override
+	public void sawRicochet(Vec3 at, Direction face, boolean sound, boolean gibs) {
+		Minecraft minecraft = Minecraft.getInstance();
+		Vec3 normal = new Vec3(face.getStepX(), face.getStepY(), face.getStepZ());
+		Vector3f up = Math.abs(normal.y) > 0.99 ? new Vector3f(0, 0, 1) : new Vector3f(0, 1, 0);
+		Quaternionf facing = new Quaternionf().lookAlong((float)normal.x, (float)normal.y, (float)normal.z, up.x, up.y, up.z).conjugate();
+		this.effects.particles("chainsaw_ricochet", null, at, facing);
+		if (sound) {
+			this.sounds.play("chainsaw_spark", 1, this.sounds.randomPitch(0.85F, 1.15F));
+		}
+		if (gibs && minecraft.level instanceof ClientLevel client) {
+			client.addBreakingBlockEffects(BlockPos.containing(at.subtract(normal.scale(0.01))), face, false);
+		}
+	}
+
+	/** The chain snapped: the chainsaw flies on as a sawblade. */
+	@Override
+	public void sawSnapped(ThrownSaw saw) {
+		turnIntoSawblade(saw, saw.heading().scale(ThrownSaw.PUNCH_SPEED));
+	}
+
+	/** Chainsaw.TurnIntoSawblade: its sawblade carries on at the given velocity, with the chain's snap. */
+	private void turnIntoSawblade(ThrownSaw saw, Vec3 velocity) {
+		saw.removed = true;
+		saw.spin.stop();
+		UltraModel model = UltraModel.get(SAWBLADE);
+		if (model != null) {
+			this.sawblades.add(new Sawblade(model.script("sawblade"), saw.position, velocity, this.sounds.loop()));
+		}
+		this.sounds.play("chainsaw_snap", 0.5F, 1);
+	}
+
+	/** Nail.SawBreak: the sawblade breaks apart. */
+	@Override
+	public void sawbladeBroke(Sawblade sawblade) {
+		sawblade.spin.stop();
+		this.effects.particles("chainsaw_break", null, sawblade.position);
+		this.sounds.play("chainsaw_break", 1, this.sounds.randomPitch(0.56F, 0.76F));
+		this.sounds.play("chainsaw_spark", 1, this.sounds.randomPitch(0.85F, 1.15F));
+	}
+
+	/** The Feedbacker on thrown chainsaws, or else on sawblades. */
+	private boolean punchSaws(LocalPlayer player) {
+		return punchChainsaws(player) || punchSawblades(player);
+	}
+
+	/**
+	 * Punch.TryParryProjectile and ChainsawPunchRoutine: every thrown chainsaw at the camera or along the aim
+	 * within the punch's reach goes back out from just ahead of the camera, towards what the player aims at.
+	 */
+	private boolean punchChainsaws(LocalPlayer player) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		Level level = Minecraft.getInstance().level;
+		if (movement == null || level == null || this.saws.isEmpty()) {
+			return false;
+		}
+		Vec3 eye = movement.eyePosition();
+		Vec3 look = player.getLookAngle();
+		List<ThrownSaw> punched = new ArrayList<>();
+		for (ThrownSaw saw : this.saws) {
+			OrientedBox box = saw.box();
+			if (!saw.removed && (box.distanceTo(eye) <= SAW_PUNCH_TOUCH || box.clip(eye, look, PUNCH_REACH).isPresent() || box.inflated(SAW_PUNCH_BOX).clip(eye, look, PUNCH_REACH).isPresent())) {
+				punched.add(saw);
+			}
+		}
+		if (punched.isEmpty()) {
+			return false;
+		}
+		Vec3 target = parryLookTarget(level, player, eye, look);
+		for (ThrownSaw saw : punched) {
+			saw.punched(eye, look, target);
+		}
+		this.punchStamina = 2;
+		sawPunchFeedback();
+		return true;
+	}
+
+	/** Punch.ActiveFrame on sawblades that have bounced, in a sphere ahead: on towards what the player aims at. */
+	private boolean punchSawblades(LocalPlayer player) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		Level level = Minecraft.getInstance().level;
+		if (movement == null || level == null || this.sawblades.isEmpty()) {
+			return false;
+		}
+		Vec3 eye = movement.eyePosition();
+		Vec3 look = player.getLookAngle();
+		Vec3 centre = eye.add(look.scale(SAWBLADE_PUNCH_RADIUS));
+		Vec3 target = parryLookTarget(level, player, eye, look);
+		boolean any = false;
+		for (Sawblade sawblade : this.sawblades) {
+			if (!sawblade.removed && sawblade.punchable && sawblade.box().distanceTo(centre) <= SAWBLADE_PUNCH_RADIUS) {
+				sawblade.punched(target);
+				any = true;
+			}
+		}
+		if (any) {
+			sawPunchFeedback();
+		}
+		return any;
+	}
+
+	/** The punch's specialHit: its sound, a short hitstop and the hook. */
+	private void sawPunchFeedback() {
+		this.sounds.play("parry_hit", 1, 1);
+		this.hitstopLeft = Math.max(this.hitstopLeft, PUNCH_HITSTOP);
+		ClientPlayNetworking.send(new HitstopPayload((int)(PUNCH_HITSTOP * 1000)));
+		Animator arm = FirstPersonWeapons.INSTANCE.armAnimator();
+		if (arm != null) {
+			arm.play("Hook", 0.065);
+		}
+	}
+
+	/**
+	 * Punch.ActiveFrame for the Knuckleblaster: a thrown chainsaw at the camera, or else the first along the aim,
+	 * is knocked off its chain from just ahead of the camera towards what the player aims at, with a parry flash.
+	 */
+	private boolean detachSaw(LocalPlayer player) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		Level level = Minecraft.getInstance().level;
+		if (movement == null || level == null || this.saws.isEmpty()) {
+			return false;
+		}
+		Vec3 eye = movement.eyePosition();
+		Vec3 look = player.getLookAngle();
+		ThrownSaw found = null;
+		double nearest = Double.MAX_VALUE;
+		for (ThrownSaw saw : this.saws) {
+			if (saw.removed) {
+				continue;
+			}
+			OrientedBox box = saw.box();
+			if (box.distanceTo(eye) <= SAW_HEAVY_PUNCH_TOUCH) {
+				found = saw;
+				break;
+			}
+			OptionalDouble along = box.clip(eye, look, PUNCH_REACH);
+			if (along.isEmpty()) {
+				along = box.inflated(SAW_PUNCH_BOX).clip(eye, look, PUNCH_REACH);
+			}
+			if (along.isPresent() && along.getAsDouble() < nearest) {
+				nearest = along.getAsDouble();
+				found = saw;
+			}
+		}
+		if (found == null) {
+			return false;
+		}
+		Vec3 toward = parryLookTarget(level, player, eye, look).subtract(eye).normalize();
+		this.punchStamina = 2;
+		found.position = eye.add(toward.scale(S));
+		parryFlash();
+		ClientPlayNetworking.send(new HitstopPayload((int)(PARRY_HITSTOP * 1000)));
+		turnIntoSawblade(found, toward.scale(ThrownSaw.PUNCH_SPEED));
+		return true;
 	}
 
 	/** The chainsaw's break effect where its blade is: a screech, sparks and their ricochet. */
@@ -1603,5 +1893,6 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 
 	public void render(LevelRenderContext context) {
 		this.effects.render(context, this.coins, this.shells, this.pellets, this.cores);
+		this.effects.renderSaws(context, this.saws, this.sawblades, chainStart());
 	}
 }
