@@ -12,13 +12,15 @@ import net.minecraft.world.phys.Vec3;
  * Server to client: what a punch connected with.
  *
  * @param gore the blood an enemy hit leaves
+ * @param entityId the enemy it hit, or -1
  */
-public record PunchResultPayload(Result result, Vec3 position, Gore gore) implements CustomPacketPayload {
+public record PunchResultPayload(Result result, Vec3 position, Gore gore, int entityId) implements CustomPacketPayload {
 	public static final Type<PunchResultPayload> TYPE = new Type<>(Ultracraft.id("punch_result"));
 	public static final StreamCodec<ByteBuf, PunchResultPayload> CODEC = StreamCodec.composite(
 		ByteBufCodecs.idMapper(i -> Result.values()[i], Result::ordinal), PunchResultPayload::result,
 		Vec3.STREAM_CODEC, PunchResultPayload::position,
 		ByteBufCodecs.idMapper(i -> Gore.values()[i], Gore::ordinal), PunchResultPayload::gore,
+		ByteBufCodecs.VAR_INT, PunchResultPayload::entityId,
 		PunchResultPayload::new
 	);
 

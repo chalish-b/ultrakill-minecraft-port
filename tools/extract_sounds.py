@@ -313,7 +313,7 @@ def railcannon(env, x):
     """Each railcannon's shot (its fireSound's sources, in order), the hum while it's fully charged (Malicious's
     pitch is set by its code), and each charge pip's hum and click, by charge level (RailCannonPip); the
     Malicious beam's explosion; and the full charge sound (WeaponCharges)."""
-    for variant, go_name in [("electric", "Railcannon Electric"), ("malicious", "Railcannon Malicious")]:
+    for variant, go_name in [("electric", "Railcannon Electric"), ("screwdriver", "Railcannon Harpoon"), ("malicious", "Railcannon Malicious")]:
         gun = find_class(env, "Railcannon", go_name)
         for i, source in enumerate(audio_sources(gun.fireSound.deref().read())):
             x.add_source_baked(f"railcannon_fire.{variant}.{i}", source)
@@ -340,6 +340,29 @@ def railcannon(env, x):
     beam = next(s for s in components(malicious.beam.deref().read(), "MonoBehaviour") if hasattr(s, "hitParticle"))
     explosion = next(components(beam.hitParticle.deref().read(), "AudioSource"))
     x.event("explosion_malicious_railcannon", [sound(x.clip(explosion.m_audioClip, speed=0.5), explosion.m_Volume)])
+    # The Screwdriver's drill: its hits on a wall and an enemy (their pitch is set by its code), its drilling loop,
+    # its TimeBomb's beep and the debris sound when it breaks. They come from where the drill is.
+    screwdriver = find_class(env, "Railcannon", "Railcannon Harpoon")
+    drill_go = screwdriver.beam.deref().read()
+    drill = next(s for s in components(drill_go, "MonoBehaviour") if hasattr(s, "drillHits"))
+    for event, pptr in [("drill_hit_wall", drill.environmentHitSound), ("drill_hit_enemy", drill.enemyHitSound)]:
+        x.add_clip(event, pptr, 0.4, mono=True)
+        x.events[event]["sounds"][0]["attenuation_distance"] = round(100 * BLOCKS_PER_UNIT)
+    loop = source_ref(drill.drillSound)
+    loop_go = loop.m_GameObject.read()
+    x.add_clip("drill_loop", loop.m_audioClip, loop.m_Volume, mono=True)
+    x.events["drill_loop"]["sounds"][0]["attenuation_distance"] = round(next(audio_sources_tree(loop_go))["MaxDistance"] * BLOCKS_PER_UNIT)
+    bomb = next(s for s in components(drill_go, "MonoBehaviour") if hasattr(s, "beepLight"))
+    beep_go = bomb.beepLight.deref().read()
+    beep = next(components(beep_go, "AudioSource"))
+    x.add_clip("drill_beep", beep.m_audioClip, beep.m_Volume, mono=True)
+    x.events["drill_beep"]["sounds"][0]["attenuation_distance"] = round(next(audio_sources_tree(beep_go))["MaxDistance"] * BLOCKS_PER_UNIT)
+    break_go = bomb.explosion.deref().read()
+    debris = next(components(break_go, "AudioSource"))
+    x.add_clip("drill_break", debris.m_audioClip, debris.m_Volume, mono=True)
+    x.events["drill_break"]["sounds"][0]["attenuation_distance"] = round(next(audio_sources_tree(break_go))["MaxDistance"] * BLOCKS_PER_UNIT)
+    pitch = next(s for s in components(break_go, "MonoBehaviour") if hasattr(s, "pitchVariation"))
+    print("drill_break pitch", debris.m_Pitch, "RandomPitch", pitch.defaultPitch, pitch.pitchVariation, "beep max", next(audio_sources_tree(beep_go))["MaxDistance"])
     charges = next(o.read() for o in env.objects if o.type.name == "MonoBehaviour" and script_class(o) == "WeaponCharges"
                    and o.read().railCannonFullChargeSound.path_id)
     x.add_source("railcannon_full_charge", next(components(charges.railCannonFullChargeSound.deref().read(), "AudioSource")))

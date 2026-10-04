@@ -13,15 +13,28 @@ import net.minecraft.world.phys.Vec3;
  * @param damage ULTRAKILL damage, with any headshot bonus already applied
  * @param head whether it hit the head, for the blood it leaves
  */
-public record WeaponHitPayload(int entityId, float damage, boolean head, Vec3 position) implements CustomPacketPayload {
+public record WeaponHitPayload(int entityId, float damage, boolean head, Vec3 position, Kind kind) implements CustomPacketPayload {
 	public static final Type<WeaponHitPayload> TYPE = new Type<>(Ultracraft.id("weapon_hit"));
 	public static final StreamCodec<ByteBuf, WeaponHitPayload> CODEC = StreamCodec.composite(
 		ByteBufCodecs.VAR_INT, WeaponHitPayload::entityId,
 		ByteBufCodecs.FLOAT, WeaponHitPayload::damage,
 		ByteBufCodecs.BOOL, WeaponHitPayload::head,
 		Vec3.STREAM_CODEC, WeaponHitPayload::position,
+		ByteBufCodecs.idMapper(i -> Kind.values()[i], Kind::ordinal), WeaponHitPayload::kind,
 		WeaponHitPayload::new
 	);
+
+	public WeaponHitPayload(int entityId, float damage, boolean head, Vec3 position) {
+		this(entityId, damage, head, position, Kind.HIT);
+	}
+
+	public enum Kind {
+		HIT,
+		/** A tick of the Screwdriver's drill: the enemy doesn't flinch, and its blood is twice the size. */
+		DRILL,
+		/** The drill punched out of an enemy: an enemy it kills bursts. */
+		DRILL_PUNCH
+	}
 
 	@Override
 	public Type<? extends CustomPacketPayload> type() {

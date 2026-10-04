@@ -27,6 +27,7 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.IntPredicate;
 
 /**
  * The first-person viewmodels: the held revolver, shotgun or railcannon, the current arm (the Feedbacker or the
@@ -67,6 +68,7 @@ public final class FirstPersonWeapons {
 		SHOTGUN_PUMP_CHARGE("shotgun_pump_charge"),
 		SHOTGUN_SAWED_ON("shotgun_sawed_on"),
 		RAILCANNON_ELECTRIC("railcannon_electric"),
+		RAILCANNON_SCREWDRIVER("railcannon_screwdriver"),
 		RAILCANNON_MALICIOUS("railcannon_malicious");
 
 		final String model;
@@ -709,8 +711,8 @@ public final class FirstPersonWeapons {
 
 	/**
 	 * The railcannon (Railcannon.SetMaterialIntensity): recharging, its body glows by the charge and each pip lights
-	 * up in turn; fully charged, everything glows, the gun trembles, and its FullCharge sprite and arcs show, in
-	 * the variant's color.
+	 * up in turn; fully charged, everything glows, the gun trembles, and what's on its FullCharge object shows (its
+	 * sprite, arcs in the variant's color, the Screwdriver's drill tip).
 	 */
 	private void submitRailcannon(PoseStack poseStack, SubmitNodeCollector collector, int light, Viewmodel weapon) {
 		JsonObject script = weapon.model.script("railcannon");
@@ -731,7 +733,9 @@ public final class FirstPersonWeapons {
 			pips.add(pip.getAsString());
 		}
 		Matrix4f[] world = weapon.model.boneMatrices(weapon.pose, new Quaternionf());
-		weapon.model.submitGlowing(poseStack, collector, light, world, object -> {
+		int fullChargeBone = script.get("fullCharge").getAsInt();
+		IntPredicate shown = bone -> full || !descends(weapon.model, bone, fullChargeBone);
+		weapon.model.submitGlowing(poseStack, collector, light, world, shown, object -> {
 			double intensity;
 			if (full) {
 				intensity = 1;
@@ -758,6 +762,16 @@ public final class FirstPersonWeapons {
 			}
 		}
 		poseStack.popPose();
+	}
+
+	/** Whether {@code bone} is {@code ancestor} or under it. */
+	private static boolean descends(UltraModel model, int bone, int ancestor) {
+		for (int b = bone; b >= 0; b = model.parent(b)) {
+			if (b == ancestor) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** Where the railcannon's Shootpoint shows in the world, as it's posed now. */

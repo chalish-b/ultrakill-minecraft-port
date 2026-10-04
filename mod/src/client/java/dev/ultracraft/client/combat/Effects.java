@@ -386,15 +386,20 @@ final class Effects {
 	}
 
 	void blood(Level level, Vec3 at, Gore gore) {
+		blood(level, at, gore, 1);
+	}
+
+	/** Blood from a splatter {@code scale} times the usual size, which throws it that much further. */
+	void blood(Level level, Vec3 at, Gore gore, float scale) {
 		int count = switch (gore) {
 			case HEAD -> 30;
 			case BODY -> 14;
 			case SMALL -> 6;
 		};
 		for (int i = 0; i < count; i++) {
-			double vx = this.random.nextGaussian() * 0.25;
-			double vy = this.random.nextDouble() * 0.35;
-			double vz = this.random.nextGaussian() * 0.25;
+			double vx = this.random.nextGaussian() * 0.25 * scale;
+			double vy = this.random.nextDouble() * 0.35 * scale;
+			double vz = this.random.nextGaussian() * 0.25 * scale;
 			level.addParticle(new BlockParticleOption(ParticleTypes.BLOCK, GORE), at.x, at.y, at.z, vx, vy, vz);
 			if (i % 2 == 0) {
 				level.addParticle(BLOOD, at.x, at.y, at.z, vx, vy, vz);
@@ -529,6 +534,48 @@ final class Effects {
 		}
 		for (Sawblade sawblade : sawblades) {
 			submitSaw(context, blade, sawblade.position, sawblade.forward(), sawblade.bladeScroll, camera, true, 0, sawblade.age());
+		}
+	}
+
+	/**
+	 * The Screwdriver's drills: each one's trail and model, spinning about its length, and its TimeBomb's beeper
+	 * flashing on it.
+	 */
+	void renderDrills(LevelRenderContext context, List<Drill> drills) {
+		Minecraft minecraft = Minecraft.getInstance();
+		UltraModel model = UltraModel.get("drill");
+		if (minecraft.level == null || model == null || drills.isEmpty()) {
+			return;
+		}
+		Vec3 camera = minecraft.gameRenderer.mainCamera().position();
+		JsonObject trail = model.script("harpoon").getAsJsonObject("trail");
+		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.lightning(), (pose, buffer) -> {
+			for (Drill drill : drills) {
+				sawTrail(pose, buffer, drill.position, drill.trail, camera, trail);
+			}
+		});
+		UltraModel beeper = UltraModel.get("drill_beeper");
+		PoseStack poseStack = context.poseStack();
+		float units = (float)PlayerShape.BLOCKS_PER_UNIT;
+		for (Drill drill : drills) {
+			Vec3 forward = drill.forward;
+			poseStack.pushPose();
+			poseStack.translate(drill.position.x - camera.x, drill.position.y - camera.y, drill.position.z - camera.z);
+			Vector3f up = Math.abs(forward.y) > 0.999 ? new Vector3f(0, 0, 1) : new Vector3f(0, 1, 0);
+			// The conjugated look rotation takes +z along the direction it's given; the model's forward is -z.
+			poseStack.rotate(new Quaternionf().lookAlong((float)-forward.x, (float)-forward.y, (float)-forward.z, up.x, up.y, up.z).conjugate());
+			poseStack.rotate(Axis.ZP.rotationDegrees((float)drill.spin));
+			poseStack.scale(units, units, units);
+			int light = LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(drill.position));
+			model.submit(poseStack, context.submitNodeCollector(), light, model.boneMatrices(model.rest(), new Quaternionf()));
+			if (beeper != null && !beeper.sprites().isEmpty() && drill.beeperScale > 0.01) {
+				UltraModel.Sprite sprite = beeper.sprites().getFirst();
+				float size = (float)drill.beeperScale;
+				poseStack.scale(size, size, size);
+				float[] c = sprite.color();
+				quad(context, RenderTypes.beaconBeam(sprite.texture(), true), sprite.rect(), c[0], c[1], c[2], c[3]);
+			}
+			poseStack.popPose();
 		}
 	}
 

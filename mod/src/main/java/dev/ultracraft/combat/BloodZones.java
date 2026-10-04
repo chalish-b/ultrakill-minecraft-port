@@ -25,7 +25,12 @@ public final class BloodZones {
 	}
 
 	public static void add(ServerLevel level, Vec3 position, Gore gore, boolean fromExplosion) {
-		Zone zone = new Zone(level, position, gore.radius * PlayerShape.BLOCKS_PER_UNIT, gore.hp, fromExplosion);
+		add(level, position, gore, fromExplosion, 1);
+	}
+
+	/** A splatter {@code scale} times the usual size: it heals within that much more. */
+	public static void add(ServerLevel level, Vec3 position, Gore gore, boolean fromExplosion, float scale) {
+		Zone zone = new Zone(level, position, gore.radius * scale * PlayerShape.BLOCKS_PER_UNIT, gore.hp, fromExplosion);
 		if (!zone.tryHeal()) {
 			ZONES.add(zone);
 		}

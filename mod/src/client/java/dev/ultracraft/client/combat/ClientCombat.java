@@ -78,7 +78,7 @@ import java.util.function.UnaryOperator;
  * server, which applies them.
  */
 public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Railcannon.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events, Explosion.Hits,
-	SawZone.Hits, ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits {
+	SawZone.Hits, ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits, Drill.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
@@ -190,6 +190,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 	private final Railcannon railcannon = new Railcannon(this.sounds);
 	/** Railcannon beams still working their way through what they hit. */
 	private final List<RailShot> railShots = new ArrayList<>();
+	/** The Screwdriver's drills. */
+	private final List<Drill> drills = new ArrayList<>();
 	/** The Feedbacker's punch is still active and hasn't punched a chainsaw yet. */
 	private boolean sawPunchPending;
 	/** The chainsaw idling on the gun, and grinding a wall. */
@@ -267,6 +269,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 			this.whiplash.cancel();
 			this.railShots.forEach(shot -> this.effects.fade(shot.beam));
 			this.railShots.clear();
+			this.drills.forEach(drill -> drill.drillSound.stop());
+			this.drills.clear();
 			return;
 		}
 		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
@@ -331,6 +335,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 		}
 		this.cores.removeIf(core -> core.removed);
 		updateSaws(dt, minecraft.level, player);
+		float partialTick = minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false);
+		for (Drill drill : List.copyOf(this.drills)) {
+			drill.update(dt, partialTick, minecraft.level, player, this);
+		}
+		this.drills.removeIf(drill -> drill.removed);
 		for (Shockwave shockwave : List.copyOf(this.shockwaves)) {
 			shockwave.update(dt, minecraft.level, player, this);
 		}
@@ -573,6 +582,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 		if (stack.is(UltraItems.RAILCANNON_ELECTRIC)) {
 			return FirstPersonWeapons.Weapon.RAILCANNON_ELECTRIC;
 		}
+		if (stack.is(UltraItems.RAILCANNON_SCREWDRIVER)) {
+			return FirstPersonWeapons.Weapon.RAILCANNON_SCREWDRIVER;
+		}
 		if (stack.is(UltraItems.RAILCANNON_MALICIOUS)) {
 			return FirstPersonWeapons.Weapon.RAILCANNON_MALICIOUS;
 		}
@@ -585,6 +597,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 		}
 		return switch (weapon) {
 			case RAILCANNON_ELECTRIC -> Railcannon.Variant.ELECTRIC;
+			case RAILCANNON_SCREWDRIVER -> Railcannon.Variant.SCREWDRIVER;
 			case RAILCANNON_MALICIOUS -> Railcannon.Variant.MALICIOUS;
 			default -> null;
 		};
@@ -593,13 +606,14 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 	private static FirstPersonWeapons.Weapon weapon(Railcannon.Variant variant) {
 		return switch (variant) {
 			case ELECTRIC -> FirstPersonWeapons.Weapon.RAILCANNON_ELECTRIC;
+			case SCREWDRIVER -> FirstPersonWeapons.Weapon.RAILCANNON_SCREWDRIVER;
 			case MALICIOUS -> FirstPersonWeapons.Weapon.RAILCANNON_MALICIOUS;
 		};
 	}
 
 	/** Whether the stack is one of the railcannons, which show their shared charge as a cooldown. */
 	public static boolean isRailcannon(ItemStack stack) {
-		return stack.is(UltraItems.RAILCANNON_ELECTRIC) || stack.is(UltraItems.RAILCANNON_MALICIOUS);
+		return stack.is(UltraItems.RAILCANNON_ELECTRIC) || stack.is(UltraItems.RAILCANNON_SCREWDRIVER) || stack.is(UltraItems.RAILCANNON_MALICIOUS);
 	}
 
 	/** The railcannons' cooldown as the hotbar shows it: 1 just after a shot, 0 once fully charged. */
@@ -1072,7 +1086,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 
 	/**
 	 * Railcannon.Shoot: the variant's beam out of the camera along the aim, drawn from the gun's Shootpoint with its
-	 * muzzle flash there; its fire sound, its Shoot animation and a camera shake.
+	 * muzzle flash there, or the Screwdriver's drill thrown along it; its fire sound, its Shoot animation and a
+	 * camera shake.
 	 */
 	@Override
 	public void fireRailcannon(Railcannon.Variant variant) {
@@ -1100,6 +1115,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 		if (variant == Railcannon.Variant.ELECTRIC) {
 			this.effects.beamFlash(drawFrom, camera, Effects.BeamStyle.RAILCANNON);
 			electricBeam(minecraft.level, player, eye, look, drawFrom, RAIL_DAMAGE, Float.NaN, new HashSet<>());
+		} else if (variant == Railcannon.Variant.SCREWDRIVER) {
+			UltraModel model = UltraModel.get(DRILL);
+			if (model != null) {
+				this.drills.add(new Drill(model.script("harpoon"), model.script("timeBomb").get("timer").getAsDouble(), this.sounds, eye, look));
+			}
 		} else {
 			this.effects.beamFlash(drawFrom, camera, Effects.BeamStyle.MALICIOUS);
 			maliciousBeam(minecraft.level, player, eye, look, drawFrom, 0, Float.NaN, new HashSet<>());
@@ -1344,6 +1364,80 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 		explode(EXPLOSION_SUPER, core.position, null, false, SUPER_BLOCK_POWER, settings -> settings.ultraboosted(CORE_NUKE_SIZE));
 	}
 
+	@Override
+	public void drillImpact(LivingEntity enemy, float damage, Vec3 at) {
+		Minecraft minecraft = Minecraft.getInstance();
+		ClientPlayNetworking.send(new WeaponHitPayload(enemy.getId(), damage, false, at));
+		if (minecraft.level != null) {
+			bleed(minecraft.level, at, Gore.of(false, damage, false), 1);
+		}
+	}
+
+	/** A drill tick: the enemy bleeds, twice the usual size. */
+	@Override
+	public void drillTick(LivingEntity enemy, Vec3 at) {
+		Minecraft minecraft = Minecraft.getInstance();
+		ClientPlayNetworking.send(new WeaponHitPayload(enemy.getId(), Drill.TICK_DAMAGE, false, at, WeaponHitPayload.Kind.DRILL));
+		if (minecraft.level != null) {
+			bleed(minecraft.level, at, Gore.SMALL, ServerCombat.DRILL_BLOOD_SCALE);
+		}
+	}
+
+	@Override
+	public void drillPunched(LivingEntity enemy, float damage, Vec3 at) {
+		Minecraft minecraft = Minecraft.getInstance();
+		ClientPlayNetworking.send(new WeaponHitPayload(enemy.getId(), damage, false, at, WeaponHitPayload.Kind.DRILL_PUNCH));
+		if (minecraft.level != null) {
+			bleed(minecraft.level, at, Gore.of(false, damage, false), 1);
+		}
+	}
+
+	private void bleed(Level level, Vec3 at, Gore gore, float scale) {
+		this.effects.blood(level, at, gore, scale);
+		this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
+	}
+
+	@Override
+	public void drillBlock(BlockPos block, float damage) {
+		hitBlock(block, damage);
+	}
+
+	/** TimeBomb.Beep: the beeper flashes at full size on the drill (its size, on the drill's scale), with a beep. */
+	@Override
+	public void drillBeep(Drill drill) {
+		UltraModel model = UltraModel.get(DRILL);
+		if (model == null) {
+			return;
+		}
+		drill.beeperScale = model.script("timeBomb").get("beeperSize").getAsDouble() * Drill.MODEL_SCALE;
+		this.sounds.once().update("drill_beep", 1, model.script("timeBomb").get("beeperPitch").getAsDouble(), drill.position);
+	}
+
+	/** The drill breaks: its sparks and break sound (Harpoon's breakEffect), and its puff of debris (TimeBomb's explosion). */
+	@Override
+	public void drillBroke(Drill drill) {
+		this.effects.particles("chainsaw_break", null, drill.position);
+		this.effects.particles("drill_break", null, drill.position);
+		this.sounds.play("chainsaw_break", 1, this.sounds.randomPitch(0.9F, 1.1F));
+		this.sounds.play("chainsaw_spark", 1, this.sounds.randomPitch(0.85F, 1.15F));
+		this.sounds.once().update("drill_break", 1, this.sounds.randomPitch(0.9F, 1.1F), drill.position);
+	}
+
+	/** The last drill stuck in the enemy, for a Feedbacker punch on it to send on (Punch.ActiveFrame). */
+	private @Nullable Drill drillIn(int entityId) {
+		Minecraft minecraft = Minecraft.getInstance();
+		Entity enemy = minecraft.level == null ? null : minecraft.level.getEntity(entityId);
+		if (enemy == null) {
+			return null;
+		}
+		for (int i = this.drills.size() - 1; i >= 0; i--) {
+			if (this.drills.get(i).stuckIn(enemy)) {
+				return this.drills.get(i);
+			}
+		}
+		return null;
+	}
+
 	/**
 	 * Coin.ReflectRevolver with a railcannon's beam: the coin fires the beam again, at the nearest coin it can see,
 	 * else a core, else the nearest enemy's head, else anywhere. Going on to anything but a coin, it hits harder by a
@@ -1542,8 +1636,15 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 		Minecraft minecraft = Minecraft.getInstance();
 		UltraMovement movement = UltraController.INSTANCE.movement();
 		Animator arm = FirstPersonWeapons.INSTANCE.armAnimator();
+		// Punch.ActiveFrame: the Feedbacker sends on a drill stuck in the enemy it hits, with the parry flash.
+		Drill drill = result.result() == PunchResultPayload.Result.ENEMY && this.arm == FistType.STANDARD ? drillIn(result.entityId()) : null;
+		if (drill != null && movement != null && minecraft.player != null) {
+			parryFlash();
+			ClientPlayNetworking.send(new HitstopPayload((int)(PARRY_HITSTOP * 1000)));
+			drill.punched(movement.eyePosition(), minecraft.player.getLookAngle(), this);
+		}
 		if (arm != null) {
-			if (result.result() == PunchResultPayload.Result.PARRY) {
+			if (result.result() == PunchResultPayload.Result.PARRY || drill != null) {
 				arm.play("Hook", 0.065);
 			} else {
 				arm.play(arm.getFloat("PunchRandomizer") < 0.5F ? "Jab" : "Jab2", 0.075);
@@ -2326,6 +2427,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 	static final String EXPLOSION = "explosion";
 	/** "Explosion Super": a core shot with a revolver. */
 	static final String EXPLOSION_SUPER = "explosion_super";
+	/** The Screwdriver railcannon's drill. */
+	private static final String DRILL = "drill";
 	/** "Explosion Malicious Railcannon": where the Malicious railcannon's beam hit. */
 	static final String EXPLOSION_MALICIOUS = "explosion_malicious_railcannon";
 	/** Its RandomPitch: half pitch (baked into its sound), a fifth of that either way. */
@@ -2552,6 +2655,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 	public void render(LevelRenderContext context) {
 		this.effects.render(context, this.coins, this.shells, this.pellets, this.cores);
 		this.effects.renderSaws(context, this.saws, this.sawblades, chainStart());
+		this.effects.renderDrills(context, this.drills);
 		this.effects.renderShockwaves(context, this.shockwaves);
 		renderWhiplash(context);
 	}

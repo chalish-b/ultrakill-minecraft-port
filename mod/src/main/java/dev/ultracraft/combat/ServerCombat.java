@@ -6,6 +6,7 @@ import dev.ultracraft.Ultracraft;
 import dev.ultracraft.UltraItems;
 import dev.ultracraft.UltraPlayer;
 import dev.ultracraft.mixin.AbstractArrowAccessor;
+import dev.ultracraft.mixin.LivingEntityAccessor;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
@@ -55,6 +56,8 @@ import java.util.UUID;
 public final class ServerCombat {
 	/** Minecraft health per point of ULTRAKILL damage. */
 	public static final float HEALTH_PER_DAMAGE = 10;
+	/** A drill's blood splatters are this much bigger. */
+	public static final float DRILL_BLOOD_SCALE = 2;
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	/** The Feedbacker reaches 4 units in front of the camera (Punch's raycasts). */
 	private static final double PUNCH_REACH = 4 * S;
@@ -118,13 +121,51 @@ public final class ServerCombat {
 	}
 
 	private static void onWeaponHit(ServerPlayer player, WeaponHitPayload hit) {
-		if (!active(player) || !(player.level().getEntity(hit.entityId()) instanceof LivingEntity target) || target == player || !target.isAlive()) {
+		if (!active(player) || !(player.level().getEntity(hit.entityId()) instanceof LivingEntity target) || target == player) {
 			return;
 		}
 		if (target.distanceToSqr(player) > 512 * 512) {
 			return;
 		}
-		damage(player, target, hit.damage(), hit.head(), hit.position(), false, false);
+		if (!target.isAlive()) {
+			// A drill keeps a corpse bleeding while it's still in it.
+			if (hit.kind() == WeaponHitPayload.Kind.DRILL) {
+				BloodZones.add(player.level(), hit.position(), Gore.SMALL, false, DRILL_BLOOD_SCALE);
+			}
+			return;
+		}
+		switch (hit.kind()) {
+			case HIT -> damage(player, target, hit.damage(), hit.head(), hit.position(), false, false);
+			case DRILL -> drillDamage(player, target, hit.damage(), hit.position());
+			case DRILL_PUNCH -> damage(player, target, hit.damage(), hit.head(), hit.position(), true, false);
+		}
+	}
+
+	/**
+	 * A tick of the Screwdriver's drill (Harpoon): unless it kills, the enemy takes it without flinching, crying out
+	 * or being knocked back. Its blood is twice the size (Enemy.GetHurt scales a drill's).
+	 */
+	private static void drillDamage(ServerPlayer player, LivingEntity target, float damage, Vec3 position) {
+		ServerLevel level = player.level();
+		if (boss(target) && UltraDifficulty.of(level.getDifficulty()) >= UltraDifficulty.BRUTAL) {
+			damage /= 1.5F;
+		}
+		float health = damage * HEALTH_PER_DAMAGE;
+		if (health >= target.getHealth() + target.getAbsorptionAmount()) {
+			target.setInvulnerableTime(0);
+			target.hurtServer(level, player.damageSources().playerAttack(player), health);
+		} else {
+			// Within its damage cooldown, an entity takes damage past what it last took without any of the reaction.
+			LivingEntityAccessor accessor = (LivingEntityAccessor)target;
+			int invulnerable = target.getInvulnerableTime();
+			float lastHurt = accessor.ultracraft$getLastHurt();
+			target.setInvulnerableTime(20);
+			accessor.ultracraft$setLastHurt(0);
+			target.hurtServer(level, player.damageSources().playerAttack(player), health);
+			target.setInvulnerableTime(invulnerable);
+			accessor.ultracraft$setLastHurt(lastHurt);
+		}
+		BloodZones.add(level, position, Gore.of(false, damage, !target.isAlive()), false, DRILL_BLOOD_SCALE);
 	}
 
 	/**
@@ -287,7 +328,7 @@ public final class ServerCombat {
 		Gore gore = damage(player, target, type.damage, false, hitPoint, type.tryForExplode, false);
 		knockBack(target, velocity, look.scale(type.force));
 		hitstop(player.level().getServer(), PUNCH_HITSTOP_MILLIS);
-		ServerPlayNetworking.send(player, new PunchResultPayload(PunchResultPayload.Result.ENEMY, hitPoint, gore));
+		ServerPlayNetworking.send(player, new PunchResultPayload(PunchResultPayload.Result.ENEMY, hitPoint, gore, target.getId()));
 		return true;
 	}
 
@@ -330,7 +371,7 @@ public final class ServerCombat {
 		}
 		UltraHealth.heal(player, UltraHealth.MAX_HP);
 		hitstop(player.level().getServer(), PARRY_HITSTOP_MILLIS);
-		ServerPlayNetworking.send(player, new PunchResultPayload(PunchResultPayload.Result.PARRY, projectile.position(), Gore.BODY));
+		ServerPlayNetworking.send(player, new PunchResultPayload(PunchResultPayload.Result.PARRY, projectile.position(), Gore.BODY, -1));
 	}
 
 	/** TimeController's HitStop and TrueStop: the world stops for a moment. */

@@ -11,6 +11,7 @@ import dev.ultracraft.client.movement.UltraSounds;
 final class Railcannon {
 	enum Variant {
 		ELECTRIC("electric"),
+		SCREWDRIVER("screwdriver"),
 		MALICIOUS("malicious");
 
 		/** The variant's name in its sound events. */

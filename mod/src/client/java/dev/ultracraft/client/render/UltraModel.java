@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.IntPredicate;
 import java.util.function.Predicate;
 
 /**
@@ -203,6 +204,11 @@ public final class UltraModel {
 	 */
 	public void submitGlowing(PoseStack poseStack, SubmitNodeCollector collector, int light, Matrix4f[] world, Function<String, @Nullable Integer> glow) {
 		submit(poseStack, collector, light, world, part -> true, glow);
+	}
+
+	/** Like {@link #submitGlowing(PoseStack, SubmitNodeCollector, int, Matrix4f[], Function)}, only the meshes on the bones {@code shown} accepts. */
+	public void submitGlowing(PoseStack poseStack, SubmitNodeCollector collector, int light, Matrix4f[] world, IntPredicate shown, Function<String, @Nullable Integer> glow) {
+		submit(poseStack, collector, light, world, part -> shown.test(part.joints[0]), glow);
 	}
 
 	private void submit(PoseStack poseStack, SubmitNodeCollector collector, int light, Matrix4f[] world, Predicate<Part> drawn) {

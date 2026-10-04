@@ -43,6 +43,7 @@ MODELS = {
     "shotgun_pump_charge": ("Shotgun Pump", "Shotgun", (0, 0, 0)),
     "shotgun_sawed_on": ("Shotgun Saw", "Shotgun", (0, 0, 0)),
     "railcannon_electric": ("Railcannon Electric", "Railcannon", (0, 0, 0)),
+    "railcannon_screwdriver": ("Railcannon Harpoon", "Railcannon", (0, 0, 0)),
     "railcannon_malicious": ("Railcannon Malicious", "Railcannon", (0, 0, 0)),
     "feedbacker": ("Arm Blue", "Punch", (0, -0.225, 0)),
     "knuckleblaster": ("Arm Red", "Punch", (0, -0.225, 0)),
@@ -68,12 +69,15 @@ REFERENCED = {
     "whiplash_clink_object": ("HookArm", "Hook Arm", "clinkObjectSparks"),
     "railcannon_beam": ("Railcannon", "Railcannon Electric", "beam"),
     "railcannon_beam_malicious": ("Railcannon", "Railcannon Malicious", "beam"),
+    "drill": ("Railcannon", "Railcannon Harpoon", "beam"),
 }
 NESTED = {
     "explosion_chunk": ("explosion", "Explosion", "explosionChunk"),
     "chainsaw_ricochet": ("chainsaw_thrown", "Chainsaw", "ricochetEffect"),
     "chainsaw_sawblade": ("chainsaw_thrown", "Chainsaw", "sawbladeVersion"),
     "explosion_malicious_railcannon": ("railcannon_beam_malicious", "RevolverBeam", "hitParticle"),
+    "drill_beeper": ("drill", "TimeBomb", "beepLight"),
+    "drill_break": ("drill", "TimeBomb", "explosion"),
 }
 
 # AnimatorControllerParameterType and AnimatorConditionMode values.
@@ -814,6 +818,13 @@ def export_scripts(exporter, rig, colors, placed):
                     "chargeLevel": tree["chargeLevel"],
                     "pushAmount": [push["x"], push["y"], push["z"]],
                 })
+            elif kind == "Harpoon":
+                tree = obj.read_typetree()
+                scripts["harpoon"] = {"damage": tree["damage"], "drillHits": tree["drillHits"], "box": box_values(go),
+                                      "trail": trail_values(exporter, go)}
+            elif kind == "TimeBomb":
+                tree = obj.read_typetree()
+                scripts["timeBomb"] = {k: tree[k] for k in ("timer", "beeperSize", "beeperPitch")}
             elif kind == "RevolverBeam" and active:
                 tree = obj.read_typetree()
                 scripts["beam"] = {**{k: tree[k] for k in ("damage", "hitAmount", "maxHitsPerTarget")}, "lines": beam_lines(exporter, go)}
