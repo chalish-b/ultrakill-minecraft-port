@@ -5,6 +5,7 @@ import dev.ultracraft.UltraDifficulty;
 import dev.ultracraft.UltraPlayer;
 import dev.ultracraft.client.UltraConfig;
 import dev.ultracraft.client.movement.UltraSounds.Channel;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
@@ -18,6 +19,7 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
+import org.jspecify.annotations.Nullable;
 
 import java.util.List;
 import java.util.function.IntToDoubleFunction;
@@ -149,6 +151,12 @@ public final class UltraMovement {
 	private boolean heavyFall;
 	private double superJumpChance;
 	private double extraJumpChance;
+	/** A slammed enemy can be jumped off for this long. */
+	private double bounceChance;
+	/** The landing's impact has already been made. */
+	private boolean hasImpacted;
+	/** A power slam's landing, waiting for combat to make its shockwave. */
+	private @Nullable PowerSlam powerSlam;
 	private double sinceLastGrounded;
 
 	// WallCheck
@@ -593,9 +601,8 @@ public final class UltraMovement {
 			footstep(0.5F, true, 0);
 			footstep(0.5F, true, 1);
 		} else {
-			this.sounds.play("landing_heavy", LANDING_VOLUME, 1);
-			footstep(1, true, 0);
-			footstep(1, true, 1);
+			this.hasImpacted = true;
+			landingImpact();
 		}
 		if (!this.jumpCooldown) {
 			this.falling = false;
@@ -996,6 +1003,7 @@ public final class UltraMovement {
 			this.superJumpChance = U.moveTowards(this.superJumpChance, 0, dt);
 			if (this.superJumpChance == 0) {
 				if (this.stillHolding) {
+					this.powerSlam = new PowerSlam(groundCheckPosition(), this.slamForce);
 					this.camera.shake(0.75);
 				}
 				this.extraJumpChance = 0.306;
@@ -1004,9 +1012,92 @@ public final class UltraMovement {
 		}
 		if (this.extraJumpChance > 0) {
 			this.extraJumpChance = U.moveTowards(this.extraJumpChance, 0, dt);
-			if (this.extraJumpChance <= 0 && this.superJumpChance <= 0) {
+			if (this.extraJumpChance <= 0 && this.superJumpChance <= 0 && this.bounceChance <= 0) {
 				this.slamForce = 0;
 			}
+		}
+		if (this.bounceChance > 0) {
+			this.bounceChance = U.moveTowards(this.bounceChance, 0, dt);
+			if (this.input.jumpHeld) {
+				this.bounceChance = 0;
+				bounce();
+			}
+			if (!this.heavyFall && this.extraJumpChance <= 0 && this.superJumpChance <= 0 && this.bounceChance <= 0) {
+				this.slamForce = 0;
+			}
+		} else {
+			this.hasImpacted = false;
+		}
+	}
+
+	/**
+	 * A power slam: the player landed from a slam and kept holding it for a moment, so a shockwave goes out from
+	 * their feet, launching enemies harder the longer the slam was.
+	 *
+	 * @param position the ground check's position, in blocks
+	 * @param slamForce how long the slam went on (NewMovement.slamForce)
+	 */
+	public record PowerSlam(Vec3 position, double slamForce) {
+	}
+
+	/** The power slam that just landed, if any, once. */
+	public @Nullable PowerSlam takePowerSlam() {
+		PowerSlam slam = this.powerSlam;
+		this.powerSlam = null;
+		return slam;
+	}
+
+	/** Whether the player is slamming down (GroundCheck.heavyFall). */
+	public boolean slamming() {
+		return this.heavyFall;
+	}
+
+	/** Where the ground check is, which a slam hits enemies from (blocks). */
+	public Vec3 groundCheck() {
+		return groundCheckPosition();
+	}
+
+	/** GroundCheck: the slam hit a living enemy. Jumping now, or within a moment, bounces off it. */
+	public void slammedEnemy() {
+		if (this.input.jumpHeld) {
+			bounce();
+		} else if (this.bounceChance <= 0) {
+			this.bounceChance = 0.15;
+		}
+	}
+
+	/** GroundCheck.Bounce: off a slammed enemy, the slam ends in a jump that refreshes wall jumps. */
+	private void bounce() {
+		this.heavyFall = false;
+		jump();
+		enemyStepResets();
+		this.slamCooldown = 0.25;
+		if (!this.hasImpacted) {
+			landingImpact();
+		}
+	}
+
+	/** NewMovement.LandingImpact: a heavy thud, and bits of the floor thrown up. */
+	private void landingImpact() {
+		this.sounds.play("landing_heavy", LANDING_VOLUME, 1);
+		footstep(1, true, 0);
+		footstep(1, true, 1);
+		double speed = Math.abs(this.fallSpeed);
+		enviroGibs((int)Math.round(Math.clamp(3 + 2 * (speed - 50) / 50, 3, 5)));
+	}
+
+	/** SceneHelper.CreateEnviroGibs: bits of the floor under the player, as Minecraft's breaking particles. */
+	public void enviroGibs(int count) {
+		if (!(this.player.level() instanceof ClientLevel level)) {
+			return;
+		}
+		Vec3 from = root();
+		BlockHitResult floor = level.clip(new ClipContext(from, from.add(0, -5 * S, 0), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, this.player));
+		if (floor.getType() == HitResult.Type.MISS) {
+			return;
+		}
+		for (int i = 0; i < count; i++) {
+			level.addBreakingBlockEffects(floor.getBlockPos(), floor.getDirection(), false);
 		}
 	}
 

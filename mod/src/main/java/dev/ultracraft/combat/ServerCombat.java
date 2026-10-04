@@ -12,6 +12,7 @@ import dev.ultracraft.net.ExplosionHurtPayload;
 import dev.ultracraft.net.HitstopPayload;
 import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
+import dev.ultracraft.net.SlamHitPayload;
 import dev.ultracraft.net.WeaponHitPayload;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
@@ -61,6 +62,11 @@ public final class ServerCombat {
 	private static final long PARRY_HITSTOP_MILLIS = 250;
 	/** TimeController.HitStop after a punch lands. */
 	private static final long PUNCH_HITSTOP_MILLIS = 100;
+	/** A slam's hit, and its push down: DeliverDamage's force of 50000 comes to this many units a second. */
+	private static final float SLAM_DAMAGE = 2;
+	private static final double SLAM_PUSH = 50;
+	/** How far from the player a slam can reach an enemy (blocks). */
+	private static final double SLAM_REACH = 8;
 	/** How far from the player an explosion can reach something. */
 	private static final double EXPLOSION_REACH = 64;
 	/**
@@ -82,6 +88,7 @@ public final class ServerCombat {
 		ServerPlayNetworking.registerGlobalReceiver(CycleVariantPayload.TYPE, (payload, context) -> onCycleVariant(context.player()));
 		ServerPlayNetworking.registerGlobalReceiver(ExplosionHitPayload.TYPE, (payload, context) -> onExplosionHit(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(ExplosionHurtPayload.TYPE, (payload, context) -> onExplosionHurt(context.player(), payload.damage()));
+		ServerPlayNetworking.registerGlobalReceiver(SlamHitPayload.TYPE, (payload, context) -> onSlamHit(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(HitstopPayload.TYPE, (payload, context) -> {
 			if (active(context.player())) {
 				hitstop(context.player().level().getServer(), Math.clamp(payload.millis(), 0, PARRY_HITSTOP_MILLIS));
@@ -92,6 +99,19 @@ public final class ServerCombat {
 
 	private static boolean active(ServerPlayer player) {
 		return ((UltraPlayer)player).ultracraft$isActive() && player.isAlive();
+	}
+
+	/** GroundCheck: a slam coming down on an enemy hits it for 2, bursting it if it dies, and knocks it down. */
+	private static void onSlamHit(ServerPlayer player, SlamHitPayload hit) {
+		if (!active(player) || !(player.level().getEntity(hit.entityId()) instanceof LivingEntity target) || target == player || !target.isAlive()) {
+			return;
+		}
+		if (target.distanceToSqr(player) > SLAM_REACH * SLAM_REACH) {
+			return;
+		}
+		Vec3 velocity = target.getDeltaMovement();
+		damage(player, target, SLAM_DAMAGE, false, hit.position(), true, false);
+		knockBack(target, velocity, new Vec3(0, -SLAM_PUSH, 0));
 	}
 
 	private static void onWeaponHit(ServerPlayer player, WeaponHitPayload hit) {
@@ -106,8 +126,8 @@ public final class ServerCombat {
 
 	/**
 	 * EnemyIdentifier.DeliverDamage: no invulnerability frames, and the blood it spills heals. Bosses take two
-	 * thirds of it on Brutal. With
-	 * tryForExplode, an enemy it kills bursts (EnemyIdentifier.Explode): its head and limbs come off, leaving the
+	 * thirds of it on Brutal. With tryForExplode, an enemy it kills bursts (EnemyIdentifier.Explode): its head and
+	 * limbs come off, leaving the
 	 * head's blood.
 	 *
 	 * @return the blood it left

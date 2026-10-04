@@ -12,4 +12,3 @@ Other feedback or ideas to discuss
 Features
 - Other weapons, one variant at a time.
 - Whiplash
-- Ground slam launching mobs up

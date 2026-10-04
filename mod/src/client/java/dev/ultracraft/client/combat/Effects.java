@@ -8,6 +8,7 @@ import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.math.Axis;
 import dev.ultracraft.PlayerShape;
 import dev.ultracraft.client.render.UltraModel;
+import dev.ultracraft.client.render.animation.Pose;
 import dev.ultracraft.combat.Gore;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
 import net.minecraft.client.Minecraft;
@@ -491,6 +492,52 @@ final class Effects {
 	private static void chainVertex(PoseStack.Pose pose, VertexConsumer buffer, Vec3 at, float[] uv) {
 		buffer.addVertex(pose, (float)at.x, (float)at.y, (float)at.z).setColor(-1).setUv(uv[0], uv[1])
 			.setOverlay(OverlayTexture.NO_OVERLAY).setLight(LightCoordsUtil.FULL_BRIGHT).setNormal(pose, 0, 1, 0);
+	}
+
+	/**
+	 * Each power slam shockwave as its prefab draws it, stretched to its width: its ring adding its texture and
+	 * the flat disc under it, both fading once it's done.
+	 */
+	void renderShockwaves(LevelRenderContext context, List<Shockwave> shockwaves) {
+		if (shockwaves.isEmpty()) {
+			return;
+		}
+		Vec3 camera = Minecraft.getInstance().gameRenderer.mainCamera().position();
+		PoseStack poseStack = context.poseStack();
+		float units = (float)PlayerShape.BLOCKS_PER_UNIT;
+		for (Shockwave shockwave : shockwaves) {
+			UltraModel model = shockwave.model;
+			Pose pose = model.rest().copy();
+			float width = (float)shockwave.scale();
+			pose.setScale(0, width, pose.sy(0), width);
+			Matrix4f[] world = model.boneMatrices(pose, new Quaternionf());
+			poseStack.pushPose();
+			poseStack.translate(shockwave.origin.x - camera.x, shockwave.origin.y - camera.y, shockwave.origin.z - camera.z);
+			poseStack.scale(units, units, units);
+			float ring = (float)Math.max(1 - shockwave.faded(), 0);
+			if (ring > 0) {
+				int glow = 0xFF000000 | channel(ring) << 16 | channel(ring) << 8 | channel(ring);
+				for (int i = 0; i < model.meshCount(); i++) {
+					model.submitMaterial(poseStack, context.submitNodeCollector(), world, model.meshMaterialName(i), texture -> RenderTypes.energySwirl(texture, 0, 0), glow, LightCoordsUtil.FULL_BRIGHT);
+				}
+			}
+			for (UltraModel.Sprite sprite : model.sprites()) {
+				float[] c = sprite.color();
+				float alpha = (float)(c[3] - shockwave.faded());
+				if (alpha <= 0) {
+					continue;
+				}
+				poseStack.pushPose();
+				poseStack.mulPose(world[sprite.bone()]);
+				quad(context, sprite.texture(), sprite.rect(), c[0], c[1], c[2], alpha);
+				poseStack.popPose();
+			}
+			poseStack.popPose();
+		}
+	}
+
+	private static int channel(float value) {
+		return Math.round(Math.clamp(value, 0, 1) * 255);
 	}
 
 	/** Each pellet: a small glowing ball and its trail. */

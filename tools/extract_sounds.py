@@ -116,6 +116,13 @@ def backing(obj, name):
     return getattr(obj, f"<{name}>k__BackingField")
 
 
+def script_class(obj):
+    try:
+        return obj.read().m_Script.read().m_ClassName
+    except Exception:
+        return None
+
+
 def find_class(env, class_name, go_name, **fields):
     """The `class_name` script on the GameObject called `go_name` whose serialized fields match `fields`."""
     for obj in env.objects:
@@ -249,6 +256,10 @@ def combat(env, x):
     x.add_clip("shotgun_pump2", pump.pump2sound)
     x.add_source("shotgun_pump_charge", next(components(pump.pumpChargeSound.deref().read(), "AudioSource")))
     x.add_source("shotgun_warning_beep", next(components(pump.warningBeep.deref().read(), "AudioSource")))
+
+    ground = next(g for g in (o.read() for o in env.objects if o.type.name == "MonoBehaviour" and script_class(o) == "GroundCheck") if g.shockwave.path_id)
+    shockwave = next(m for m in components(ground.shockwave.deref().read(), "MonoBehaviour") if hasattr(m, "soundEffect"))
+    x.add_source("slam_shockwave", next(components(shockwave.soundEffect.deref().read(), "AudioSource")))
 
     movement = find_script(env, "walkSpeed", "jumpSound")
     x.add_source("hurt", source_ref(movement.hurtScreen.deref().read().m_GameObject))

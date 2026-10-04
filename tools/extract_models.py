@@ -59,6 +59,7 @@ REFERENCED = {
     "explosion_super": ("Grenade", "Grenade", "superExplosion"),
     "chainsaw_break": ("Shotgun", "Shotgun Saw", "chainsawBreakEffect"),
     "chainsaw_thrown": ("Shotgun", "Shotgun Saw", "chainsaw"),
+    "slam_shockwave": ("GroundCheck", "GroundCheck", "shockwave"),
 }
 NESTED = {
     "explosion_chunk": ("explosion", "Explosion", "explosionChunk"),
@@ -716,6 +717,12 @@ def export_scripts(exporter, rig, colors, placed):
                 scripts["sawblade"] = {k: tree[k] for k in ("damage", "hitAmount", "multiHitAmount")}
                 scripts["sawblade"]["box"] = box_values(go)
                 scripts["sawblade"]["trail"] = trail_values(exporter, go)
+            elif kind == "PhysicalShockwave":
+                tree = obj.read_typetree()
+                collider = next(c.component.deref().read() for c in go.m_Component if c.component.deref().type.name == "MeshCollider")
+                extent = collider.m_Mesh.deref().read().m_LocalAABB.m_Extent
+                scripts["physicalShockwave"] = {**{k: tree[k] for k in ("damage", "speed", "maxSize", "force")},
+                                                "colliderExtent": [extent.x, extent.y, extent.z]}
             elif kind == "Coin":
                 scripts["coin"] = {"flash": coin_flash(exporter, obj.read().flash.deref().read())}
             elif kind == "Explosion" and active:

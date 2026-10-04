@@ -248,6 +248,11 @@ public final class UltraModel {
 		return this.parts.get(index).joints[0];
 	}
 
+	/** The name of the {@code index}th mesh's material. */
+	public String meshMaterialName(int index) {
+		return this.parts.get(index).material;
+	}
+
 	/** The {@code index}th mesh's material: its colors, keywords, blending and texture's mean alpha. */
 	public JsonObject meshMaterial(int index) {
 		return this.parts.get(index).materialValues;

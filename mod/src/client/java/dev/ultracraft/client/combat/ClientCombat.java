@@ -21,6 +21,7 @@ import dev.ultracraft.net.ExplosionHurtPayload;
 import dev.ultracraft.net.HitstopPayload;
 import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
+import dev.ultracraft.net.SlamHitPayload;
 import dev.ultracraft.net.WeaponHitPayload;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
@@ -59,6 +60,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.Set;
 import java.util.function.UnaryOperator;
 
 /**
@@ -67,7 +69,7 @@ import java.util.function.UnaryOperator;
  * (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the server, which applies them.
  */
 public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events, Explosion.Hits, SawZone.Hits,
-	ThrownSaw.Hits, Sawblade.Hits {
+	ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
@@ -114,6 +116,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	private static final double PARRY_ZONE_HALF_LENGTH = 3 * S;
 	/** The punch's origin (FistControl's "Punch") is this far below the camera. */
 	private static final double PUNCH_DROP = 0.225 * S;
+	/** A slam hits enemies within this far of the line this far below the ground check, for this much. */
+	private static final double SLAM_RADIUS = 1.25 * S;
+	private static final double SLAM_REACH = 3 * S;
+	private static final float SLAM_DAMAGE = 2;
+	/** A power slam's shockwave, and the bits of floor it throws up. */
+	private static final String SHOCKWAVE = "slam_shockwave";
+	private static final int SLAM_GIBS = 10;
 	/** The revving chainsaw grinds walls within this far of the camera. */
 	private static final double SAW_WALL_REACH = 3 * S;
 	/** The grinding sparks burst again this often (their system's duration), and bits of the wall come off this often. */
@@ -147,6 +156,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	private final Map<Shotgun.Variant, Shotgun> shotguns = new EnumMap<>(Shotgun.Variant.class);
 	private final SawZone sawZone = new SawZone();
 	private final List<ThrownSaw> saws = new ArrayList<>();
+	private final List<Shockwave> shockwaves = new ArrayList<>();
+	/** Enemies the current slam has already hit (GroundCheck.hitEnemies). */
+	private final Set<Integer> slammed = new HashSet<>();
 	private final List<Sawblade> sawblades = new ArrayList<>();
 	/** The Feedbacker's punch is still active and hasn't punched a chainsaw yet. */
 	private boolean sawPunchPending;
@@ -211,6 +223,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			this.saws.clear();
 			this.sawblades.forEach(sawblade -> sawblade.spin.stop());
 			this.sawblades.clear();
+			this.shockwaves.clear();
+			this.slammed.clear();
 			return;
 		}
 		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
@@ -273,6 +287,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		}
 		this.cores.removeIf(core -> core.removed);
 		updateSaws(dt, minecraft.level, player);
+		for (Shockwave shockwave : List.copyOf(this.shockwaves)) {
+			shockwave.update(dt, minecraft.level, player, this);
+		}
+		this.shockwaves.removeIf(Shockwave::done);
 		for (Explosion explosion : List.copyOf(this.explosions)) {
 			explosion.update(dt, minecraft.level, player, this);
 		}
@@ -310,6 +328,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 				shotgun.update(dt, this.input, this);
 			}
 			saw(dt, minecraft.level, player, shotgun);
+			slam(minecraft.level, player);
 		} else {
 			this.lastHealth = -1;
 			saw(dt, minecraft.level, player, null);
@@ -1184,6 +1203,72 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		};
 	}
 
+	// ---- slam -----------------------------------------------------------------------------------
+
+	/**
+	 * GroundCheck: while slamming, every enemy within 1.25 units of the 3 units below the ground check (and not
+	 * behind a wall) is hit once, and a living one can be bounced off. Landing a power slam sends out its
+	 * shockwave, with a thud and bits of the floor.
+	 */
+	private void slam(Level level, LocalPlayer player) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (movement == null) {
+			return;
+		}
+		if (movement.slamming()) {
+			Vec3 from = movement.groundCheck();
+			Vec3 to = from.add(0, -SLAM_REACH, 0);
+			AABB area = new AABB(from, to).inflate(SLAM_RADIUS);
+			for (Entity entity : level.getEntities(player, area, ThrownSaw::isEnemy)) {
+				AABB box = entity.getBoundingBox();
+				if (this.slammed.contains(entity.getId()) || !nearSegment(box, from, to, SLAM_RADIUS)) {
+					continue;
+				}
+				Vec3 above = from.add(0, S, 0);
+				if (level.clip(new ClipContext(above, box.getCenter(), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player)).getType() != HitResult.Type.MISS) {
+					continue;
+				}
+				this.slammed.add(entity.getId());
+				Vec3 at = box.getCenter();
+				ClientPlayNetworking.send(new SlamHitPayload(entity.getId(), at));
+				Gore gore = Gore.of(false, SLAM_DAMAGE, false);
+				this.effects.blood(level, at, gore);
+				this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
+				movement.slammedEnemy();
+			}
+		} else {
+			this.slammed.clear();
+		}
+		UltraMovement.PowerSlam powerSlam = movement.takePowerSlam();
+		UltraModel model = UltraModel.get(SHOCKWAVE);
+		if (powerSlam != null && model != null) {
+			this.shockwaves.add(new Shockwave(model, powerSlam.position(), powerSlam.slamForce()));
+			this.sounds.play(SHOCKWAVE, 1, 1);
+			movement.enviroGibs(SLAM_GIBS);
+		}
+	}
+
+	/** Whether a box comes within {@code radius} of the segment from {@code from} to {@code to}. */
+	private static boolean nearSegment(AABB box, Vec3 from, Vec3 to, double radius) {
+		int samples = Math.max(1, (int)Math.ceil(from.distanceTo(to) / (0.25 * S)));
+		for (int i = 0; i <= samples; i++) {
+			Vec3 point = from.lerp(to, i / (double)samples);
+			double x = Math.clamp(point.x, box.minX, box.maxX) - point.x;
+			double y = Math.clamp(point.y, box.minY, box.maxY) - point.y;
+			double z = Math.clamp(point.z, box.minZ, box.maxZ) - point.z;
+			if (x * x + y * y + z * z <= radius * radius) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** PhysicalShockwave on an enemy: no damage, just the push up. */
+	@Override
+	public void shockwaveEnemy(LivingEntity enemy, Vec3 push) {
+		ClientPlayNetworking.send(new ExplosionHitPayload(enemy.getId(), 0, push));
+	}
+
 	// ---- chainsaw -------------------------------------------------------------------------------
 
 	/**
@@ -1894,5 +1979,6 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	public void render(LevelRenderContext context) {
 		this.effects.render(context, this.coins, this.shells, this.pellets, this.cores);
 		this.effects.renderSaws(context, this.saws, this.sawblades, chainStart());
+		this.effects.renderShockwaves(context, this.shockwaves);
 	}
 }
