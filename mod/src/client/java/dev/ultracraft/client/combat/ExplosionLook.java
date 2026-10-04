@@ -99,7 +99,7 @@ final class ExplosionLook {
 	}
 
 	/** The bone's rotation within the prefab, in Unity's axes. */
-	private static Quaternionf unityRotation(UltraModel model, int bone) {
+	static Quaternionf unityRotation(UltraModel model, int bone) {
 		Quaternionf rotation = new Quaternionf();
 		for (int b = bone; b > 0; b = model.parent(b)) {
 			Pose rest = model.rest();

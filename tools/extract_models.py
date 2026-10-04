@@ -40,6 +40,7 @@ MODELS = {
     "revolver_sharpshooter": ("Revolver Twirl", "Revolver", (0, 0, 0)),
     "shotgun_core_eject": ("Shotgun Grenade", "Shotgun", (0, 0, 0)),
     "shotgun_pump_charge": ("Shotgun Pump", "Shotgun", (0, 0, 0)),
+    "shotgun_sawed_on": ("Shotgun Saw", "Shotgun", (0, 0, 0)),
     "feedbacker": ("Arm Blue", "Punch", (0, -0.225, 0)),
     "knuckleblaster": ("Arm Red", "Punch", (0, -0.225, 0)),
     "coin": ("Coin", "Coin", None),
@@ -56,6 +57,7 @@ REFERENCED = {
     "shotgun_muzzle_flash": ("Shotgun", "Shotgun Grenade", "muzzleFlash"),
     "bullet_spark": ("Projectile", "Shotgun Projectile", "explosionEffect"),
     "explosion_super": ("Grenade", "Grenade", "superExplosion"),
+    "chainsaw_break": ("Shotgun", "Shotgun Saw", "chainsawBreakEffect"),
 }
 NESTED = {
     "explosion_chunk": ("explosion", "Explosion", "explosionChunk"),
@@ -256,7 +258,8 @@ def particle_values(system):
         values["trail"] = {"ratio": trail["ratio"], "lifetime": curve_value(trail["lifetime"]),
                            "widthOverTrail": curve_value(trail["widthOverTrail"]),
                            "colorOverLifetime": color_value(trail["colorOverLifetime"]),
-                           "sizeAffectsWidth": bool(trail["sizeAffectsWidth"])}
+                           "sizeAffectsWidth": bool(trail["sizeAffectsWidth"]),
+                           "inheritParticleColor": bool(trail["inheritParticleColor"])}
     return values
 
 
@@ -588,6 +591,29 @@ def coin_flash(exporter, flash_go):
     return find(flash_go, scale)
 
 
+def material_texture(exporter, material_pptr):
+    """A material's main texture, as the mod names it."""
+    return exporter.texture(texture_name(material_pptr.deref().read())[0])[0]
+
+
+def chainsaw_values(exporter, rig, shotgun):
+    """The Sawed-On's chainsaw: its revving damage zone (a HurtZone on a capsule trigger), and the blade's and
+    broken saw's other textures."""
+    zone_go = shotgun.sawZone.deref().read().m_GameObject.read()
+    zone = shotgun.sawZone.deref().read_typetree()
+    capsule = next(c.component.deref().read() for c in zone_go.m_Component if c.component.deref().type.name == "CapsuleCollider")
+    return {
+        "sawZone": {
+            "bone": rig.index[transform_of(zone_go).object_reader.path_id],
+            "center": [capsule.m_Center.x, capsule.m_Center.y, capsule.m_Center.z],
+            "radius": capsule.m_Radius, "height": capsule.m_Height, "direction": capsule.m_Direction,
+            "hurtCooldown": zone["hurtCooldown"], "enemyDamage": zone["enemyDamageOverride"],
+        },
+        "bladeMotionTexture": material_texture(exporter, shotgun.chainsawBladeMotionMaterial),
+        "brokenTexture": material_texture(exporter, shotgun.chainsawBrokenMaterial),
+    }
+
+
 def go_name_of(component_pptr):
     """The name of the GameObject a referenced component sits on, or None."""
     return component_pptr.deref().read().m_GameObject.read().m_Name if component_pptr.path_id else None
@@ -625,6 +651,9 @@ def export_scripts(exporter, rig, colors, placed):
             elif kind == "Shotgun":
                 variation = obj.read_typetree()["variation"]
                 scripts["shotgun"] = {"variation": variation, "variationColor": list(colors[variation])}
+                shotgun = obj.read()
+                if shotgun.sawZone.path_id:
+                    scripts["shotgun"].update(chainsaw_values(exporter, rig, shotgun))
             elif kind == "Coin":
                 scripts["coin"] = {"flash": coin_flash(exporter, obj.read().flash.deref().read())}
             elif kind == "Explosion" and active:

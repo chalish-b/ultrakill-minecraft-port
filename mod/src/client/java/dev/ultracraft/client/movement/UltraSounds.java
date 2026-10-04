@@ -30,7 +30,7 @@ public final class UltraSounds {
 
 	private final RandomSource random = RandomSource.create();
 	private final @Nullable SoundInstance[] channels = new SoundInstance[Channel.values().length];
-	private final Loop woosh = new Loop();
+	private final Loop woosh = new Loop(true);
 	/** Sliding and wall scrapes are a base scrape plus a layer for the surface. */
 	private final Scrape slide = new Scrape("slide");
 	private final Scrape wallScrape = new Scrape("wall_scrape");
@@ -72,7 +72,12 @@ public final class UltraSounds {
 
 	/** A looping sound for the caller to drive. */
 	public Loop loop() {
-		return new Loop();
+		return new Loop(true);
+	}
+
+	/** A sound for the caller to drive that plays through once, until it ends or is stopped. */
+	public Loop once() {
+		return new Loop(false);
 	}
 
 	/** The falling wind, louder and higher the faster the player falls. */
@@ -102,8 +107,8 @@ public final class UltraSounds {
 
 	private final class Scrape {
 		private final String kind;
-		private final Loop base = new Loop();
-		private final Loop layer = new Loop();
+		private final Loop base = new Loop(true);
+		private final Loop layer = new Loop(true);
 		private @Nullable String surface;
 
 		Scrape(String kind) {
@@ -127,9 +132,14 @@ public final class UltraSounds {
 		}
 	}
 
-	/** A looping sound that keeps playing while it's updated. */
+	/** A sound that keeps playing while it's updated, looping or just once. */
 	public final class Loop {
+		private final boolean looping;
 		private @Nullable LoopInstance instance;
+
+		private Loop(boolean looping) {
+			this.looping = looping;
+		}
 
 		public void update(String event, double volume, double pitch) {
 			if (this.instance == null || this.instance.isStopped()) {
@@ -137,7 +147,7 @@ public final class UltraSounds {
 				if (manager().getSoundEvent(id) == null) {
 					return;
 				}
-				this.instance = new LoopInstance(id, UltraSounds.this.random);
+				this.instance = new LoopInstance(id, UltraSounds.this.random, this.looping);
 				manager().play(this.instance);
 			}
 			this.instance.set((float)volume, (float)pitch);
@@ -154,9 +164,9 @@ public final class UltraSounds {
 	private static final class LoopInstance extends AbstractSoundInstance implements TickableSoundInstance {
 		private boolean stopped;
 
-		LoopInstance(Identifier id, RandomSource random) {
+		LoopInstance(Identifier id, RandomSource random, boolean looping) {
 			super(id, SoundSource.PLAYERS, random);
-			this.looping = true;
+			this.looping = looping;
 			this.relative = true;
 			this.attenuation = SoundInstance.Attenuation.NONE;
 			this.volume = 0;

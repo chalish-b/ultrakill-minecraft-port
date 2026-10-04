@@ -222,10 +222,15 @@ public final class UltraModel {
 
 	/** The meshes with this material, drawn with their texture in the given render type and color (ARGB). */
 	public void submitMaterial(PoseStack poseStack, SubmitNodeCollector collector, Matrix4f[] world, String material, Function<Identifier, RenderType> type, int color, int light) {
+		submitMaterial(poseStack, collector, world, material, type, color, light, 0);
+	}
+
+	/** Like {@link #submitMaterial(PoseStack, SubmitNodeCollector, Matrix4f[], String, Function, int, int)}, with the texture scrolled across by {@code scroll}. */
+	public void submitMaterial(PoseStack poseStack, SubmitNodeCollector collector, Matrix4f[] world, String material, Function<Identifier, RenderType> type, int color, int light, float scroll) {
 		for (Part part : this.parts) {
 			if (part.material.equals(material)) {
 				float[][] skinned = part.skin(world);
-				collector.submitCustomGeometry(poseStack, type.apply(part.texture), (p, buffer) -> part.emit(p, buffer, skinned[0], skinned[1], color, light));
+				collector.submitCustomGeometry(poseStack, type.apply(part.texture), (p, buffer) -> part.emit(p, buffer, skinned[0], skinned[1], color, light, scroll));
 			}
 		}
 	}
@@ -318,18 +323,23 @@ public final class UltraModel {
 
 		/** Triangles as quads with a repeated corner: the entity render types draw quads. */
 		void emit(PoseStack.Pose pose, VertexConsumer buffer, float[] positions, float[] normals, int color, int light) {
+			emit(pose, buffer, positions, normals, color, light, 0);
+		}
+
+		/** {@code scroll} moves the texture across, as a material's scroll offset does. */
+		void emit(PoseStack.Pose pose, VertexConsumer buffer, float[] positions, float[] normals, int color, int light, float scroll) {
 			for (int i = 0; i < this.indices.length; i += 3) {
-				vertex(pose, buffer, positions, normals, this.indices[i], color, light);
-				vertex(pose, buffer, positions, normals, this.indices[i + 1], color, light);
-				vertex(pose, buffer, positions, normals, this.indices[i + 2], color, light);
-				vertex(pose, buffer, positions, normals, this.indices[i + 2], color, light);
+				vertex(pose, buffer, positions, normals, this.indices[i], color, light, scroll);
+				vertex(pose, buffer, positions, normals, this.indices[i + 1], color, light, scroll);
+				vertex(pose, buffer, positions, normals, this.indices[i + 2], color, light, scroll);
+				vertex(pose, buffer, positions, normals, this.indices[i + 2], color, light, scroll);
 			}
 		}
 
-		private void vertex(PoseStack.Pose pose, VertexConsumer buffer, float[] positions, float[] normals, int index, int color, int light) {
+		private void vertex(PoseStack.Pose pose, VertexConsumer buffer, float[] positions, float[] normals, int index, int color, int light, float scroll) {
 			buffer.addVertex(pose, positions[index * 3], positions[index * 3 + 1], positions[index * 3 + 2])
 				.setColor(color)
-				.setUv(this.uvs[index * 2], this.uvs[index * 2 + 1])
+				.setUv(this.uvs[index * 2] + scroll, this.uvs[index * 2 + 1])
 				.setOverlay(OverlayTexture.NO_OVERLAY)
 				.setLight(light)
 				.setNormal(pose, normals[index * 3], normals[index * 3 + 1], normals[index * 3 + 2]);

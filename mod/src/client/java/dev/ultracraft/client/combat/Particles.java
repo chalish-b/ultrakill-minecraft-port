@@ -10,7 +10,9 @@ import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.renderer.rendertype.RenderTypes;
+import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.resources.Identifier;
+import net.minecraft.util.LightCoordsUtil;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
@@ -55,6 +57,7 @@ final class Particles {
 	private @Nullable RenderType headType;
 	private final float headColorScale;
 	private final @Nullable Blend trailBlend;
+	private final @Nullable Identifier trailTexture;
 	private double age;
 	private double rateDue;
 	private int burstsDone;
@@ -75,6 +78,7 @@ final class Particles {
 		this.headBlend = this.headTexture == null ? null : blend(materials.get(0));
 		this.headColorScale = this.headBlend == null ? 1 : multiplier(materials.get(0));
 		this.trailBlend = settings.has("trail") && materials.size() > 1 ? blend(materials.get(1)) : null;
+		this.trailTexture = this.trailBlend == null || textures.size() < 2 || textures.get(1).isJsonNull() ? null : Identifier.parse(textures.get(1).getAsString());
 	}
 
 	private static @Nullable Blend blend(JsonElement material) {
@@ -322,42 +326,77 @@ final class Particles {
 		}
 	}
 
-	/** Each particle's trail: a streak from where it started to where it is, narrowing to the start and fading as its points age. */
+	/**
+	 * Each particle's trail (the Trails module): the path it took over the last part of its life (the trail's
+	 * lifetime is a share of the particle's), its texture stretched along it. It's as wide as the particle is now,
+	 * narrowing towards the tail as the width over the trail says, and colored by its points' age (and the
+	 * particle's color, if it inherits it).
+	 */
 	private void renderTrails(LevelRenderContext context, Vec3 camera) {
 		JsonObject trail = this.settings.getAsJsonObject("trail");
 		JsonObject width = trail.getAsJsonObject("widthOverTrail");
 		JsonObject color = trail.getAsJsonObject("colorOverLifetime");
+		double share = evaluate(trail.getAsJsonObject("lifetime"), 0);
 		boolean sizeAffectsWidth = trail.get("sizeAffectsWidth").getAsBoolean();
-		RenderType type = this.trailBlend == Blend.ADDITIVE ? RenderTypes.lightning() : RenderTypes.debugQuads();
+		boolean inherit = !trail.has("inheritParticleColor") || trail.get("inheritParticleColor").getAsBoolean();
+		RenderType type;
+		if (this.trailTexture != null) {
+			type = this.trailBlend == Blend.ADDITIVE ? RenderTypes.energySwirl(this.trailTexture, 0, 0) : RenderTypes.text(this.trailTexture);
+		} else {
+			type = this.trailBlend == Blend.ADDITIVE ? RenderTypes.lightning() : RenderTypes.debugQuads();
+		}
 		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), type, (pose, buffer) -> {
 			for (Particle particle : this.particles) {
 				double t = this.age - particle.born;
+				double life = t / particle.lifetime;
+				double span = share * particle.lifetime;
+				double tailAt = Math.max(0, t - span);
 				Vec3 head = position(particle, t).subtract(camera);
-				Vec3 start = position(particle, 0).subtract(camera);
-				Vec3 along = head.subtract(start);
-				double halfWidth = (sizeAffectsWidth ? particle.size : 1) * evaluate(width, 0) * S / 2;
-				Vec3 side = along.cross(head).normalize().scale(halfWidth);
-				if (!Double.isFinite(side.x) || along.lengthSqr() == 0) {
+				Vec3 tail = position(particle, tailAt).subtract(camera);
+				Vec3 along = head.subtract(tail);
+				double size = particle.size;
+				if (this.settings.has("sizeOverLifetime")) {
+					size *= evaluate(this.settings.getAsJsonObject("sizeOverLifetime"), life);
+				}
+				double base = (sizeAffectsWidth ? size : 1) * S / 2;
+				Vec3 side = along.cross(head).normalize();
+				if (!Double.isFinite(side.x) || along.lengthSqr() == 0 || base <= 0) {
 					continue;
 				}
-				float[] headColor = overLife(color, 0);
-				float[] tailColor = overLife(color, t / particle.lifetime);
-				trailVertex(pose, buffer, head.add(side), headColor);
-				trailVertex(pose, buffer, head.subtract(side), headColor);
-				trailVertex(pose, buffer, start, tailColor);
-				trailVertex(pose, buffer, start, tailColor);
-				if (this.trailBlend == Blend.ADDITIVE) {
-					// The additive type culls back faces; a streak shows from both sides.
-					trailVertex(pose, buffer, start, tailColor);
-					trailVertex(pose, buffer, start, tailColor);
-					trailVertex(pose, buffer, head.subtract(side), headColor);
-					trailVertex(pose, buffer, head.add(side), headColor);
+				Vec3 headSide = side.scale(base * evaluate(width, 0));
+				Vec3 tailSide = side.scale(base * evaluate(width, 1));
+				float[] tint = inherit ? color(particle, life) : new float[]{1, 1, 1, 1};
+				float[] headColor = times(overLife(color, 0), tint);
+				float[] tailColor = times(overLife(color, span > 0 ? (t - tailAt) / span : 1), tint);
+				if (this.trailBlend == Blend.ADDITIVE && this.trailTexture != null) {
+					headColor = premultiplied(headColor);
+					tailColor = premultiplied(tailColor);
+				}
+				Vec3[] corners = {head.add(headSide), head.subtract(headSide), tail.subtract(tailSide), tail.add(tailSide)};
+				float[][] colors = {headColor, headColor, tailColor, tailColor};
+				float[][] uvs = {{0, 0}, {0, 1}, {1, 1}, {1, 0}};
+				// Both faces: some of these types cull back faces, and a streak shows from either side.
+				for (int i = 0; i < 4; i++) {
+					trailVertex(pose, buffer, corners[i], colors[i], uvs[i]);
+				}
+				for (int i = 3; i >= 0; i--) {
+					trailVertex(pose, buffer, corners[i], colors[i], uvs[i]);
 				}
 			}
 		});
 	}
 
-	private void trailVertex(PoseStack.Pose pose, VertexConsumer buffer, Vec3 at, float[] color) {
-		buffer.addVertex(pose, new Vector3f((float)at.x, (float)at.y, (float)at.z)).setColor(color[0], color[1], color[2], color[3]);
+	private static float[] times(float[] a, float[] b) {
+		return new float[]{a[0] * b[0], a[1] * b[1], a[2] * b[2], a[3] * b[3]};
+	}
+
+	/** The textured additive type adds the color as it is, so its alpha goes into it. */
+	private static float[] premultiplied(float[] color) {
+		return new float[]{color[0] * color[3], color[1] * color[3], color[2] * color[3], 1};
+	}
+
+	private void trailVertex(PoseStack.Pose pose, VertexConsumer buffer, Vec3 at, float[] color, float[] uv) {
+		buffer.addVertex(pose, new Vector3f((float)at.x, (float)at.y, (float)at.z)).setColor(color[0], color[1], color[2], color[3]).setUv(uv[0], uv[1])
+			.setOverlay(OverlayTexture.NO_OVERLAY).setLight(LightCoordsUtil.FULL_BRIGHT).setNormal(pose, 0, 0, 1);
 	}
 }

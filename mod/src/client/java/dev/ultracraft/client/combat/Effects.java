@@ -1,5 +1,6 @@
 package dev.ultracraft.client.combat;
 
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
@@ -140,6 +141,8 @@ final class Effects {
 	private final List<ExplosionLook> looks = new ArrayList<>();
 	private final List<MuzzleFlash> muzzleFlashes = new ArrayList<>();
 	private final List<BulletSpark> bulletSparks = new ArrayList<>();
+	/** Particle systems played on their own, out of a prefab. */
+	private final List<Particles> particles = new ArrayList<>();
 	private final RandomSource random = RandomSource.create();
 	private double clock;
 
@@ -153,6 +156,24 @@ final class Effects {
 		this.looks.removeIf(ExplosionLook::done);
 		this.muzzleFlashes.removeIf(flash -> (this.clock - flash.start) * MUZZLE_FADE >= 1);
 		this.bulletSparks.removeIf(spark -> this.clock - spark.born > BULLET_SPARK_LIFETIME);
+		for (Particles system : this.particles) {
+			system.update(dt);
+		}
+		this.particles.removeIf(Particles::done);
+	}
+
+	/** A prefab's particle systems (or just the one called {@code name}), played once from {@code at}, unturned. */
+	void particles(String prefab, @Nullable String name, Vec3 at) {
+		UltraModel model = UltraModel.get(prefab);
+		if (model == null) {
+			return;
+		}
+		for (JsonElement element : model.particles()) {
+			JsonObject system = element.getAsJsonObject();
+			if (name == null || name.equals(system.get("name").getAsString())) {
+				this.particles.add(new Particles(system, at, new Quaternionf(), ExplosionLook.unityRotation(model, system.get("bone").getAsInt())));
+			}
+		}
 	}
 
 	void explosion(ExplosionLook look) {
@@ -249,6 +270,9 @@ final class Effects {
 		}
 		for (ExplosionLook look : this.looks) {
 			look.render(context, camera);
+		}
+		for (Particles system : this.particles) {
+			system.render(context, camera);
 		}
 		renderPellets(context, camera, pellets);
 		renderCores(context, camera, cores);

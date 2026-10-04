@@ -47,13 +47,21 @@ public final class FirstPersonWeapons {
 	private static final String HEAT_SINK = "HeatSinkHeat";
 	/** HeatSinkHeat's tint; its Legacy Particles/Additive shader adds twice the tint, by its alpha. */
 	private static final float[] HEAT_TINT = {1, 0.24F, 0};
+	/** The Sawed-On's chainsaw and its blade, and the bone the chainsaw sits on. */
+	private static final String CHAINSAW = "ChainsawLit";
+	private static final String CHAINSAW_BLADE = "ChainsawLitBlade";
+	private static final String CHAINSAW_BONE = "Chainsaw";
+	/** The worn-out chainsaw's Vibrate: how far it shakes from its place and how fast, in its own units. */
+	private static final float SAW_SHAKE = 10;
+	private static final float SAW_SHAKE_SPEED = 1500;
 
 	public enum Weapon {
 		REVOLVER_PIERCER("revolver_piercer"),
 		REVOLVER_MARKSMAN("revolver_marksman"),
 		REVOLVER_SHARPSHOOTER("revolver_sharpshooter"),
 		SHOTGUN_CORE_EJECT("shotgun_core_eject"),
-		SHOTGUN_PUMP_CHARGE("shotgun_pump_charge");
+		SHOTGUN_PUMP_CHARGE("shotgun_pump_charge"),
+		SHOTGUN_SAWED_ON("shotgun_sawed_on");
 
 		final String model;
 
@@ -62,7 +70,7 @@ public final class FirstPersonWeapons {
 		}
 
 		boolean revolver() {
-			return this != SHOTGUN_CORE_EJECT && this != SHOTGUN_PUMP_CHARGE;
+			return this.model.startsWith("revolver_");
 		}
 	}
 
@@ -83,11 +91,24 @@ public final class FirstPersonWeapons {
 		public static final RevolverState NONE = new RevolverState(0, 100, true, 400, 0, false, 0, 0, 0);
 	}
 
-	/** The shotgun meter fill's color: its variant's (reddened by some amount), or red or black. */
+	/** The shotgun meter fill's color: its variant's (reddened by some amount), or red, black or gray. */
 	public enum MeterTint {
 		VARIANT,
 		RED,
-		BLACK
+		BLACK,
+		GRAY
+	}
+
+	/**
+	 * The Sawed-On's chainsaw.
+	 *
+	 * @param attached whether it's on the gun, as it is once charged
+	 * @param sawing whether it's revving
+	 * @param broken whether it's worn out
+	 * @param bladeScroll how far the blade's texture has scrolled across
+	 */
+	public record SawState(boolean attached, boolean sawing, boolean broken, double bladeScroll) {
+		public static final SawState NONE = new SawState(false, false, false, 0);
 	}
 
 	/**
@@ -98,8 +119,8 @@ public final class FirstPersonWeapons {
 	 * @param reddening how far a {@link MeterTint#VARIANT} meter has reddened, 0 to 1
 	 * @param jitter how far the gun shakes from its place, in units
 	 */
-	public record ShotgunState(double heat, double meter, MeterTint tint, double reddening, Vec3 jitter) {
-		public static final ShotgunState NONE = new ShotgunState(0, 60, MeterTint.VARIANT, 0, Vec3.ZERO);
+	public record ShotgunState(double heat, double meter, MeterTint tint, double reddening, Vec3 jitter, SawState saw) {
+		public static final ShotgunState NONE = new ShotgunState(0, 60, MeterTint.VARIANT, 0, Vec3.ZERO, SawState.NONE);
 	}
 
 	/** The shotgun's meter Slider: 0 to 60, filling from the right, its fill 10 units wider than its share. */
@@ -155,6 +176,9 @@ public final class FirstPersonWeapons {
 	/** The arm's parent (FistControl's "Punch"), turned towards what it last hit. */
 	private final Quaternionf armRotation = new Quaternionf();
 	private boolean returnToOrigRot;
+	/** The worn-out chainsaw's shake: where it is from its place, and where it's heading. */
+	private final Vector3f sawShake = new Vector3f();
+	private final Vector3f sawShakeTarget = new Vector3f();
 
 	private FirstPersonWeapons() {
 	}
@@ -248,6 +272,15 @@ public final class FirstPersonWeapons {
 		);
 	}
 
+	/**
+	 * The held weapon's bone {@code bone} as it's posed now: its matrix in camera space (Minecraft's axes, units),
+	 * scale included.
+	 */
+	public @Nullable Matrix4f weaponBoneMatrix(Weapon weapon, int bone) {
+		Viewmodel viewmodel = weapon(weapon);
+		return viewmodel == null ? null : viewmodel.model.boneMatrices(viewmodel.pose, new Quaternionf())[bone];
+	}
+
 	/** RevolverCylinder.DoTurn, after a shot. */
 	public void turnCylinder(Weapon weapon) {
 		Viewmodel viewmodel = weapon(weapon);
@@ -301,9 +334,12 @@ public final class FirstPersonWeapons {
 				if (held.revolver()) {
 					weapon.animator.setBool("Spinning", state.spinning());
 					weapon.animator.setFloat("TwirlSpeed", (float)state.twirlSpeed());
+				} else {
+					weapon.animator.setBool("Sawing", shotgun.saw().sawing());
 				}
 				weapon.update(dt, function -> events.weaponEvent(held, function));
 				twirl(weapon, state.twirlAngle());
+				shakeSaw(dt, weapon, shotgun.saw().broken());
 				if (weapon.cylinder != null && weapon.cylinder.update(dt, state.cylinderSpin(), weapon.pose)) {
 					events.cylinderClicked();
 				}
@@ -338,6 +374,32 @@ public final class FirstPersonWeapons {
 		weapon.pose.setRotation(bone, rotation.x, rotation.y, rotation.z, rotation.w);
 	}
 
+	/** Vibrate on the worn-out chainsaw: it darts between random points around its place. */
+	private void shakeSaw(double dt, Viewmodel weapon, boolean broken) {
+		int bone = weapon.model.bone(CHAINSAW_BONE);
+		if (bone < 0) {
+			return;
+		}
+		if (!broken) {
+			this.sawShake.zero();
+			this.sawShakeTarget.zero();
+			return;
+		}
+		if (this.sawShake.equals(this.sawShakeTarget)) {
+			Vector3f target;
+			do {
+				target = new Vector3f(this.random.nextFloat() * 2 - 1, this.random.nextFloat() * 2 - 1, this.random.nextFloat() * 2 - 1);
+			} while (target.lengthSquared() > 1);
+			this.sawShakeTarget.set(target.mul(SAW_SHAKE));
+		} else {
+			Vector3f toward = new Vector3f(this.sawShakeTarget).sub(this.sawShake);
+			float step = (float)(SAW_SHAKE_SPEED * dt);
+			this.sawShake.set(toward.length() <= step ? this.sawShakeTarget : this.sawShake.add(toward.normalize(step)));
+		}
+		Pose rest = weapon.model.rest();
+		weapon.pose.setPosition(bone, rest.px(bone) + this.sawShake.x, rest.py(bone) + this.sawShake.y, rest.pz(bone) + this.sawShake.z);
+	}
+
 	/** Punch's ActiveStart, ActiveEnd (ResetFistRotation) and ReadyToPunch, for the arm's rotation. */
 	private void armEvent(String function) {
 		switch (function) {
@@ -370,13 +432,24 @@ public final class FirstPersonWeapons {
 		return this.held != null;
 	}
 
-	/** The shotgun, with its heat sink glowing after a shot, and its meter. Charging a core shakes it. */
+	/**
+	 * The shotgun, with its heat sink glowing after a shot, and its meter. Charging shakes it. The Sawed-On's
+	 * chainsaw is on it while charged; its blade blurs and runs while revving, and it looks worn out once worn.
+	 */
 	private void submitShotgun(PoseStack poseStack, SubmitNodeCollector collector, int light, Viewmodel weapon) {
 		Vec3 jitter = this.shotgun.jitter();
 		poseStack.pushPose();
 		poseStack.translate(jitter.x, jitter.y, -jitter.z);
 		Matrix4f[] world = weapon.model.boneMatrices(weapon.pose, new Quaternionf());
-		weapon.model.submit(poseStack, collector, light, world, Set.of(HEAT_SINK));
+		weapon.model.submit(poseStack, collector, light, world, Set.of(HEAT_SINK, CHAINSAW, CHAINSAW_BLADE));
+		JsonObject script = weapon.model.script("shotgun");
+		SawState saw = this.shotgun.saw();
+		if (saw.attached() && script != null && script.has("brokenTexture")) {
+			Identifier broken = Identifier.parse(script.get("brokenTexture").getAsString());
+			Identifier blur = Identifier.parse(script.get("bladeMotionTexture").getAsString());
+			weapon.model.submitMaterial(poseStack, collector, world, CHAINSAW, texture -> RenderTypes.entityCutout(saw.broken() ? broken : texture), 0xFFFFFFFF, light);
+			weapon.model.submitMaterial(poseStack, collector, world, CHAINSAW_BLADE, texture -> RenderTypes.entityCutout(saw.sawing() ? blur : texture), 0xFFFFFFFF, light, (float)saw.bladeScroll());
+		}
 		float heat = (float)Math.clamp(this.shotgun.heat(), 0, 1);
 		if (heat > 0) {
 			int color = 0xFF000000 | channel(2 * HEAT_TINT[0] * heat) << 16 | channel(2 * HEAT_TINT[1] * heat) << 8 | channel(2 * HEAT_TINT[2] * heat);
@@ -401,6 +474,7 @@ public final class FirstPersonWeapons {
 		return switch (this.shotgun.tint()) {
 			case RED -> RED;
 			case BLACK -> BLACK;
+			case GRAY -> GRAY;
 			case VARIANT -> {
 				float t = (float)Math.clamp(this.shotgun.reddening(), 0, 1);
 				float[] color = new float[4];

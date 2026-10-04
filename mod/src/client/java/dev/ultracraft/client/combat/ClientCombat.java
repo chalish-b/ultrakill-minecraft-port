@@ -1,5 +1,7 @@
 package dev.ultracraft.client.combat;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import dev.ultracraft.PlayerShape;
 import dev.ultracraft.UltraItems;
 import dev.ultracraft.client.UltraController;
@@ -12,6 +14,7 @@ import dev.ultracraft.client.render.UltraModel;
 import dev.ultracraft.client.render.animation.Animator;
 import dev.ultracraft.combat.FistType;
 import dev.ultracraft.combat.Gore;
+import dev.ultracraft.combat.ServerCombat;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
@@ -24,6 +27,7 @@ import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Options;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.util.RandomSource;
@@ -39,6 +43,7 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix3f;
+import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import org.joml.Vector3fc;
@@ -58,7 +63,7 @@ import java.util.function.UnaryOperator;
  * arms' punches (and boosting pellets with them) and the Knuckleblaster's blast, explosions, weapon charges
  * (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the server, which applies them.
  */
-public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events, Explosion.Hits {
+public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events, Explosion.Hits, SawZone.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
@@ -105,6 +110,14 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	private static final double PARRY_ZONE_HALF_LENGTH = 3 * S;
 	/** The punch's origin (FistControl's "Punch") is this far below the camera. */
 	private static final double PUNCH_DROP = 0.225 * S;
+	/** The revving chainsaw grinds walls within this far of the camera. */
+	private static final double SAW_WALL_REACH = 3 * S;
+	/** The grinding sparks burst again this often (their system's duration), and bits of the wall come off this often. */
+	private static final double SAW_SPARK_INTERVAL = 0.05;
+	private static final double SAW_GIB_INTERVAL = 0.1;
+	/** The chainsaw's hits land where the aim meets the enemy, if it does within this far. */
+	private static final double SAW_AIM_REACH = 15 * S;
+	private static final String SAWED_ON = "shotgun_sawed_on";
 
 	private final UltraSounds sounds = new UltraSounds();
 	private final Effects effects = new Effects();
@@ -117,6 +130,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	private final Revolver.Input input = new Revolver.Input();
 	private final RandomSource random = RandomSource.create();
 	private final Map<Shotgun.Variant, Shotgun> shotguns = new EnumMap<>(Shotgun.Variant.class);
+	private final SawZone sawZone = new SawZone();
+	/** The chainsaw idling on the gun, and grinding a wall. */
+	private final UltraSounds.Loop sawIdle = this.sounds.loop();
+	private final UltraSounds.Loop sawGrind = this.sounds.loop();
+	/** Since the grinding sparks last burst, and since bits last came off the wall; below 0 while not grinding. */
+	private double sinceSawSparks = -1;
+	private double sinceSawGibs;
 	private FirstPersonWeapons.@Nullable Weapon held;
 	private boolean wasFire2;
 	private double coinCharge = 400;
@@ -262,8 +282,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			if (shotgun != null) {
 				shotgun.update(dt, this.input, this);
 			}
+			saw(dt, minecraft.level, player, shotgun);
 		} else {
 			this.lastHealth = -1;
+			saw(dt, minecraft.level, player, null);
 		}
 		for (Shotgun shotgun : this.shotguns.values()) {
 			shotgun.cool(dt);
@@ -284,7 +306,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		Shotgun shotgun = shotgun(this.held);
 		FirstPersonWeapons.ShotgunState shotgunDisplay = shotgun == null
 			? FirstPersonWeapons.ShotgunState.NONE
-			: new FirstPersonWeapons.ShotgunState(shotgun.heat(), shotgun.meter(), shotgun.tint(), shotgun.reddening(), shotgun.jitter());
+			: new FirstPersonWeapons.ShotgunState(shotgun.heat(), shotgun.meter(), shotgun.tint(), shotgun.reddening(), shotgun.jitter(), new FirstPersonWeapons.SawState(
+				shotgun.variant == Shotgun.Variant.SAWED_ON && shotgun.sawAttached(), shotgun.sawing(), shotgun.sawBroken(), shotgun.bladeScroll()
+			));
 		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, this);
 	}
 
@@ -371,6 +395,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		return switch (weapon) {
 			case SHOTGUN_CORE_EJECT -> this.shotguns.get(Shotgun.Variant.CORE_EJECT);
 			case SHOTGUN_PUMP_CHARGE -> this.shotguns.get(Shotgun.Variant.PUMP_CHARGE);
+			case SHOTGUN_SAWED_ON -> this.shotguns.get(Shotgun.Variant.SAWED_ON);
 			default -> null;
 		};
 	}
@@ -426,7 +451,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		if (stack.is(UltraItems.SHOTGUN_CORE_EJECT)) {
 			return FirstPersonWeapons.Weapon.SHOTGUN_CORE_EJECT;
 		}
-		return stack.is(UltraItems.SHOTGUN_PUMP_CHARGE) ? FirstPersonWeapons.Weapon.SHOTGUN_PUMP_CHARGE : null;
+		if (stack.is(UltraItems.SHOTGUN_PUMP_CHARGE)) {
+			return FirstPersonWeapons.Weapon.SHOTGUN_PUMP_CHARGE;
+		}
+		return stack.is(UltraItems.SHOTGUN_SAWED_ON) ? FirstPersonWeapons.Weapon.SHOTGUN_SAWED_ON : null;
 	}
 
 	/** Whether the held item is an ULTRAKILL weapon in use, so attacking and using belong to it. */
@@ -1122,7 +1150,147 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		return switch (variant) {
 			case CORE_EJECT -> FirstPersonWeapons.Weapon.SHOTGUN_CORE_EJECT;
 			case PUMP_CHARGE -> FirstPersonWeapons.Weapon.SHOTGUN_PUMP_CHARGE;
+			case SAWED_ON -> FirstPersonWeapons.Weapon.SHOTGUN_SAWED_ON;
 		};
+	}
+
+	// ---- chainsaw -------------------------------------------------------------------------------
+
+	/**
+	 * The Sawed-On's chainsaw: it idles on the gun while charged; revving, its zone hits enemies in front of the
+	 * gun, and it grinds walls the aim meets close by.
+	 */
+	private void saw(double dt, Level level, LocalPlayer player, @Nullable Shotgun shotgun) {
+		boolean sawedOn = shotgun != null && shotgun.variant == Shotgun.Variant.SAWED_ON;
+		if (sawedOn && shotgun.sawAttached()) {
+			this.sawIdle.update("chainsaw_idle", 1, 1);
+		} else {
+			this.sawIdle.stop();
+		}
+		boolean sawing = sawedOn && shotgun.sawing();
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (!sawing || movement == null) {
+			this.sawZone.clear();
+			stopGrinding();
+			return;
+		}
+		UltraModel model = UltraModel.get(SAWED_ON);
+		JsonObject script = model == null ? null : model.script("shotgun");
+		if (script == null || !script.has("sawZone")) {
+			return;
+		}
+		JsonObject zone = script.getAsJsonObject("sawZone");
+		Matrix4f bone = FirstPersonWeapons.INSTANCE.weaponBoneMatrix(FirstPersonWeapons.Weapon.SHOTGUN_SAWED_ON, zone.get("bone").getAsInt());
+		if (bone != null) {
+			// The trigger's capsule: its height along one of the bone's axes, its radius scaled by the larger of the other two.
+			JsonArray c = zone.getAsJsonArray("center");
+			Vector3f center = bone.transformPosition(c.get(0).getAsFloat(), c.get(1).getAsFloat(), c.get(2).getAsFloat(), new Vector3f());
+			int direction = zone.get("direction").getAsInt();
+			Vector3f axis = bone.getColumn(direction, new Vector3f());
+			float across = Math.max(bone.getColumn((direction + 1) % 3, new Vector3f()).length(), bone.getColumn((direction + 2) % 3, new Vector3f()).length());
+			double radius = zone.get("radius").getAsDouble() * across;
+			double half = Math.max(zone.get("height").getAsDouble() / 2 * axis.length() - radius, 0);
+			axis.normalize((float)half);
+			Quaternionf camera = new Quaternionf(Minecraft.getInstance().gameRenderer.mainCamera().rotation());
+			Vec3 eye = Minecraft.getInstance().gameRenderer.mainCamera().position();
+			Vec3 from = world(camera, new Vector3f(center).sub(axis)).scale(S).add(eye);
+			Vec3 to = world(camera, new Vector3f(center).add(axis)).scale(S).add(eye);
+			this.sawZone.update(dt, level, player, from, to, radius * S, zone.get("hurtCooldown").getAsDouble(), this);
+		}
+		grind(dt, level, player, movement);
+	}
+
+	/**
+	 * HurtZone on the chainsaw: the hit lands where the aim meets the enemy (or its nearest point), with a grind
+	 * and a small camera shake. Hits that don't kill wear the chainsaw.
+	 */
+	@Override
+	public void sawHit(LivingEntity enemy) {
+		Minecraft minecraft = Minecraft.getInstance();
+		UltraModel model = UltraModel.get(SAWED_ON);
+		Shotgun shotgun = this.shotguns.get(Shotgun.Variant.SAWED_ON);
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (minecraft.level == null || minecraft.player == null || model == null || movement == null) {
+			return;
+		}
+		float damage = model.script("shotgun").getAsJsonObject("sawZone").get("enemyDamage").getAsFloat();
+		Vec3 eye = movement.eyePosition();
+		AABB box = enemy.getBoundingBox();
+		Vec3 at = box.clip(eye, eye.add(minecraft.player.getLookAngle().scale(SAW_AIM_REACH)))
+			.orElseGet(() -> new Vec3(Math.clamp(eye.x, box.minX, box.maxX), Math.clamp(eye.y, box.minY, box.maxY), Math.clamp(eye.z, box.minZ, box.maxZ)));
+		movement.shake(0.2);
+		this.sounds.play("chainsaw_hit", 1, this.sounds.randomPitch(0.75F, 1.25F));
+		this.sounds.play("chainsaw_spark", 1, this.sounds.randomPitch(0.75F, 1.25F));
+		boolean survives = enemy.getHealth() > damage * ServerCombat.HEALTH_PER_DAMAGE;
+		shotgunHit(minecraft.level, enemy, damage, at);
+		if (survives) {
+			shotgun.sawHit();
+		}
+	}
+
+	/** The revving chainsaw on a wall within reach of the aim: sparks, a grinding sound, a shake, and bits of the wall. */
+	private void grind(double dt, Level level, LocalPlayer player, UltraMovement movement) {
+		Vec3 eye = movement.eyePosition();
+		BlockHitResult wall = level.clip(new ClipContext(eye, eye.add(player.getLookAngle().scale(SAW_WALL_REACH)), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+		if (wall.getType() == HitResult.Type.MISS) {
+			stopGrinding();
+			return;
+		}
+		if (this.sinceSawSparks < 0 || this.sinceSawSparks >= SAW_SPARK_INTERVAL) {
+			this.effects.particles(SAWED_ON, "ChainsawSparksContinuous", wall.getLocation());
+			this.sinceSawSparks = 0;
+		}
+		this.sinceSawSparks += dt;
+		this.sawGrind.update("chainsaw_grind", 1, 1);
+		movement.shake(0.1);
+		this.sinceSawGibs += dt;
+		if (this.sinceSawGibs > SAW_GIB_INTERVAL && level instanceof ClientLevel client) {
+			client.addBreakingBlockEffects(wall.getBlockPos(), wall.getDirection(), false);
+			this.sinceSawGibs = 0;
+		}
+	}
+
+	private void stopGrinding() {
+		this.sawGrind.stop();
+		this.sinceSawSparks = -1;
+	}
+
+	/**
+	 * Shotgun.ShootSaw: thrown, the chainsaw goes with the throw's sounds (the gun's louder the harder it's
+	 * thrown); either way the gun plays its shot without reloading and the camera shakes.
+	 */
+	@Override
+	public void shootSaw(Shotgun.Variant variant, double force, boolean thrown) {
+		if (thrown) {
+			double share = force / Shotgun.MAX_FORCE;
+			this.sounds.play("shotgun_core_throw", (float)(0.45 * Math.sqrt(1 - share * share)), this.sounds.randomPitch(0.95F, 1.05F));
+			this.sounds.play("shotgun_shoot", (float)(0.45 * Math.max(0.5, share)), this.sounds.randomPitch(0.75F, 0.85F));
+		}
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon(variant));
+		if (animator != null) {
+			animator.play("FireNoReload", 0);
+		}
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (movement != null) {
+			movement.shake(1);
+		}
+	}
+
+	/** The chainsaw's break effect where its blade is: a screech, sparks and their ricochet. */
+	@Override
+	public void sawBreaks(Shotgun.Variant variant, double shake) {
+		Minecraft minecraft = Minecraft.getInstance();
+		FirstPersonWeapons.Frame blade = FirstPersonWeapons.INSTANCE.weaponBone(weapon(variant), "Chainsaw_Blade");
+		if (blade != null) {
+			Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
+			this.effects.particles("chainsaw_break", null, world(camera, blade.position()).scale(S).add(minecraft.gameRenderer.mainCamera().position()));
+		}
+		this.sounds.play("chainsaw_break", 1, this.sounds.randomPitch(0.56F, 0.76F));
+		this.sounds.play("chainsaw_spark", 1, this.sounds.randomPitch(0.85F, 1.15F));
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (movement != null && shake > 0) {
+			movement.shake(shake);
+		}
 	}
 
 	private double spread(double range) {
