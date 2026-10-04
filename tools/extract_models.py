@@ -879,7 +879,8 @@ def export_scripts(exporter, rig, colors, placed):
                 scripts["beam"] = {**{k: tree[k] for k in ("damage", "hitAmount", "maxHitsPerTarget")}, "lines": beam_lines(exporter, go)}
             elif kind == "Chainsaw":
                 tree = obj.read_typetree()
-                scripts["chainsaw"] = {"damage": tree["damage"], "hitAmount": tree["hitAmount"], "box": box_values(go),
+                body = next(c.component.deref().read() for c in go.m_Component if c.component.deref().type.name == "Rigidbody")
+                scripts["chainsaw"] = {"damage": tree["damage"], "hitAmount": tree["hitAmount"], "mass": body.m_Mass, "box": box_values(go),
                                        "trail": trail_values(exporter, go), "line": line_values(exporter, go)}
             elif kind == "HookArm":
                 hook_arm = obj.read()
@@ -958,7 +959,8 @@ def export_scripts(exporter, rig, colors, placed):
                 scripts.setdefault("breakables", []).append({"bone": rig.index[transform_of(go).object_reader.path_id], "box": box_values(go)})
             elif kind == "Nail" and obj.read_typetree()["sawblade"]:
                 tree = obj.read_typetree()
-                scripts["sawblade"] = {k: tree[k] for k in ("damage", "hitAmount", "multiHitAmount")}
+                body = next(c.component.deref().read() for c in go.m_Component if c.component.deref().type.name == "Rigidbody")
+                scripts["sawblade"] = {**{k: tree[k] for k in ("damage", "hitAmount", "multiHitAmount", "chainsaw")}, "mass": body.m_Mass}
                 scripts["sawblade"]["box"] = box_values(go)
                 scripts["sawblade"]["trail"] = trail_values(exporter, go)
             elif kind == "PhysicalShockwave":

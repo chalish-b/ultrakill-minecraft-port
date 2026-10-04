@@ -74,7 +74,8 @@ public final class ServerCombat {
 	private static final double SLAM_PUSH = 50;
 	/** How far from the player a slam can reach an enemy (blocks). */
 	private static final double SLAM_REACH = 8;
-	/** LivingEntity.hurtServer: an entity hit with more of its damage cooldown left than this doesn't react. */
+	/** LivingEntity's damage cooldown after a hit (ticks); hit with more of it left than this, an entity doesn't react. */
+	private static final int DAMAGE_COOLDOWN = 20;
 	private static final int DAMAGE_COOLDOWN_REACTS = 10;
 	/** How far from the player an explosion can reach something. */
 	private static final double EXPLOSION_REACH = 64;
@@ -160,11 +161,7 @@ public final class ServerCombat {
 		float health = damage * HEALTH_PER_DAMAGE;
 		DamageSource source = player.damageSources().playerAttack(player);
 		if (target.damageCooldownTime > DAMAGE_COOLDOWN_REACTS && health < target.getHealth() + target.getAbsorptionAmount()) {
-			LivingEntityAccessor accessor = (LivingEntityAccessor)target;
-			float lastHurt = accessor.ultracraft$getLastHurt();
-			accessor.ultracraft$setLastHurt(0);
-			target.hurtServer(level, source, health);
-			accessor.ultracraft$setLastHurt(lastHurt);
+			quietHurt(level, source, target, health);
 		} else {
 			target.damageCooldownTime = 0;
 			target.hurtServer(level, source, health);
@@ -197,21 +194,30 @@ public final class ServerCombat {
 			damage /= 1.5F;
 		}
 		float health = damage * HEALTH_PER_DAMAGE;
+		DamageSource source = player.damageSources().playerAttack(player);
 		if (health >= target.getHealth() + target.getAbsorptionAmount()) {
-			target.setInvulnerableTime(0);
-			target.hurtServer(level, player.damageSources().playerAttack(player), health);
+			target.damageCooldownTime = 0;
+			target.hurtServer(level, source, health);
 		} else {
-			// Within its damage cooldown, an entity takes damage past what it last took without any of the reaction.
-			LivingEntityAccessor accessor = (LivingEntityAccessor)target;
-			int invulnerable = target.getInvulnerableTime();
-			float lastHurt = accessor.ultracraft$getLastHurt();
-			target.setInvulnerableTime(20);
-			accessor.ultracraft$setLastHurt(0);
-			target.hurtServer(level, player.damageSources().playerAttack(player), health);
-			target.setInvulnerableTime(invulnerable);
-			accessor.ultracraft$setLastHurt(lastHurt);
+			quietHurt(level, source, target, health);
 		}
 		BloodZones.add(level, position, Gore.of(false, damage, !target.isAlive()), false, DRILL_BLOOD_SCALE);
+	}
+
+	/**
+	 * A hit that doesn't kill, taken without any reaction: within its damage cooldown, an entity takes damage past
+	 * what it last took without flinching, crying out or being knocked back. Its cooldown and last hit are left as
+	 * they were.
+	 */
+	private static void quietHurt(ServerLevel level, DamageSource source, LivingEntity target, float health) {
+		LivingEntityAccessor accessor = (LivingEntityAccessor)target;
+		int cooldown = target.damageCooldownTime;
+		float lastHurt = accessor.ultracraft$getLastHurt();
+		target.damageCooldownTime = DAMAGE_COOLDOWN;
+		accessor.ultracraft$setLastHurt(0);
+		target.hurtServer(level, source, health);
+		target.damageCooldownTime = cooldown;
+		accessor.ultracraft$setLastHurt(lastHurt);
 	}
 
 	/**
@@ -228,7 +234,7 @@ public final class ServerCombat {
 		if (boss(target) && UltraDifficulty.of(level.getDifficulty()) >= UltraDifficulty.BRUTAL) {
 			damage /= 1.5F;
 		}
-		target.setInvulnerableTime(0);
+		target.damageCooldownTime = 0;
 		target.hurtServer(level, source, damage * HEALTH_PER_DAMAGE);
 		boolean killed = !target.isAlive();
 		Gore gore = tryForExplode && killed ? Gore.HEAD : Gore.of(head, damage, killed);

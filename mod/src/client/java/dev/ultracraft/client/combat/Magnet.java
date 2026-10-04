@@ -29,8 +29,9 @@ import java.util.Optional;
  * The Attractor's magnet (Harpoon, carrying a Magnet and a TimeBomb). Thrown, it flies in an arc and sticks in the
  * first living enemy or block its box touches; stuck, its TimeBomb counts down twelve seconds, beeping faster as it
  * goes. All the while, within 25 units it pulls in nails and the airborne enemies nails are stuck in, the more nails
- * the harder. Magnets that touch share what they can hold; holding more than that, it breaks. A revolver beam
- * through it breaks it too. Breaking, it throws out its nails as a nail bomb.
+ * the harder, keeps sawblades circling it, and pulls in thrown chainsaws coming toward it. Magnets that touch share
+ * what they can hold; holding more than that, it breaks. A revolver beam through it, or a slam landing on it,
+ * breaks it too. Breaking, it throws out its nails as a nail bomb, and its sawblades back at where it was.
  */
 final class Magnet {
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
@@ -52,6 +53,10 @@ final class Magnet {
 	private static final double ENEMY_PULL = 5;
 	/** ULTRAKILL's enemies' rigidbodies weigh 1; inside a magnet's field, half that. */
 	private static final double ENEMY_MASS = 1;
+	/** It only pulls thrown chainsaws within this many units of it. */
+	private static final double CHAINSAW_REACH = 15;
+	/** A chainsaw's sawblade it catches further than this many units away is brought in to this. */
+	private static final double SAWBLADE_REACH = 20;
 	/** Nails moving at least this fast toward or away from it don't count, and aren't pulled. */
 	private static final double TOO_FAST = 1000;
 	/** Launch: it throws each nail at an enemy a 5 unit sphere cast up to 100 units out finds, with 10 times its strength as a force. */
@@ -97,6 +102,9 @@ final class Magnet {
 	/** The nails it holds, and the magnets it has touched, whose room it shares. */
 	private final List<Nail> nails = new ArrayList<>();
 	private final List<Magnet> connected = new ArrayList<>();
+	/** The sawblades and thrown chainsaws in its field. */
+	private final List<Sawblade> sawblades = new ArrayList<>();
+	private final List<ThrownSaw> chainsaws = new ArrayList<>();
 	/** TimeBomb: counting down once it's stuck, beeping after a sixth of what's left each time. */
 	private boolean timeBomb;
 	private double bombTimer;
@@ -163,7 +171,29 @@ final class Magnet {
 		return toward.scale((r - toward.length()) / r * NAIL_PULL * strength * STEP / nail.mass());
 	}
 
-	void update(double dt, float partialTick, Level level, LocalPlayer player, List<Nail> allNails, List<Magnet> magnets, Hits hits) {
+	/**
+	 * Magnet.Update's pull on a thrown chainsaw in its field, as the acceleration it comes to (units per second
+	 * squared): pulled as a nail is, while it's within 15 units and coming toward the magnet.
+	 */
+	Vec3 pull(ThrownSaw chainsaw) {
+		if (!pullsIn(chainsaw)) {
+			return Vec3.ZERO;
+		}
+		Vec3 toward = center().subtract(chainsaw.position).scale(1 / S);
+		double r = radius();
+		double strength = this.magnet.get("strength").getAsDouble();
+		return toward.scale((r - toward.length()) / r * NAIL_PULL * strength * STEP / chainsaw.mass());
+	}
+
+	private boolean pullsIn(ThrownSaw chainsaw) {
+		Vec3 toward = center().subtract(chainsaw.position).scale(1 / S);
+		Vec3 velocity = chainsaw.velocity();
+		return toward.length() < CHAINSAW_REACH && velocity.lengthSqr() > 0 && toward.dot(velocity.normalize()) > 0
+			&& Math.abs(velocity.dot(toward)) < TOO_FAST;
+	}
+
+	void update(double dt, float partialTick, Level level, LocalPlayer player, List<Nail> allNails, List<Sawblade> allSawblades, List<ThrownSaw> allChainsaws,
+		List<Magnet> magnets, Hits hits) {
 		this.age += dt;
 		this.sinceLaunch += dt;
 		this.accumulator += dt;
@@ -183,7 +213,7 @@ final class Magnet {
 		} else if (!this.stopped && this.velocity.length() > 1) {
 			this.forward = this.velocity.normalize();
 		}
-		field(dt, level, player, allNails, magnets, hits);
+		field(dt, level, player, allNails, allSawblades, allChainsaws, magnets, hits);
 		if (this.removed) {
 			return;
 		}
@@ -285,9 +315,42 @@ final class Magnet {
 	 * halves their mass while they're in it). What it holds weighs on it: too much for it and the magnets it's joined,
 	 * and it breaks. The beeper goes from green to red, and its beep higher and bigger, as it fills up.
 	 */
-	private void field(double dt, Level level, LocalPlayer player, List<Nail> allNails, List<Magnet> magnets, Hits hits) {
+	private void field(double dt, Level level, LocalPlayer player, List<Nail> allNails, List<Sawblade> allSawblades, List<ThrownSaw> allChainsaws,
+		List<Magnet> magnets, Hits hits) {
 		Vec3 center = center();
 		double reach = reach();
+		this.sawblades.removeIf(sawblade -> sawblade.removed);
+		for (Sawblade sawblade : allSawblades) {
+			if (sawblade.removed) {
+				continue;
+			}
+			boolean inside = sawblade.box().distanceTo(center) < reach;
+			if (inside && !this.sawblades.contains(sawblade)) {
+				this.sawblades.add(sawblade);
+				sawblade.caught(this);
+				double distance = sawblade.position.distanceTo(center) / S;
+				if (sawblade.chainsaw() && distance > SAWBLADE_REACH) {
+					sawblade.position = sawblade.position.add(center.subtract(sawblade.position).normalize().scale((distance - SAWBLADE_REACH) * S));
+				}
+			} else if (!inside && this.sawblades.contains(sawblade)) {
+				this.sawblades.remove(sawblade);
+				sawblade.released(this);
+			}
+		}
+		this.chainsaws.removeIf(chainsaw -> chainsaw.removed);
+		for (ThrownSaw chainsaw : allChainsaws) {
+			if (chainsaw.removed) {
+				continue;
+			}
+			boolean inside = !chainsaw.inPlayer && chainsaw.box().distanceTo(center) < reach;
+			if (inside && !this.chainsaws.contains(chainsaw)) {
+				this.chainsaws.add(chainsaw);
+				chainsaw.magnets.add(this);
+			} else if (!inside && this.chainsaws.contains(chainsaw)) {
+				this.chainsaws.remove(chainsaw);
+				chainsaw.magnets.remove(this);
+			}
+		}
 		for (Nail nail : allNails) {
 			if (nail.removed || nail.stuckIn != null) {
 				continue;
@@ -312,6 +375,14 @@ final class Magnet {
 			Vec3 toward = center.subtract(nail.position).scale(1 / S);
 			if (Math.abs(nail.velocity.dot(toward)) < TOO_FAST) {
 				weight += nail.mass();
+			}
+		}
+		for (Sawblade sawblade : this.sawblades) {
+			weight += sawblade.mass();
+		}
+		for (ThrownSaw chainsaw : this.chainsaws) {
+			if (pullsIn(chainsaw)) {
+				weight += chainsaw.mass();
 			}
 		}
 		double r = radius();
@@ -377,8 +448,8 @@ final class Magnet {
 		return OrientedBox.of(this.position, this.forward, placed, MODEL_SCALE * S);
 	}
 
-	/** RevolverBeam on its cube: it breaks, and the beam goes on through. */
-	void shot(Level level, LocalPlayer player, Hits hits) {
+	/** Its cube hit by a revolver beam (which goes on through) or a slam's landing: it breaks. */
+	void hitCube(Level level, LocalPlayer player, Hits hits) {
 		if (this.breakable) {
 			destroy(level, player, hits);
 		}
@@ -439,6 +510,15 @@ final class Magnet {
 			}
 		}
 		this.nails.clear();
+		for (Sawblade sawblade : this.sawblades) {
+			sawblade.launched(center);
+			sawblade.released(this);
+		}
+		this.sawblades.clear();
+		for (ThrownSaw chainsaw : this.chainsaws) {
+			chainsaw.magnets.remove(this);
+		}
+		this.chainsaws.clear();
 		for (Magnet other : this.connected) {
 			other.connected.remove(this);
 		}

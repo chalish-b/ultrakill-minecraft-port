@@ -154,6 +154,8 @@ public final class UltraMovement {
 	private boolean hasImpacted;
 	/** A power slam's landing, waiting for combat to make its shockwave. */
 	private @Nullable PowerSlam powerSlam;
+	/** Where the last landing impact's dust went up, until it's taken. */
+	private @Nullable Vec3 landingImpact;
 	private double sinceLastGrounded;
 
 	/** GroundCheck and SlopeCheck forced off (ForceOff): the player counts as in the air. */
@@ -1097,8 +1099,16 @@ public final class UltraMovement {
 		}
 	}
 
-	/** NewMovement.LandingImpact: a heavy thud, and bits of the floor thrown up. */
+	/** Where the last landing impact (NewMovement.impactDust) went up, if one has since: once (blocks). */
+	public @Nullable Vec3 takeLandingImpact() {
+		Vec3 impact = this.landingImpact;
+		this.landingImpact = null;
+		return impact;
+	}
+
+	/** NewMovement.LandingImpact: a heavy thud, its dust, and bits of the floor thrown up. */
 	private void landingImpact() {
+		this.landingImpact = groundCheckPosition();
 		this.sounds.play("landing_heavy", LANDING_VOLUME, 1);
 		footstep(1, true, 0);
 		footstep(1, true, 1);

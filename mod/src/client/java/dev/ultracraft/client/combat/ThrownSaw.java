@@ -93,6 +93,8 @@ final class ThrownSaw {
 	private double playerHitTimer;
 	private double sinceIgnoringPlayer;
 	private double raycastBlockedTimer;
+	/** The magnets holding it, which pull it in as it comes toward them. */
+	final List<Magnet> magnets = new ArrayList<>();
 	private double accumulator;
 	private double age;
 	double bladeScroll;
@@ -113,6 +115,15 @@ final class ThrownSaw {
 	 * Shotgun.ShootSaw: made, it checks for walls just ahead and an enemy right on top of it (which it stops on,
 	 * before it's sent off), then it's thrown.
 	 */
+	/** Units per second. */
+	Vec3 velocity() {
+		return this.velocity;
+	}
+
+	double mass() {
+		return this.script.get("mass").getAsDouble();
+	}
+
 	void launch(Level level, LocalPlayer player, Vec3 velocity, Hits hits) {
 		checkMultipleRicochets(level, player, hits);
 		List<Entity> close = level.getEntities(player, new AABB(this.position, this.position).inflate(1.5 * S), ThrownSaw::isEnemy);
@@ -191,6 +202,9 @@ final class ThrownSaw {
 			this.velocity = moveTowards(this.velocity, pull.scale(PULL_SPEED), STEP * distance * 10);
 		} else {
 			this.velocity = pull.scale(Math.min(PULL_SPEED, moveTowards(speed, PULL_SPEED, STEP * Math.max(10, distance) * 10)));
+		}
+		for (Magnet magnet : this.magnets) {
+			this.velocity = this.velocity.add(magnet.pull(this).scale(STEP));
 		}
 		if (this.sinceIgnoringPlayer > IGNORE_PLAYER && !this.inPlayer && distance < 1) {
 			touchPlayer();

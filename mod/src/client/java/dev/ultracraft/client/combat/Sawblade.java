@@ -18,6 +18,7 @@ import net.minecraft.world.phys.Vec3;
 import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.List;
@@ -25,22 +26,30 @@ import java.util.List;
 /**
  * A chainsaw off its chain (Nail, as a sawblade): it flies straight on at its speed, bouncing off walls, and stops
  * on each enemy it meets to hit it four times. Hits and bounces wear it down until it breaks. A Feedbacker punch
- * after it has bounced sends it where the player aims, hitting twice as hard for a while.
+ * after it has bounced sends it where the player aims, hitting twice as hard for a while. A magnet holding it
+ * keeps it circling the magnet, and its bounces wear it less.
  */
 final class Sawblade {
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	/** Time.fixedDeltaTime. */
 	private static final double STEP = 0.008;
-	/** RemoveTime, tripled for sawblades, and the cap on how far it can get from where it started (units). */
+	/**
+	 * RemoveTime, tripled for sawblades: this long after it's made or a magnet lets it go. MasterRemoveTime, and the
+	 * cap on how far it can get from where it started (units).
+	 */
 	private static final double LIFETIME = 15;
+	private static final double MASTER_LIFETIME = 60;
 	private static final double FAR_AWAY = 1000;
 	/** Hits on an enemy it stopped on come this often; the same enemy can't stop it again this soon. */
 	private static final double MULTI_HIT_COOLDOWN = 0.15;
 	private static final double SAME_ENEMY_COOLDOWN = 0.15;
 	/** It hits enemies within this many units of it. */
 	private static final double TOUCH_RADIUS = 0.5;
-	/** A bounce wears it down this much, and a further bounce in the same step this much. */
+	/** A bounce wears it down this much (this much while a magnet holds it), and a further bounce in the same step this much. */
 	private static final double BOUNCE_WEAR = 0.25;
+	private static final double MAGNET_BOUNCE_WEAR = 0.1;
+	/** A magnet turns it to fly this many degrees off the way to it, about the world's up. */
+	private static final double MAGNET_ANGLE = 85;
 	private static final double EXTRA_BOUNCE_WEAR = 0.125;
 	/** Bits come off walls no more often than this. */
 	private static final double GIB_INTERVAL = 0.25;
@@ -84,6 +93,11 @@ final class Sawblade {
 	private double sameEnemyHitCooldown;
 	private Vec3 originalVelocity = Vec3.ZERO;
 	private double sinceLastGibs = 1;
+	/** The magnets holding it, which side of the nearest it circles, and how far from it a punch sent it (units). */
+	final List<Magnet> magnets = new ArrayList<>();
+	private int magnetRotationDirection;
+	private double punchDistance;
+	private double removeAt = LIFETIME;
 	private double accumulator;
 	private double age;
 	double bladeScroll;
@@ -148,7 +162,7 @@ final class Sawblade {
 			}
 		}
 		updateTrail();
-		if (this.age > LIFETIME || this.position.distanceTo(this.start) / S > FAR_AWAY) {
+		if (this.age > this.removeAt || this.age > MASTER_LIFETIME || this.position.distanceTo(this.start) / S > FAR_AWAY) {
 			this.removed = true;
 		}
 	}
@@ -158,6 +172,13 @@ final class Sawblade {
 		if (this.stopped) {
 			this.velocity = Vec3.ZERO;
 			return;
+		}
+		if (!this.magnets.isEmpty()) {
+			this.magnets.removeIf(magnet -> magnet.removed);
+			if (this.magnets.isEmpty()) {
+				return;
+			}
+			circle(targetMagnet());
 		}
 		AABB near = new AABB(this.position, this.position).inflate(TOUCH_RADIUS * S);
 		for (Entity entity : level.getEntities(player, near, ThrownSaw::isEnemy)) {
@@ -188,7 +209,12 @@ final class Sawblade {
 				breakApart(hits);
 				return;
 			}
-			bounce(wall, speed, BOUNCE_WEAR, true, hits);
+			if (this.magnets.isEmpty()) {
+				bounce(wall, speed, BOUNCE_WEAR, true, hits);
+			} else {
+				this.magnetRotationDirection *= -1;
+				bounce(wall, speed, MAGNET_BOUNCE_WEAR, true, hits);
+			}
 			for (int i = 0; i < 3; i++) {
 				Vec3 ahead = this.velocity.normalize();
 				BlockHitResult next = level.clip(new ClipContext(this.position, this.position.add(ahead.scale(5 * S)), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
@@ -215,6 +241,85 @@ final class Sawblade {
 		this.sameEnemyHitCooldown = 0;
 		this.currentHitEnemy = null;
 		this.hitAmount -= wear;
+	}
+
+	/**
+	 * Nail.FixedUpdate with magnets: it flies at its speed 85 degrees off the way to the magnet, round it. Punched,
+	 * it flies on as punched until it's further from the magnet than it was.
+	 */
+	private void circle(Magnet magnet) {
+		Vec3 center = magnet.center();
+		if (this.punched) {
+			if (center.distanceTo(this.position) / S <= this.punchDistance) {
+				return;
+			}
+			this.punchDistance = 0;
+		}
+		Vec3 toward = center.subtract(this.position);
+		if (toward.lengthSqr() == 0) {
+			return;
+		}
+		this.velocity = turnY(toward.normalize(), MAGNET_ANGLE * this.magnetRotationDirection).scale(this.velocity.length());
+	}
+
+	/** Nail.GetTargetMagnet: the nearest magnet holding it, and which way round it goes, by which side of it the magnet is. */
+	private Magnet targetMagnet() {
+		Magnet nearest = null;
+		double best = Double.MAX_VALUE;
+		for (Magnet magnet : this.magnets) {
+			Vec3 toward = magnet.center().subtract(this.position);
+			double distance = toward.lengthSqr();
+			if (distance < best) {
+				best = distance;
+				nearest = magnet;
+				Vec3 side = new Vec3(this.velocity.z, this.velocity.y, -this.velocity.x).normalize();
+				this.magnetRotationDirection = toward.dot(side) > 0 ? -1 : 1;
+			}
+		}
+		return nearest;
+	}
+
+	/** Quaternion.Euler(0, degrees, 0) on {@code v}. */
+	private static Vec3 turnY(Vec3 v, double degrees) {
+		double radians = Math.toRadians(degrees);
+		double cos = Math.cos(radians);
+		double sin = Math.sin(radians);
+		return new Vec3(v.x * cos + v.z * sin, v.y, -v.x * sin + v.z * cos);
+	}
+
+	/** Nail.MagnetCaught: it stays while a magnet holds it, and can be punched. */
+	void caught(Magnet magnet) {
+		if (this.magnets.contains(magnet)) {
+			return;
+		}
+		this.removeAt = Double.POSITIVE_INFINITY;
+		this.punchable = true;
+		this.magnets.add(magnet);
+	}
+
+	/** Nail.MagnetRelease: let go by its last magnet, it's gone 15 seconds later. */
+	void released(Magnet magnet) {
+		this.magnets.remove(magnet);
+		if (this.magnets.isEmpty()) {
+			this.removeAt = this.age + LIFETIME;
+		}
+	}
+
+	/** Magnet.Launch: the magnet breaking sends it straight at where the magnet was, at its speed. */
+	void launched(Vec3 center) {
+		Vec3 toward = center.subtract(this.position);
+		if (toward.lengthSqr() > 0) {
+			this.velocity = toward.normalize().scale(this.velocity.length());
+		}
+	}
+
+	/** A chainsaw's sawblade (Nail.chainsaw): a magnet pulls it in to 20 units as it catches it. */
+	boolean chainsaw() {
+		return this.script.get("chainsaw").getAsInt() != 0;
+	}
+
+	double mass() {
+		return this.script.get("mass").getAsDouble();
 	}
 
 	private void touchEnemy(LivingEntity enemy) {
@@ -254,6 +359,9 @@ final class Sawblade {
 		}
 		this.punched = true;
 		this.punchedTimer = PUNCHED_TIME;
+		if (!this.magnets.isEmpty()) {
+			this.punchDistance = targetMagnet().center().distanceTo(this.position) / S;
+		}
 	}
 
 	/** Its BoxCollider. It faces back the way it's going (Transform.LookAt behind it). */

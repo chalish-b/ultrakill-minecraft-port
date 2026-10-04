@@ -189,6 +189,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	/** The Attractor's magnet, and its TimeBomb's explosion: debris that falls off as it breaks. */
 	private static final String MAGNET = "magnet";
 	private static final String MAGNET_BREAK = "magnet_break";
+	/**
+	 * A landing impact's dust (DustBig) carries a Shockwave sphere that breaks what a slam can break, the magnets'
+	 * cubes among it: a 0.625 unit sphere growing 50 times its size a second, for its first tenth of a second.
+	 */
+	private static final double LANDING_DUST_RADIUS = 0.625;
+	private static final double LANDING_DUST_GROWTH = 50;
+	private static final double LANDING_DUST_TIME = 0.1;
 
 	private final UltraSounds sounds = new UltraSounds();
 	private final Effects effects = new Effects();
@@ -225,6 +232,17 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	 */
 	private final Map<Integer, Integer> nailCounts = new HashMap<>();
 	private final Map<Integer, List<Nail>> stuckNails = new HashMap<>();
+	/** Landing impacts' dust still breaking things: where each went up, and how long ago. */
+	private final List<LandingDust> landingDusts = new ArrayList<>();
+
+	private static final class LandingDust {
+		final Vec3 position;
+		double age;
+
+		LandingDust(Vec3 position) {
+			this.position = position;
+		}
+	}
 	/** The Feedbacker's punch is still active and hasn't punched a chainsaw yet. */
 	private boolean sawPunchPending;
 	/** The chainsaw idling on the gun, and grinding a wall. */
@@ -312,6 +330,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			this.nailBursts.clear();
 			this.nailCounts.clear();
 			this.stuckNails.clear();
+			this.landingDusts.clear();
 			return;
 		}
 		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
@@ -1243,7 +1262,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private void updateNails(double dt, float partialTick, Level level, LocalPlayer player) {
 		for (Magnet magnet : List.copyOf(this.magnets)) {
 			if (!magnet.removed) {
-				magnet.update(dt, partialTick, level, player, this.nails, this.magnets, this);
+				magnet.update(dt, partialTick, level, player, this.nails, this.sawblades, this.saws, this.magnets, this);
 			}
 		}
 		this.magnets.removeIf(magnet -> magnet.removed);
@@ -1257,6 +1276,17 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			burst.update(dt);
 		}
 		this.nailBursts.removeIf(Nail.Burst::over);
+		for (LandingDust dust : this.landingDusts) {
+			double radius = LANDING_DUST_RADIUS * (1 + LANDING_DUST_GROWTH * dust.age) * S;
+			for (Magnet magnet : List.copyOf(this.magnets)) {
+				OrientedBox cube = magnet.removed ? null : magnet.cube();
+				if (cube != null && cube.distanceTo(dust.position) <= radius) {
+					magnet.hitCube(level, player, this);
+				}
+			}
+			dust.age += dt;
+		}
+		this.landingDusts.removeIf(dust -> dust.age > LANDING_DUST_TIME);
 		this.nailCounts.keySet().removeIf(id -> level.getEntity(id) == null);
 		this.stuckNails.keySet().removeIf(id -> level.getEntity(id) == null);
 	}
@@ -1357,7 +1387,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		for (Magnet magnet : List.copyOf(this.magnets)) {
 			OrientedBox cube = magnet.removed ? null : magnet.cube();
 			if (cube != null && cube.clip(from, direction, length).isPresent()) {
-				magnet.shot(minecraft.level, minecraft.player, this);
+				magnet.hitCube(minecraft.level, minecraft.player, this);
 			}
 		}
 	}
@@ -2083,6 +2113,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			}
 		} else {
 			this.slammed.clear();
+		}
+		Vec3 impact = movement.takeLandingImpact();
+		if (impact != null) {
+			this.landingDusts.add(new LandingDust(impact));
 		}
 		UltraMovement.PowerSlam powerSlam = movement.takePowerSlam();
 		UltraModel model = UltraModel.get(SHOCKWAVE);
