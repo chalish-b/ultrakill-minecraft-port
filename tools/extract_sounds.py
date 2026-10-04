@@ -95,6 +95,16 @@ def audio_sources(go):
         yield from audio_sources(child)
 
 
+def audio_sources_tree(go):
+    """The serialized fields of the AudioSources in a prefab hierarchy, depth first."""
+    for c in go.m_Component:
+        obj = c.component.deref()
+        if obj.type.name == "AudioSource":
+            yield obj.read_typetree()
+    for child_go in children(go):
+        yield from audio_sources_tree(child_go)
+
+
 def child(go, name):
     return next(c for c in children(go) if c.m_Name == name)
 
@@ -256,6 +266,25 @@ def combat(env, x):
     x.add_clip("shotgun_pump2", pump.pump2sound)
     x.add_source("shotgun_pump_charge", next(components(pump.pumpChargeSound.deref().read(), "AudioSource")))
     x.add_source("shotgun_warning_beep", next(components(pump.warningBeep.deref().read(), "AudioSource")))
+
+    # The Whiplash's one-shots set their pitch with RandomPitch, and the mod does too. The hit and the clinks come
+    # from where they happen; the loops play on the arm's own AudioSource, at its volume.
+    hook = find_class(env, "HookArm", "Hook Arm")
+    for event, field in [("whiplash_throw", "throwSound"), ("whiplash_pull", "pullSound"), ("whiplash_catch", "catchSound"),
+                         ("whiplash_pull_done", "pullDoneSound")]:
+        source = source_ref(getattr(hook, field))
+        x.add_clip(event, source.m_audioClip, source.m_Volume)
+    stop = named_source(hook.pullDoneSound.deref().read(), "Audio Source")
+    x.add_clip("whiplash_pull_done_stop", stop.m_audioClip, stop.m_Volume)
+    x.add_source("whiplash_woosh", source_ref(hook.wooshSound))
+    for event, field in [("whiplash_hit", "hitSound"), ("whiplash_clink", "clinkSparks"), ("whiplash_clink_object", "clinkObjectSparks")]:
+        pptr = getattr(hook, field)
+        source = source_ref(pptr)
+        x.add_clip(event, source.m_audioClip, source.m_Volume, mono=True)
+        x.events[event]["sounds"][0]["attenuation_distance"] = round(next(audio_sources_tree(pptr.deref().read())).get("MaxDistance") * BLOCKS_PER_UNIT)
+    arm_volume = next(components(hook.m_GameObject.read(), "AudioSource")).m_Volume
+    x.add_clip("whiplash_throw_loop", hook.throwLoop, arm_volume)
+    x.add_clip("whiplash_pull_loop", hook.pullLoop, arm_volume)
 
     ground = next(g for g in (o.read() for o in env.objects if o.type.name == "MonoBehaviour" and script_class(o) == "GroundCheck") if g.shockwave.path_id)
     shockwave = next(m for m in components(ground.shockwave.deref().read(), "MonoBehaviour") if hasattr(m, "soundEffect"))

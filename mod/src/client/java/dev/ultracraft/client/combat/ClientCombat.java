@@ -23,6 +23,7 @@ import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.SlamHitPayload;
 import dev.ultracraft.net.WeaponHitPayload;
+import dev.ultracraft.net.WhiplashBrokenPayload;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
 import net.minecraft.client.Minecraft;
@@ -33,6 +34,7 @@ import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.sounds.SoundSource;
+import net.minecraft.util.LightCoordsUtil;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -65,11 +67,11 @@ import java.util.function.UnaryOperator;
 
 /**
  * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the shotgun's pellets, the
- * arms' punches (and boosting pellets with them) and the Knuckleblaster's blast, explosions, weapon charges
- * (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the server, which applies them.
+ * arms' punches (and boosting pellets with them) and the Knuckleblaster's blast, the Whiplash, explosions, weapon
+ * charges (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the server, which applies them.
  */
 public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events, Explosion.Hits, SawZone.Hits,
-	ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits {
+	ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
@@ -90,6 +92,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	private static final double CORE_TARGET_RANGE = 100 * S;
 	/** TimeController.HitStop when a core hits an enemy. */
 	private static final double CORE_HITSTOP = 0.05;
+	/** The Whiplash's hit on the enemy it catches. */
+	private static final float WHIPLASH_DAMAGE = 0.2F;
 	/** Landed shells stay until there are more than this many (GoreZone's maxGibs at the default maxGore). */
 	private static final int MAX_SHELLS = 150;
 	/** Shotgun.Shoot: pellets per shot, and how far each is turned about every axis, in degrees. */
@@ -160,6 +164,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	/** Enemies the current slam has already hit (GroundCheck.hitEnemies). */
 	private final Set<Integer> slammed = new HashSet<>();
 	private final List<Sawblade> sawblades = new ArrayList<>();
+	private final Whiplash whiplash = new Whiplash(this.sounds, this);
 	/** The Feedbacker's punch is still active and hasn't punched a chainsaw yet. */
 	private boolean sawPunchPending;
 	/** The chainsaw idling on the gun, and grinding a wall. */
@@ -202,6 +207,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 
 	public static void init() {
 		ClientPlayNetworking.registerGlobalReceiver(PunchResultPayload.TYPE, (payload, context) -> INSTANCE.onPunchResult(payload));
+		ClientPlayNetworking.registerGlobalReceiver(WhiplashBrokenPayload.TYPE, (payload, context) -> {
+			Minecraft minecraft = Minecraft.getInstance();
+			if (minecraft.level != null && minecraft.player != null) {
+				INSTANCE.whiplash.knockedOff(minecraft.level, minecraft.player);
+			}
+		});
 	}
 
 	/** Whether time stands still after a parry. */
@@ -225,6 +236,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			this.sawblades.clear();
 			this.shockwaves.clear();
 			this.slammed.clear();
+			this.whiplash.cancel();
 			return;
 		}
 		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
@@ -319,6 +331,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 					punchWith(FistType.HEAVY);
 				}
 			}
+			UltraMovement movement = UltraController.INSTANCE.movement();
+			if (movement != null) {
+				this.whiplash.frame(dt, minecraft.level, player, movement, consumeClicks(UltraKeys.WHIPLASH), UltraKeys.WHIPLASH.isDown());
+			}
 			Revolver revolver = revolver(this.held);
 			if (revolver != null) {
 				revolver.update(dt, this.input, this);
@@ -332,6 +348,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		} else {
 			this.lastHealth = -1;
 			saw(dt, minecraft.level, player, null);
+			this.whiplash.cancel();
 		}
 		for (Shotgun shotgun : this.shotguns.values()) {
 			shotgun.cool(dt, this.saws.size());
@@ -468,6 +485,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			case "Eject" -> eject();
 			default -> {
 			}
+		}
+	}
+
+	@Override
+	public void whiplashEvent(String function) {
+		if (function.equals("CatchOver")) {
+			this.whiplash.catchOver();
 		}
 	}
 
@@ -968,6 +992,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			arm.setFloat("PunchRandomizer", this.random.nextFloat());
 			arm.setTrigger("Punch");
 		}
+		this.whiplash.cancel();
 	}
 
 	/**
@@ -1965,6 +1990,71 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		}
 	}
 
+	// ---- whiplash -------------------------------------------------------------------------------
+
+	/** HookArm.FixedUpdate, in each of the player's physics steps. */
+	public void whiplashFixedUpdate() {
+		Minecraft minecraft = Minecraft.getInstance();
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (minecraft.level != null && minecraft.player != null && movement != null) {
+			this.whiplash.fixedUpdate(minecraft.level, minecraft.player, movement);
+		}
+	}
+
+	@Override
+	public List<Coin> coins() {
+		return this.coins;
+	}
+
+	@Override
+	public void coinBounced(Coin bounced) {
+		this.respawned.add(bounced);
+	}
+
+	/** The hook's hit on the enemy it caught. */
+	@Override
+	public void hooked(LivingEntity enemy, Vec3 at) {
+		Level level = Minecraft.getInstance().level;
+		if (level == null) {
+			return;
+		}
+		Gore gore = Gore.of(false, WHIPLASH_DAMAGE, false);
+		this.effects.blood(level, at, gore);
+		this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
+	}
+
+	/** Grenade.Explode on the core the hook took along. */
+	@Override
+	public void coreExploded(Core core) {
+		if (core.removed) {
+			return;
+		}
+		core.removed = true;
+		explode(EXPLOSION, core.position, null, false);
+	}
+
+	/** HookArm's clinkSparks and clinkObjectSparks: sparks out of {@code facing}, with their clink. */
+	@Override
+	public void clink(Vec3 at, Vec3 facing, boolean object) {
+		String prefab = object ? "whiplash_clink_object" : "whiplash_clink";
+		Vector3f up = Math.abs(facing.normalize().y) > 0.99 ? new Vector3f(0, 0, 1) : new Vector3f(0, 1, 0);
+		Quaternionf rotation = new Quaternionf().lookAlong((float)facing.x, (float)facing.y, (float)facing.z, up.x, up.y, up.z).conjugate();
+		this.effects.particles(prefab, null, at, rotation);
+		this.sounds.once().update(prefab, 1, object ? this.sounds.randomPitch(1.8F, 2.2F) : this.sounds.randomPitch(1.3F, 1.7F), at);
+	}
+
+	/**
+	 * The Whiplash takes the arm (FistControl): the punch underway is called off (Punch.CancelAttack) and the next
+	 * can come within a tenth of a second.
+	 */
+	@Override
+	public void throwStarted() {
+		this.punchReady = true;
+		this.punchActiveLeft = 0;
+		this.sawPunchPending = false;
+		this.fistCooldown = Math.min(this.fistCooldown, 0.1);
+	}
+
 	// ---- health ---------------------------------------------------------------------------------
 
 	/** NewMovement.GetHealth's sound, when blood heals the player. */
@@ -1980,5 +2070,27 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		this.effects.render(context, this.coins, this.shells, this.pellets, this.cores);
 		this.effects.renderSaws(context, this.saws, this.sawblades, chainStart());
 		this.effects.renderShockwaves(context, this.shockwaves);
+		renderWhiplash(context);
+	}
+
+	/** HookArm.LateUpdate and its LineRenderer: the hook out of the hand, and the wire to it from the hand. */
+	private void renderWhiplash(LevelRenderContext context) {
+		Minecraft minecraft = Minecraft.getInstance();
+		float partialTick = minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false);
+		Vec3 hook = this.whiplash.drawnHookPoint(partialTick);
+		FirstPersonWeapons.INSTANCE.placeHook(this.whiplash.hookOut() ? hook : null, this.whiplash.throwDirection);
+		if (!this.whiplash.active() || minecraft.level == null || minecraft.player == null) {
+			return;
+		}
+		Vec3 camera = minecraft.gameRenderer.mainCamera().position();
+		if (this.whiplash.hookOut()) {
+			FirstPersonWeapons.INSTANCE.submitHook(context.poseStack(), context.submitNodeCollector(), camera,
+				LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(hook)));
+		}
+		Vec3 hand = FirstPersonWeapons.INSTANCE.wireStartWorld();
+		UltraModel model = UltraModel.get("whiplash");
+		if (this.whiplash.wireShown && hand != null && model != null) {
+			this.effects.renderWire(context, model.script("hookArm").getAsJsonObject("line"), hand, hook, Whiplash.upVector(minecraft.player), this.whiplash.throwWarp);
+		}
 	}
 }

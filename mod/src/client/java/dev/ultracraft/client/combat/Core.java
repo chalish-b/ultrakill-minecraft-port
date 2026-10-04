@@ -54,6 +54,8 @@ final class Core {
 	private final Vector3f spin;
 	private double age;
 	boolean removed;
+	/** On the Whiplash's hook, which carries it: it doesn't fall or touch anything by itself. */
+	boolean hooked;
 	/** Trail points, newest first. */
 	final Deque<Pellet.TrailPoint> trail = new ArrayDeque<>();
 
@@ -86,6 +88,9 @@ final class Core {
 			this.rotation.premul(new Quaternionf().rotateAxis(angle, new Vector3f(this.spin).normalize()));
 		}
 		this.spin.mul((float)(1 / (1 + ANGULAR_DRAG * dt)));
+		if (this.hooked) {
+			return;
+		}
 		this.velocity = this.velocity.add(0, -GRAVITY * dt, 0);
 		Vec3 next = this.position.add(this.velocity.scale(dt * S * UltraConfig.get().speedScale));
 		LivingEntity enemy = firstEnemy(level, player, next);

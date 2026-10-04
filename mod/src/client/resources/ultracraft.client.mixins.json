@@ -6,6 +6,7 @@
 		"CameraMixin",
 		"FirstPersonHandsMixin",
 		"GameRendererMixin",
+		"KeyboardHandlerMixin",
 		"KeyboardInputMixin",
 		"LivingEntityMixin",
 		"LocalPlayerMixin",

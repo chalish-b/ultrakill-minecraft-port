@@ -1,6 +1,7 @@
 package dev.ultracraft;
 
 import dev.ultracraft.combat.ServerCombat;
+import dev.ultracraft.combat.ServerWhiplash;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
@@ -10,6 +11,8 @@ import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.UltraStatePayload;
 import dev.ultracraft.net.WeaponHitPayload;
+import dev.ultracraft.net.WhiplashBrokenPayload;
+import dev.ultracraft.net.WhiplashPayload;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
@@ -36,12 +39,15 @@ public class Ultracraft implements ModInitializer {
 		PayloadTypeRegistry.serverboundPlay().register(ExplosionHurtPayload.TYPE, ExplosionHurtPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(HitstopPayload.TYPE, HitstopPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(SlamHitPayload.TYPE, SlamHitPayload.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(WhiplashPayload.TYPE, WhiplashPayload.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(PunchResultPayload.TYPE, PunchResultPayload.CODEC);
+		PayloadTypeRegistry.clientboundPlay().register(WhiplashBrokenPayload.TYPE, WhiplashBrokenPayload.CODEC);
 		ServerPlayNetworking.registerGlobalReceiver(UltraStatePayload.TYPE, (payload, context) ->
 			((UltraPlayer)context.player()).ultracraft$setUltraState(payload.active(), payload.crouched())
 		);
 		UltraItems.init();
 		ServerCombat.init();
+		ServerWhiplash.init();
 	}
 
 	public static Identifier id(String path) {

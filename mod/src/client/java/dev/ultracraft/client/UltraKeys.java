@@ -3,6 +3,7 @@ package dev.ultracraft.client;
 import com.mojang.blaze3d.platform.InputConstants;
 import dev.ultracraft.Ultracraft;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
+import java.util.List;
 import net.minecraft.client.KeyMapping;
 
 /**
@@ -19,6 +20,8 @@ public final class UltraKeys {
 	public static final KeyMapping SNEAK = key("sneak", InputConstants.KEY_LALT);
 	public static final KeyMapping PUNCH = key("punch", InputConstants.KEY_F);
 	public static final KeyMapping PUNCH_KNUCKLEBLASTER = key("punch_knuckleblaster", InputConstants.KEY_G);
+	public static final KeyMapping WHIPLASH = key("whiplash", InputConstants.KEY_R);
+	public static final List<KeyMapping> ALL = List.of(TOGGLE, DASH, SLIDE, SNEAK, PUNCH, PUNCH_KNUCKLEBLASTER, WHIPLASH);
 
 	private UltraKeys() {
 	}
@@ -28,11 +31,6 @@ public final class UltraKeys {
 	}
 
 	static void register() {
-		KeyMappingHelper.registerKeyMapping(TOGGLE);
-		KeyMappingHelper.registerKeyMapping(DASH);
-		KeyMappingHelper.registerKeyMapping(SLIDE);
-		KeyMappingHelper.registerKeyMapping(SNEAK);
-		KeyMappingHelper.registerKeyMapping(PUNCH);
-		KeyMappingHelper.registerKeyMapping(PUNCH_KNUCKLEBLASTER);
+		ALL.forEach(KeyMappingHelper::registerKeyMapping);
 	}
 }

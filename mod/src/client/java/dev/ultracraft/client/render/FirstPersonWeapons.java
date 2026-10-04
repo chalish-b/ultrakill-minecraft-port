@@ -29,14 +29,18 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * The first-person viewmodels: the held revolver or shotgun and the current arm (the Feedbacker or the
- * Knuckleblaster), each played by its own Animator. The arm is always there; its idle pose keeps it below the
- * screen until it punches or flips a coin.
+ * The first-person viewmodels: the held revolver or shotgun, the current arm (the Feedbacker or the
+ * Knuckleblaster) and the Whiplash's arm, each played by its own Animator. The arm is always there; its idle pose
+ * keeps it below the screen until it punches or flips a coin. The Whiplash's arm shows from a throw until it has
+ * caught its hook again.
  */
 public final class FirstPersonWeapons {
 	public static final FirstPersonWeapons INSTANCE = new FirstPersonWeapons();
 	/** ULTRAKILL draws weapons with a 90 degree camera and Minecraft draws hands with a 70 degree one. */
 	private static final float FOV_SCALE = (float)(Math.tan(Math.toRadians(35)) / Math.tan(Math.toRadians(45)));
+	/** Minecraft's camera for hands (Camera.BASE_HUD_FOV). */
+	private static final double HUD_FOV = 70;
+	private static final String WHIPLASH = "whiplash";
 	/** Unity's Color.red, Color.yellow and Color.black. */
 	private static final float[] RED = {1, 0, 0, 1};
 	private static final float[] YELLOW = {1, 0.92156863F, 0.015686275F, 1};
@@ -135,6 +139,8 @@ public final class FirstPersonWeapons {
 
 		void armEvent(String function);
 
+		void whiplashEvent(String function);
+
 		void cylinderClicked();
 	}
 
@@ -168,6 +174,8 @@ public final class FirstPersonWeapons {
 	private final RandomSource random = RandomSource.create();
 	private final Map<Weapon, Viewmodel> weapons = new EnumMap<>(Weapon.class);
 	private final Map<FistType, Viewmodel> arms = new EnumMap<>(FistType.class);
+	private @Nullable Viewmodel whiplashModel;
+	private boolean whiplashMissing;
 	/** FistControl's current arm: the only one enabled. */
 	private FistType currentArm = FistType.STANDARD;
 	private @Nullable Weapon held;
@@ -176,6 +184,13 @@ public final class FirstPersonWeapons {
 	/** The arm's parent (FistControl's "Punch"), turned towards what it last hit. */
 	private final Quaternionf armRotation = new Quaternionf();
 	private boolean returnToOrigRot;
+	/** HookArm's model is shown. */
+	private boolean whiplashShown;
+	/** HookArm.hand: where the wire leaves the hand, as HookArm places it. */
+	private final Vector3f wireStart = new Vector3f();
+	/** The hook out of the hand: where it is in the world and which way it points (HookArm.LateUpdate), or null while it's in the hand. */
+	private @Nullable Vec3 hookPoint;
+	private Vec3 hookDirection = new Vec3(0, 0, 1);
 	/** The worn-out chainsaw's shake: where it is from its place, and where it's heading. */
 	private final Vector3f sawShake = new Vector3f();
 	private final Vector3f sawShakeTarget = new Vector3f();
@@ -205,6 +220,20 @@ public final class FirstPersonWeapons {
 		return viewmodel;
 	}
 
+	private @Nullable Viewmodel whiplash() {
+		Viewmodel viewmodel = this.whiplashModel;
+		if (viewmodel == null && !this.whiplashMissing) {
+			viewmodel = Viewmodel.load(WHIPLASH);
+			this.whiplashModel = viewmodel;
+			this.whiplashMissing = viewmodel == null;
+			if (viewmodel != null) {
+				int hand = viewmodel.model.script("hookArm").get("hand").getAsInt();
+				this.wireStart.set(viewmodel.model.rest().px(hand), viewmodel.model.rest().py(hand), viewmodel.model.rest().pz(hand));
+			}
+		}
+		return viewmodel;
+	}
+
 	/** The held weapon's Animator. */
 	public @Nullable Animator animator(Weapon weapon) {
 		Viewmodel viewmodel = weapon(weapon);
@@ -215,6 +244,90 @@ public final class FirstPersonWeapons {
 	public @Nullable Animator armAnimator() {
 		Viewmodel viewmodel = arm();
 		return viewmodel == null ? null : viewmodel.animator;
+	}
+
+	/** HookArm's Animator. */
+	public @Nullable Animator whiplashAnimator() {
+		Viewmodel viewmodel = whiplash();
+		return viewmodel == null ? null : viewmodel.animator;
+	}
+
+	/** HookArm's model.SetActive. */
+	public void showWhiplash(boolean shown) {
+		this.whiplashShown = shown;
+	}
+
+	/** HookArm sets its hand's local position: where the wire leaves the hand. */
+	public void setWireStart(float x, float y, float z) {
+		this.wireStart.set(x, y, z);
+	}
+
+	/** HookArm.LateUpdate: the hook out of the hand, at {@code point} pointing along {@code direction}; null puts it back in the hand. */
+	public void placeHook(@Nullable Vec3 point, Vec3 direction) {
+		this.hookPoint = point;
+		this.hookDirection = direction;
+	}
+
+	/**
+	 * Punch.CancelAttack, and FistControl's rotation reset, as the Whiplash is thrown: the arm's Animator starts over
+	 * and the arm faces ahead again.
+	 */
+	public void cancelPunch() {
+		Animator animator = armAnimator();
+		if (animator != null) {
+			animator.reset();
+		}
+		this.armRotation.identity();
+		this.returnToOrigRot = false;
+	}
+
+	/**
+	 * Where the wire leaves the Whiplash's hand, in the world: the point on the hand as it's drawn, at its depth.
+	 * Viewmodels are drawn through a camera of their own, so this is the world point that shows in the same place.
+	 */
+	public @Nullable Vec3 wireStartWorld() {
+		Viewmodel viewmodel = whiplash();
+		int bone = viewmodel == null ? -1 : viewmodel.model.script("hookArm").get("hand").getAsInt();
+		if (bone < 0) {
+			return null;
+		}
+		Vector3f hand = viewmodel.model.boneMatrices(viewmodel.pose, this.armRotation)[bone].getTranslation(new Vector3f());
+		Camera camera = Minecraft.getInstance().gameRenderer.mainCamera();
+		float spread = (float)(FOV_SCALE * Math.tan(Math.toRadians(camera.getFov() / 2)) / Math.tan(Math.toRadians(HUD_FOV / 2)));
+		hand.mul(spread, spread, 1).mul((float)PlayerShape.BLOCKS_PER_UNIT);
+		Vector3f world = new Quaternionf(camera.rotation()).transform(hand);
+		return camera.position().add(world.x, world.y, world.z);
+	}
+
+	/**
+	 * The hook out of the hand, drawn in the world where HookArm put it (the hand's hook mesh goes where its bone is
+	 * placed, pointing along the throw), lit by where it is.
+	 */
+	public void submitHook(PoseStack poseStack, SubmitNodeCollector collector, Vec3 camera, int light) {
+		Viewmodel viewmodel = whiplash();
+		if (viewmodel == null || !this.whiplashShown || this.hookPoint == null) {
+			return;
+		}
+		JsonObject script = viewmodel.model.script("hookArm");
+		int hook = script.get("hook").getAsInt();
+		String hookModel = script.get("hookModel").getAsString();
+		Matrix4f[] world = viewmodel.model.boneMatrices(viewmodel.pose, this.armRotation);
+		// Transform.up = direction: the rotation from up to it, in Unity's axes; the hook keeps its scale.
+		Vector3f direction = unity(new Vector3f((float)this.hookDirection.x, (float)this.hookDirection.y, (float)this.hookDirection.z));
+		Quaternionf rotation = new Quaternionf().rotationTo(new Vector3f(0, 1, 0), direction);
+		Vector3f scale = world[hook].getScale(new Vector3f());
+		Matrix4f placed = new Matrix4f().scaling(1, 1, -1).rotate(rotation).scale(scale);
+		Matrix4f toPlaced = placed.mul(new Matrix4f(world[hook]).invert());
+		Matrix4f[] moved = new Matrix4f[world.length];
+		for (int i = 0; i < world.length; i++) {
+			moved[i] = new Matrix4f(toPlaced).mul(world[i]);
+		}
+		float units = (float)PlayerShape.BLOCKS_PER_UNIT;
+		poseStack.pushPose();
+		poseStack.translate(this.hookPoint.x - camera.x, this.hookPoint.y - camera.y, this.hookPoint.z - camera.z);
+		poseStack.scale(units, units, units);
+		viewmodel.model.submitObjects(poseStack, collector, light, moved, hookModel::equals);
+		poseStack.popPose();
 	}
 
 	/** A weapon drawn: its object is enabled, so its Animator starts over (the revolver's PickUp). */
@@ -352,6 +465,12 @@ public final class FirstPersonWeapons {
 				events.armEvent(function);
 			});
 		}
+		Viewmodel whiplash = whiplash();
+		if (whiplash != null) {
+			whiplash.update(dt, events::whiplashEvent);
+			int hand = whiplash.model.script("hookArm").get("hand").getAsInt();
+			whiplash.pose.setPosition(hand, this.wireStart.x, this.wireStart.y, this.wireStart.z);
+		}
 		if (this.returnToOrigRot) {
 			Quaternionf identity = new Quaternionf();
 			float angle = RevolverCylinder.angle(this.armRotation, identity);
@@ -421,6 +540,13 @@ public final class FirstPersonWeapons {
 		Viewmodel arm = arm();
 		if (arm != null) {
 			arm.model.submit(poseStack, collector, light, arm.model.boneMatrices(arm.pose, this.armRotation));
+		}
+		Viewmodel whiplash = whiplash();
+		if (whiplash != null && this.whiplashShown) {
+			// The hook is drawn in the world while it's out of the hand.
+			String hookModel = whiplash.model.script("hookArm").get("hookModel").getAsString();
+			whiplash.model.submitObjects(poseStack, collector, light, whiplash.model.boneMatrices(whiplash.pose, this.armRotation),
+				name -> this.hookPoint == null || !name.equals(hookModel));
 		}
 		Viewmodel weapon = this.held == null ? null : weapon(this.held);
 		if (weapon != null && this.held.revolver()) {

@@ -42,6 +42,8 @@ final class Coin {
 	/** The charge hum's pitch rises from nothing to this (SoundPitchDip). */
 	private static final double CHARGE_PITCH = 2;
 	private static final double CHARGE_PITCH_SPEED = 5;
+	/** A punched or bounced coin pops up at this speed (units a second). */
+	private static final double BOUNCE_SPEED = 25;
 
 	Vec3 position;
 	/** Units per second. */
@@ -92,10 +94,22 @@ final class Coin {
 	 * whether it can be punched or split.
 	 */
 	Coin respawn(Vec3 position, float power) {
-		Coin coin = new Coin(position, new Vec3(0, 25, 0), 0, 0, this.sounds);
+		Coin coin = new Coin(position, new Vec3(0, BOUNCE_SPEED, 0), 0, 0, this.sounds);
 		coin.power = power;
 		coin.hitTimes = this.hitTimes;
 		coin.doubled = this.doubled;
+		return coin;
+	}
+
+	/**
+	 * Coin.Bounce, when the Whiplash passes it: a new coin pops up from where this one is and starts over, with its
+	 * power and how often a shot passes on from it. This one is gone.
+	 */
+	Coin bounced() {
+		Coin coin = new Coin(this.position, new Vec3(0, BOUNCE_SPEED, 0), 0, 0, this.sounds);
+		coin.power = this.power;
+		coin.hitTimes = this.hitTimes;
+		remove();
 		return coin;
 	}
 

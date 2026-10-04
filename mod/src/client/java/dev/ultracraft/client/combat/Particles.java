@@ -36,6 +36,8 @@ final class Particles {
 	/** ParticleSystemShapeType's hemispheres. */
 	private static final int HEMISPHERE = 2;
 	private static final int HEMISPHERE_SHELL = 3;
+	/** ParticleSystemShapeType.Circle. */
+	private static final int CIRCLE = 10;
 
 	/** How a particle material blends: Legacy Particles/Multiply (Double) has no counterpart, so it's laid over. */
 	private enum Blend {
@@ -233,6 +235,12 @@ final class Particles {
 				position.set((float)(Math.cos(angle) * r * radius), (float)(Math.sin(angle) * r * radius), 0);
 				double lean = Math.toRadians(shape.get("angle").getAsDouble()) * r;
 				direction.set((float)(Math.cos(angle) * Math.sin(lean)), (float)(Math.sin(angle) * Math.sin(lean)), (float)Math.cos(lean));
+			} else if (type == CIRCLE) {
+				// Circle: anywhere on its disc, flying straight out from its centre across it.
+				double angle = this.random.nextDouble() * Math.PI * 2;
+				double r = Math.sqrt(this.random.nextDouble());
+				direction.set((float)Math.cos(angle), (float)Math.sin(angle), 0);
+				position.set(direction).mul((float)(r * radius));
 			} else {
 				// Sphere: anywhere inside it, flying straight out; a hemisphere keeps the half ahead.
 				Vector3f point;

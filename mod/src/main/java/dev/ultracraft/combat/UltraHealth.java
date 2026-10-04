@@ -15,6 +15,8 @@ public final class UltraHealth {
 	public static final float HP_PER_HEALTH = 5;
 	public static final float MAX_HP = 100;
 	private static final float HARD_DAMAGE_SHARE = 0.35F;
+	private static final float WHIPLASH_HARD_DAMAGE = 66;
+	private static final float WHIPLASH_HARD_DAMAGE_CAP = 50;
 
 	private UltraHealth() {
 	}
@@ -39,6 +41,36 @@ public final class UltraHealth {
 			state.hardDamageCooldown++;
 		}
 		state.hardDamageCooldown += damage / 20;
+	}
+
+	/**
+	 * HookArm while the player pulls or is pulled to an enemy: their empty health turns into hard damage, 66 HP a
+	 * second up to 50, never taking health they have (NewMovement.ForceAntiHP with dontOverwriteHp).
+	 */
+	public static void whiplash(ServerPlayer player, float dt) {
+		State state = state(player);
+		float amount = state.hardDamage + WHIPLASH_HARD_DAMAGE * dt;
+		if (amount > WHIPLASH_HARD_DAMAGE_CAP) {
+			if (state.hardDamage > WHIPLASH_HARD_DAMAGE_CAP) {
+				return;
+			}
+			amount = WHIPLASH_HARD_DAMAGE_CAP;
+		}
+		float hp = hp(player);
+		if (hp > MAX_HP) {
+			return;
+		}
+		amount = Math.clamp(amount, 0, 99);
+		if (hp > MAX_HP - amount) {
+			amount = MAX_HP - hp;
+		}
+		float added = amount - state.hardDamage;
+		state.hardDamage = amount;
+		int difficulty = difficulty(player);
+		if (state.hardDamageCooldown < 1 || difficulty >= UltraDifficulty.VIOLENT && state.hardDamageCooldown < 2) {
+			state.hardDamageCooldown = difficulty < UltraDifficulty.VIOLENT ? 1 : 2;
+		}
+		state.hardDamageCooldown += added < 50 ? added / 20 : 2.5F;
 	}
 
 	/** NewMovement.GetHealth: heals {@code hp} ULTRAKILL HP, up to what hard damage allows. */

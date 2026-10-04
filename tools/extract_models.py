@@ -43,6 +43,7 @@ MODELS = {
     "shotgun_sawed_on": ("Shotgun Saw", "Shotgun", (0, 0, 0)),
     "feedbacker": ("Arm Blue", "Punch", (0, -0.225, 0)),
     "knuckleblaster": ("Arm Red", "Punch", (0, -0.225, 0)),
+    "whiplash": ("Hook Arm", "HookArm", (0, -0.225, 0)),
     "coin": ("Coin", "Coin", None),
     "shotgun_shell": ("ShotgunShell", "ShotgunShell", None),
     "core": ("Grenade", "Grenade", None),
@@ -60,6 +61,8 @@ REFERENCED = {
     "chainsaw_break": ("Shotgun", "Shotgun Saw", "chainsawBreakEffect"),
     "chainsaw_thrown": ("Shotgun", "Shotgun Saw", "chainsaw"),
     "slam_shockwave": ("GroundCheck", "GroundCheck", "shockwave"),
+    "whiplash_clink": ("HookArm", "Hook Arm", "clinkSparks"),
+    "whiplash_clink_object": ("HookArm", "Hook Arm", "clinkObjectSparks"),
 }
 NESTED = {
     "explosion_chunk": ("explosion", "Explosion", "explosionChunk"),
@@ -712,6 +715,16 @@ def export_scripts(exporter, rig, colors, placed):
                 tree = obj.read_typetree()
                 scripts["chainsaw"] = {"damage": tree["damage"], "hitAmount": tree["hitAmount"], "box": box_values(go),
                                        "trail": trail_values(exporter, go), "line": line_values(exporter, go)}
+            elif kind == "HookArm":
+                hook_arm = obj.read()
+                renderer = next(x.component.deref() for x in go.m_Component if x.component.deref().type.name == "LineRenderer")
+                params = renderer.read_typetree()["m_Parameters"]
+                scripts["hookArm"] = {
+                    "line": {**line_values(exporter, go), "textureMode": params["textureMode"], "positions": len(renderer.read_typetree()["m_Positions"])},
+                    "hand": rig.index[hook_arm.hand.path_id],
+                    "hook": rig.index[hook_arm.hook.path_id],
+                    "hookModel": hook_arm.hookModel.deref().read().m_Name,
+                }
             elif kind == "Nail" and obj.read_typetree()["sawblade"]:
                 tree = obj.read_typetree()
                 scripts["sawblade"] = {k: tree[k] for k in ("damage", "hitAmount", "multiHitAmount")}

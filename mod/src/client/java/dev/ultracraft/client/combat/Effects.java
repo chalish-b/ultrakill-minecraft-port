@@ -142,6 +142,8 @@ final class Effects {
 
 	/** The saws' running blade material; and the chainsaw's glint, spinning (its Spin) and shrunk back at the player. */
 	private static final String SAW_BLADE = "ChainsawBladeMotion";
+	/** HookArm's longest wire (units), which its texture's tiling and running go by. */
+	private static final double WIRE_LENGTH = 300;
 	private static final double SAW_GLINT_SPIN = 3600;
 	private static final float SAW_GLINT_SHRUNK = 0.2F;
 
@@ -492,6 +494,69 @@ final class Effects {
 	private static void chainVertex(PoseStack.Pose pose, VertexConsumer buffer, Vec3 at, float[] uv) {
 		buffer.addVertex(pose, (float)at.x, (float)at.y, (float)at.z).setColor(-1).setUv(uv[0], uv[1])
 			.setOverlay(OverlayTexture.NO_OVERLAY).setLight(LightCoordsUtil.FULL_BRIGHT).setNormal(pose, 0, 1, 0);
+	}
+
+	/**
+	 * The Whiplash's wire (HookArm's LineRenderer): its points from the hand to the hook, the ones between wobbling
+	 * along the camera's up while it's thrown, as a strip facing the camera. Its texture repeats a unit at a time,
+	 * stretching and running along as the wire gets longer.
+	 */
+	void renderWire(LevelRenderContext context, JsonObject line, Vec3 hand, Vec3 hook, Vec3 up, double warp) {
+		Minecraft minecraft = Minecraft.getInstance();
+		if (minecraft.level == null) {
+			return;
+		}
+		double s = PlayerShape.BLOCKS_PER_UNIT;
+		Vec3 camera = minecraft.gameRenderer.mainCamera().position();
+		int count = line.get("positions").getAsInt();
+		double width = line.get("width").getAsDouble() * s;
+		Identifier texture = Identifier.parse(line.getAsJsonObject("material").get("texture").getAsString());
+		Vec3[] points = new Vec3[count];
+		for (int i = 0; i < count; i++) {
+			double wobble = i == 0 || i == count - 1 ? 0 : (i % 2 == 0 ? -3 : 3) / (double)i * warp;
+			Vec3 point = i == count - 1 ? hook : hand.lerp(hook, i / (double)count);
+			points[i] = point.add(up.scale(wobble * s));
+		}
+		double length = hand.distanceTo(hook) / s;
+		double share = length / WIRE_LENGTH;
+		double[] u = new double[count];
+		int[] light = new int[count];
+		for (int i = 0; i < count; i++) {
+			u[i] = (i == 0 ? 0 : u[i - 1] + points[i].distanceTo(points[i - 1]) / s * (share + 1)) ;
+			light[i] = LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(points[i]));
+		}
+		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.entityCutout(texture), (pose, buffer) -> {
+			Vec3[] left = new Vec3[count];
+			Vec3[] right = new Vec3[count];
+			for (int i = 0; i < count; i++) {
+				Vec3 at = points[i].subtract(camera);
+				Vec3 tangent = points[Math.min(i + 1, count - 1)].subtract(points[Math.max(i - 1, 0)]);
+				Vec3 side = tangent.cross(at).normalize().scale(width / 2);
+				if (!Double.isFinite(side.x)) {
+					side = Vec3.ZERO;
+				}
+				left[i] = at.add(side);
+				right[i] = at.subtract(side);
+			}
+			for (int i = 0; i + 1 < count; i++) {
+				Vec3[] corners = {left[i], right[i], right[i + 1], left[i + 1]};
+				float u0 = (float)(u[i] - share * 10);
+				float u1 = (float)(u[i + 1] - share * 10);
+				float[][] uvs = {{u0, 0}, {u0, 1}, {u1, 1}, {u1, 0}};
+				int[] lights = {light[i], light[i], light[i + 1], light[i + 1]};
+				for (int k = 0; k < 4; k++) {
+					wireVertex(pose, buffer, corners[k], uvs[k], lights[k]);
+				}
+				for (int k = 3; k >= 0; k--) {
+					wireVertex(pose, buffer, corners[k], uvs[k], lights[k]);
+				}
+			}
+		});
+	}
+
+	private static void wireVertex(PoseStack.Pose pose, VertexConsumer buffer, Vec3 at, float[] uv, int light) {
+		buffer.addVertex(pose, (float)at.x, (float)at.y, (float)at.z).setColor(-1).setUv(uv[0], uv[1])
+			.setOverlay(OverlayTexture.NO_OVERLAY).setLight(light).setNormal(pose, 0, 1, 0);
 	}
 
 	/**

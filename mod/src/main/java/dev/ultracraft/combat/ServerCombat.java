@@ -97,7 +97,7 @@ public final class ServerCombat {
 		ServerTickEvents.END_SERVER_TICK.register(ServerCombat::tick);
 	}
 
-	private static boolean active(ServerPlayer player) {
+	static boolean active(ServerPlayer player) {
 		return ((UltraPlayer)player).ultracraft$isActive() && player.isAlive();
 	}
 
@@ -132,7 +132,7 @@ public final class ServerCombat {
 	 *
 	 * @return the blood it left
 	 */
-	private static Gore damage(ServerPlayer player, LivingEntity target, float damage, boolean head, Vec3 position, boolean tryForExplode, boolean fromExplosion) {
+	static Gore damage(ServerPlayer player, LivingEntity target, float damage, boolean head, Vec3 position, boolean tryForExplode, boolean fromExplosion) {
 		ServerLevel level = player.level();
 		DamageSource source = player.damageSources().playerAttack(player);
 		if (boss(target) && UltraDifficulty.of(level.getDifficulty()) >= UltraDifficulty.BRUTAL) {

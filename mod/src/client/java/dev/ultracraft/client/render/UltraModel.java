@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * A model extracted by tools/extract_models.py: a rig of bones with the prefab's local transforms, and
@@ -187,8 +188,17 @@ public final class UltraModel {
 
 	/** Like {@link #submit(PoseStack, SubmitNodeCollector, int, Matrix4f[])}, leaving out the meshes with these materials. */
 	public void submit(PoseStack poseStack, SubmitNodeCollector collector, int light, Matrix4f[] world, Set<String> exceptMaterials) {
+		submit(poseStack, collector, light, world, part -> !exceptMaterials.contains(part.material));
+	}
+
+	/** Like {@link #submit(PoseStack, SubmitNodeCollector, int, Matrix4f[])}, only the meshes on the objects {@code object} accepts, by name. */
+	public void submitObjects(PoseStack poseStack, SubmitNodeCollector collector, int light, Matrix4f[] world, Predicate<String> object) {
+		submit(poseStack, collector, light, world, part -> object.test(part.object));
+	}
+
+	private void submit(PoseStack poseStack, SubmitNodeCollector collector, int light, Matrix4f[] world, Predicate<Part> drawn) {
 		for (Part part : this.parts) {
-			if (exceptMaterials.contains(part.material)) {
+			if (!drawn.test(part)) {
 				continue;
 			}
 			float[][] skinned = part.skin(world);
@@ -280,7 +290,7 @@ public final class UltraModel {
 	 * tinted by {@code emissiveColor} (ARGB).
 	 */
 	private record Part(
-		String material, JsonObject materialValues, Identifier texture, float[] positions, float[] normals, float[] uvs, int[] indices,
+		String object, String material, JsonObject materialValues, Identifier texture, float[] positions, float[] normals, float[] uvs, int[] indices,
 		int[] joints, Matrix4f[] binds, int influences, int[] jointIndices, float[] jointWeights, @Nullable RenderType emissive, int emissiveColor
 	) {
 		/** Positions and normals in camera space for the given bone matrices. */
@@ -380,6 +390,7 @@ public final class UltraModel {
 					binds[i] = new Matrix4f().set(floats(bindArray.get(i).getAsJsonArray()));
 				}
 				parts.add(new Part(
+					part.get("name").getAsString(),
 					part.get("material").getAsString(),
 					part.has("materialValues") ? part.getAsJsonObject("materialValues") : new JsonObject(),
 					Identifier.parse(part.get("texture").getAsString()),

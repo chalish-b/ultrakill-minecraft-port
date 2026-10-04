@@ -23,6 +23,10 @@ public final class PlayerShape {
 	public static final EntityDimensions CROUCHED = EntityDimensions.scalable(0.6F, (float)(1.25 * BLOCKS_PER_UNIT))
 		.withEyeHeight((float)(1.15 * BLOCKS_PER_UNIT));
 
+	/** NewMovement's transform.position above the feet (units), with the standing and the short collider. */
+	public static final double STANDING_ROOT = 1.5;
+	public static final double CROUCHED_ROOT = 0.375;
+
 	private PlayerShape() {
 	}
 }

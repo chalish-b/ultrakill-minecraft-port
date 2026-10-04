@@ -5,6 +5,7 @@
 	"mixins": [
 		"AbstractArrowAccessor",
 		"AvatarMixin",
+		"EndermanMixin",
 		"FoodDataMixin",
 		"PlayerMixin",
 		"ServerGamePacketListenerImplMixin"

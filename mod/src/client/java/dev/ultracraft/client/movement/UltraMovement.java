@@ -50,9 +50,6 @@ public final class UltraMovement {
 	private static final double SSJ_MAX_FRAMES = 4;
 	private static final double ONE_PHYSICS_FRAME = 0.00800000037997961;
 
-	/** NewMovement's transform.position above the feet, with the standing and the short collider. */
-	private static final double STANDING_ROOT = 1.5;
-	private static final double SHORT_ROOT = 0.375;
 	/** GroundCheck's capsule sits 0.244 units above the feet and reaches 0.276 below them. */
 	private static final double GROUND_CHECK_HEIGHT = 0.244;
 	private static final double GROUND_CHECK_DEPTH = 0.276;
@@ -159,6 +156,15 @@ public final class UltraMovement {
 	private @Nullable PowerSlam powerSlam;
 	private double sinceLastGrounded;
 
+	/** GroundCheck and SlopeCheck forced off (ForceOff): the player counts as in the air. */
+	private boolean groundForcedOff;
+
+	// HookArm
+	/** HookArm.FixedUpdate, run every physics step after NewMovement's, before the body moves. */
+	private @Nullable Runnable hookFixedUpdate;
+	/** HookArm.beingPulled: the Whiplash is pulling the player to an enemy. */
+	private boolean beingPulled;
+
 	// WallCheck
 	private boolean onWall;
 	private Vec3 pointOfCollision = Vec3.ZERO;
@@ -254,6 +260,9 @@ public final class UltraMovement {
 	private void physicsStep() {
 		this.climbCooldown = this.climbCooldown <= 0 ? 0 : this.climbCooldown - DT;
 		fixedUpdate();
+		if (this.hookFixedUpdate != null) {
+			this.hookFixedUpdate.run();
+		}
 		UltraBody.Contact contact = this.body.step(this.player, displacementScale());
 		if (UltraConfig.get().stepMode == UltraConfig.StepMode.ULTRAKILL && contact.hitHorizontally()) {
 			climbStep(contact);
@@ -410,7 +419,11 @@ public final class UltraMovement {
 				}
 			}
 			this.inputDir = U.clampMagnitude(right().scale(this.input.moveX), 1).scale(5);
-			this.body.velocity = slide.add(this.inputDir);
+			if (!this.beingPulled) {
+				this.body.velocity = slide.add(this.inputDir);
+			} else {
+				stopSlide();
+			}
 			return;
 		}
 
@@ -587,6 +600,9 @@ public final class UltraMovement {
 			this.stillHolding = true;
 			this.heavyFall = true;
 			this.slamForce = 1;
+			if (this.beingPulled) {
+				this.slamStorage = true;
+			}
 		}
 	}
 
@@ -688,6 +704,9 @@ public final class UltraMovement {
 	}
 
 	private void startSlide() {
+		if (this.beingPulled) {
+			return;
+		}
 		if (!this.crouching) {
 			setShortCollider(true);
 		}
@@ -708,7 +727,8 @@ public final class UltraMovement {
 		this.velocityAfterSlide = U.normalized(this.dodgeDirection).scale(Math.max(24, this.preDashSpeed.length()));
 	}
 
-	private void jump() {
+	/** NewMovement.Jump. */
+	public void jump() {
 		this.fallTime = 0;
 		this.lastJump = 0;
 		double force = JUMP_POWER * 1500;
@@ -989,13 +1009,13 @@ public final class UltraMovement {
 			this.superJumpChance = 0.1;
 		}
 		this.groundTouching = touching;
-		this.slopeOnGround = groundOverlap(SLOPE_CHECK_DEPTH, SLOPE_CHECK_INSET * S);
+		this.slopeOnGround = !this.groundForcedOff && groundOverlap(SLOPE_CHECK_DEPTH, SLOPE_CHECK_INSET * S);
 		this.canJump = enemyUnderFeet();
 		updateWallCheck();
 	}
 
 	private void groundCheckUpdate(double dt) {
-		this.onGround = this.groundTouching;
+		this.onGround = this.groundTouching && !this.groundForcedOff;
 		if (this.onGround) {
 			this.sinceLastGrounded = 0;
 		}
@@ -1244,7 +1264,7 @@ public final class UltraMovement {
 	}
 
 	private double rootHeight() {
-		return this.shortCollider ? SHORT_ROOT : STANDING_ROOT;
+		return this.shortCollider ? PlayerShape.CROUCHED_ROOT : PlayerShape.STANDING_ROOT;
 	}
 
 	/** NewMovement's transform.position. */
@@ -1278,6 +1298,81 @@ public final class UltraMovement {
 
 	private Level level() {
 		return this.player.level();
+	}
+
+	// ---- for the Whiplash (HookArm) -------------------------------------------------------------
+
+	/** Runs {@code fixedUpdate} every physics step, after NewMovement's own and before the body moves. */
+	public void setHookFixedUpdate(@Nullable Runnable fixedUpdate) {
+		this.hookFixedUpdate = fixedUpdate;
+	}
+
+	/**
+	 * HookArm.ForceGroundCheck and StopForceGroundCheck: the ground and slope checks are forced off, so the player
+	 * counts as in the air; forcing them off ends a slide.
+	 */
+	public void forceGroundOff(boolean off) {
+		if (off == this.groundForcedOff) {
+			return;
+		}
+		this.groundForcedOff = off;
+		if (off) {
+			if (this.sliding) {
+				stopSlide();
+			}
+			this.onGround = false;
+			this.slopeOnGround = false;
+		} else {
+			this.onGround = this.groundTouching;
+		}
+	}
+
+	/** HookArm.beingPulled: while the Whiplash pulls the player, slides end and can't start, and slams keep the pull. */
+	public void setBeingPulled(boolean pulled) {
+		this.beingPulled = pulled;
+	}
+
+	/** GroundCheck.touchingGround: the ground check touches the ground, forced off or not. */
+	public boolean touchingGround() {
+		return this.groundTouching;
+	}
+
+	/** Whether ground is within {@code units} below the ground check. */
+	public boolean groundBelow(double units) {
+		return raycast(groundCheckPosition(), G, units) >= 0;
+	}
+
+	/** NewMovement.boost: dashing or sliding. */
+	public boolean boosting() {
+		return this.boost;
+	}
+
+	public boolean sliding() {
+		return this.sliding;
+	}
+
+	public boolean jumping() {
+		return this.jumping;
+	}
+
+	/** Whether jump was pressed this frame. */
+	public boolean jumpPressed() {
+		return this.input.jumpPressed;
+	}
+
+	/** Sets the player's velocity, in units per second. */
+	public void setVelocity(Vec3 velocity) {
+		this.body.velocity = velocity;
+	}
+
+	/** ForceMode.VelocityChange: added to the player's velocity in the next physics step. */
+	public void addVelocityChange(Vec3 change) {
+		this.body.addVelocityChange(change);
+	}
+
+	/** Rigidbody.MovePosition: moves NewMovement's transform.position to {@code root} (blocks), as far as walls allow. */
+	public void movePosition(Vec3 root) {
+		this.player.move(MoverType.SELF, root.subtract(root()));
 	}
 
 	// ---- for the camera, HUD and controller ----------------------------------------------------
