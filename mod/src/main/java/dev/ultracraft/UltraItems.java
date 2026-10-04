@@ -19,11 +19,14 @@ public final class UltraItems {
 	public static final Item SHOTGUN_CORE_EJECT = register("shotgun_core_eject");
 	public static final Item SHOTGUN_PUMP_CHARGE = register("shotgun_pump_charge");
 	public static final Item SHOTGUN_SAWED_ON = register("shotgun_sawed_on");
+	public static final Item RAILCANNON_ELECTRIC = register("railcannon_electric");
+	public static final Item RAILCANNON_MALICIOUS = register("railcannon_malicious");
 
 	/** Variants in the order the slot key cycles through them. */
 	private static final List<List<Item>> VARIANTS = List.of(
 		List.of(REVOLVER_PIERCER, REVOLVER_MARKSMAN, REVOLVER_SHARPSHOOTER),
-		List.of(SHOTGUN_CORE_EJECT, SHOTGUN_PUMP_CHARGE, SHOTGUN_SAWED_ON)
+		List.of(SHOTGUN_CORE_EJECT, SHOTGUN_PUMP_CHARGE, SHOTGUN_SAWED_ON),
+		List.of(RAILCANNON_ELECTRIC, RAILCANNON_MALICIOUS)
 	);
 
 	private UltraItems() {
@@ -42,6 +45,8 @@ public final class UltraItems {
 			output.accept(SHOTGUN_CORE_EJECT);
 			output.accept(SHOTGUN_PUMP_CHARGE);
 			output.accept(SHOTGUN_SAWED_ON);
+			output.accept(RAILCANNON_ELECTRIC);
+			output.accept(RAILCANNON_MALICIOUS);
 		});
 	}
 

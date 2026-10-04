@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.Set;
 
 /** What a hitscan ray passes through, nearest first, up to the block that stops it. */
@@ -101,8 +102,63 @@ final class Hitscan {
 		return hits;
 	}
 
+	/**
+	 * A sphere of {@code radius} swept from {@code from} to {@code to} (Physics.SphereCastAll): the entities, coins
+	 * and cores it touches, nearest first, each where the sphere first reaches it. Blocks don't stop it.
+	 */
+	static List<Hit> sweep(Level level, Entity shooter, Vec3 from, Vec3 to, double radius, List<Coin> coins, List<Core> cores) {
+		Vec3 direction = to.subtract(from).normalize();
+		double length = from.distanceTo(to);
+		List<Hit> hits = new ArrayList<>();
+		for (Entity entity : level.getEntities(shooter, new AABB(from, to).inflate(radius + 1), e -> e instanceof LivingEntity living && living.isAlive() && !e.isSpectator())) {
+			AABB box = entity.getBoundingBox().inflate(entity.getPickRadius());
+			AABB reach = box.inflate(radius);
+			Optional<Vec3> entry = reach.contains(from) ? Optional.of(from) : reach.clip(from, to);
+			if (entry.isEmpty()) {
+				continue;
+			}
+			double distance = entry.get().distanceTo(from);
+			Vec3 along = from.add(direction.scale(distance));
+			Vec3 point = new Vec3(Math.clamp(along.x, box.minX, box.maxX), Math.clamp(along.y, box.minY, box.maxY), Math.clamp(along.z, box.minZ, box.maxZ));
+			hits.add(new Hit(Kind.ENTITY, point, distance, (LivingEntity)entity, null, null, isHead(entity, point), null, null));
+		}
+		for (Coin coin : coins) {
+			if (!coin.hittable()) {
+				continue;
+			}
+			sphereEntry(from, direction, length, coin.position, radius + Coin.HIT_RADIUS).ifPresent(at ->
+				hits.add(new Hit(Kind.COIN, from.add(direction.scale(at)), at, null, coin, null, false, null, null))
+			);
+		}
+		for (Core core : cores) {
+			if (core.removed) {
+				continue;
+			}
+			sphereEntry(from, direction, length, core.position, radius + Core.HIT_RADIUS).ifPresent(at ->
+				hits.add(new Hit(Kind.CORE, from.add(direction.scale(at)), at, null, null, core, false, null, null))
+			);
+		}
+		hits.sort(Comparator.comparingDouble(Hit::distance));
+		return hits;
+	}
+
+	/** How far along a ray of {@code length} it first comes within {@code reach} of {@code center}, if it does. */
+	private static OptionalDouble sphereEntry(Vec3 from, Vec3 direction, double length, Vec3 center, double reach) {
+		Vec3 offset = center.subtract(from);
+		double along = offset.dot(direction);
+		double off = offset.subtract(direction.scale(along)).length();
+		if (off > reach) {
+			return OptionalDouble.empty();
+		}
+		double entry = along - Math.sqrt(reach * reach - off * off);
+		if (entry < 0 && offset.length() > reach || entry > length) {
+			return OptionalDouble.empty();
+		}
+		return OptionalDouble.of(Math.max(entry, 0));
+	}
+
 	/** Level.clip, passing through the {@code broken} blocks. */
-	private static BlockHitResult clip(Level level, Entity shooter, Vec3 from, Vec3 to, Set<BlockPos> broken) {
+	static BlockHitResult clip(Level level, Entity shooter, Vec3 from, Vec3 to, Set<BlockPos> broken) {
 		ClipContext context = new ClipContext(from, to, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, shooter);
 		if (broken.isEmpty()) {
 			return level.clip(context);

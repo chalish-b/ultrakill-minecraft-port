@@ -1434,6 +1434,16 @@ public final class UltraMovement {
 		return this.camera.fovMultiplier();
 	}
 
+	/** CameraController.Zoom: the view narrows to {@code share} of the player's field of view; 0 stops zooming. */
+	public void zoom(double share) {
+		this.camera.zoom(share);
+	}
+
+	/** How much slower the view turns while zooming. */
+	public double lookScale() {
+		return this.camera.lookScale();
+	}
+
 	/** Stamina, 0 to 300: each dash costs 100. */
 	public double stamina() {
 		return this.boostCharge;

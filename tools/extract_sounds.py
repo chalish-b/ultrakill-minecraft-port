@@ -42,17 +42,18 @@ class Extractor:
         self.files = {}
         self.events = {}
 
-    def clip(self, pptr, mono=False):
+    def clip(self, pptr, mono=False, speed=1.0):
         """Exports an AudioClip once and returns its sound name. Minecraft only places and fades mono sounds, so
-        a sound that comes from somewhere in the world is mixed down to one channel."""
+        a sound that comes from somewhere in the world is mixed down to one channel. `speed` plays it that much
+        faster and higher, for pitches above Minecraft's highest (2)."""
         clip = pptr.deref().read()
-        name = file_name(clip.m_Name) + ("_mono" if mono else "")
+        name = file_name(clip.m_Name) + ("_mono" if mono else "") + (f"_x{file_name(str(speed))}" if speed != 1 else "")
         if name not in self.files:
             data, rate = soundfile.read(io.BytesIO(next(iter(clip.samples.values()))))
             if mono and data.ndim > 1:
                 data = data.mean(axis=1)
             ogg = OUT / "sounds" / f"{name}.ogg"
-            soundfile.write(ogg, data, rate, format="OGG", subtype="VORBIS")
+            soundfile.write(ogg, data, round(rate * speed), format="OGG", subtype="VORBIS")
             self.files[name] = ogg
         return f"{NAMESPACE}:{name}"
 
@@ -64,6 +65,13 @@ class Extractor:
 
     def add_source(self, event, source):
         self.add_clip(event, source.m_audioClip, source.m_Volume, source.m_Pitch)
+
+    def add_source_baked(self, event, source):
+        """Like add_source, with a pitch above Minecraft's highest baked into the sound."""
+        if source.m_Pitch > 2:
+            self.event(event, [sound(self.clip(source.m_audioClip, speed=source.m_Pitch), source.m_Volume)])
+        else:
+            self.add_source(event, source)
 
 
 def sound(name, volume=1.0, pitch=1.0):
@@ -286,6 +294,8 @@ def combat(env, x):
     x.add_clip("whiplash_throw_loop", hook.throwLoop, arm_volume)
     x.add_clip("whiplash_pull_loop", hook.pullLoop, arm_volume)
 
+    railcannon(env, x)
+
     ground = next(g for g in (o.read() for o in env.objects if o.type.name == "MonoBehaviour" and script_class(o) == "GroundCheck") if g.shockwave.path_id)
     shockwave = next(m for m in components(ground.shockwave.deref().read(), "MonoBehaviour") if hasattr(m, "soundEffect"))
     x.add_source("slam_shockwave", next(components(shockwave.soundEffect.deref().read(), "AudioSource")))
@@ -297,6 +307,42 @@ def combat(env, x):
     parry = time_controller.parryLight.deref().read()
     x.add_source("parry", named_source(parry, "Audio Source"))
     x.add_source("parry_ricochet", named_source(parry, parry.m_Name))
+
+
+def railcannon(env, x):
+    """Each railcannon's shot (its fireSound's sources, in order), the hum while it's fully charged (Malicious's
+    pitch is set by its code), and each charge pip's hum and click, by charge level (RailCannonPip); the
+    Malicious beam's explosion; and the full charge sound (WeaponCharges)."""
+    for variant, go_name in [("electric", "Railcannon Electric"), ("malicious", "Railcannon Malicious")]:
+        gun = find_class(env, "Railcannon", go_name)
+        for i, source in enumerate(audio_sources(gun.fireSound.deref().read())):
+            x.add_source_baked(f"railcannon_fire.{variant}.{i}", source)
+        hum = next(components(gun.fullCharge.deref().read(), "AudioSource"))
+        if variant == "malicious":
+            x.add_clip(f"railcannon_full.{variant}", hum.m_audioClip, hum.m_Volume)
+        else:
+            x.add_source(f"railcannon_full.{variant}", hum)
+
+        def pips(go):
+            for c in go.m_Component:
+                obj = c.component.deref()
+                if obj.type.name == "MonoBehaviour" and script_class(obj) == "RailCannonPip":
+                    level = int(obj.read_typetree()["chargeLevel"])
+                    for source in audio_sources(go):
+                        kind = "idle" if source.Loop else "click"
+                        x.add_source_baked(f"railcannon_pip_{kind}.{variant}.{level}", source)
+            for child_go in children(go):
+                pips(child_go)
+        pips(gun.m_GameObject.read())
+    # The Malicious railcannon's explosion: its RandomPitch plays it at half pitch, a fifth of that either way;
+    # the half is baked in, below Minecraft's lowest (0.5).
+    malicious = find_class(env, "Railcannon", "Railcannon Malicious")
+    beam = next(s for s in components(malicious.beam.deref().read(), "MonoBehaviour") if hasattr(s, "hitParticle"))
+    explosion = next(components(beam.hitParticle.deref().read(), "AudioSource"))
+    x.event("explosion_malicious_railcannon", [sound(x.clip(explosion.m_audioClip, speed=0.5), explosion.m_Volume)])
+    charges = next(o.read() for o in env.objects if o.type.name == "MonoBehaviour" and script_class(o) == "WeaponCharges"
+                   and o.read().railCannonFullChargeSound.path_id)
+    x.add_source("railcannon_full_charge", next(components(charges.railCannonFullChargeSound.deref().read(), "AudioSource")))
 
 
 def main():

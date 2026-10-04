@@ -229,6 +229,7 @@ final class Revolver {
 	/** One frame of weapon input: Fire1 is attack, Fire2 is use. */
 	static final class Input {
 		boolean fire1Held;
+		boolean fire1Pressed;
 		boolean fire2Held;
 		boolean fire2Pressed;
 		boolean fire2Released;

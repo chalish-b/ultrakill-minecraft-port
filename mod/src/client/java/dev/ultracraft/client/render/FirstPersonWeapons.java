@@ -29,15 +29,15 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * The first-person viewmodels: the held revolver or shotgun, the current arm (the Feedbacker or the
+ * The first-person viewmodels: the held revolver, shotgun or railcannon, the current arm (the Feedbacker or the
  * Knuckleblaster) and the Whiplash's arm, each played by its own Animator. The arm is always there; its idle pose
  * keeps it below the screen until it punches or flips a coin. The Whiplash's arm shows from a throw until it has
  * caught its hook again.
  */
 public final class FirstPersonWeapons {
 	public static final FirstPersonWeapons INSTANCE = new FirstPersonWeapons();
-	/** ULTRAKILL draws weapons with a 90 degree camera and Minecraft draws hands with a 70 degree one. */
-	private static final float FOV_SCALE = (float)(Math.tan(Math.toRadians(35)) / Math.tan(Math.toRadians(45)));
+	/** ULTRAKILL draws weapons with a camera of its own (the HUD camera), 90 degrees unless zoomed. */
+	private static final double WEAPON_FOV = 90;
 	/** Minecraft's camera for hands (Camera.BASE_HUD_FOV). */
 	private static final double HUD_FOV = 70;
 	private static final String WHIPLASH = "whiplash";
@@ -65,7 +65,9 @@ public final class FirstPersonWeapons {
 		REVOLVER_SHARPSHOOTER("revolver_sharpshooter"),
 		SHOTGUN_CORE_EJECT("shotgun_core_eject"),
 		SHOTGUN_PUMP_CHARGE("shotgun_pump_charge"),
-		SHOTGUN_SAWED_ON("shotgun_sawed_on");
+		SHOTGUN_SAWED_ON("shotgun_sawed_on"),
+		RAILCANNON_ELECTRIC("railcannon_electric"),
+		RAILCANNON_MALICIOUS("railcannon_malicious");
 
 		final String model;
 
@@ -75,6 +77,10 @@ public final class FirstPersonWeapons {
 
 		boolean revolver() {
 			return this.model.startsWith("revolver_");
+		}
+
+		boolean railcannon() {
+			return this.model.startsWith("railcannon_");
 		}
 	}
 
@@ -144,12 +150,61 @@ public final class FirstPersonWeapons {
 		void cylinderClicked();
 	}
 
+	/**
+	 * A railcannon's charge pip (RailCannonPip): pushed out of place while the charge is below its level, and
+	 * spinning in place once it's reached.
+	 */
+	private static final class Pip {
+		/** It spins this many degrees a second about its own up axis. */
+		private static final float SPIN = -2400;
+		/** It moves towards where it's going by this share of the way, every second. */
+		private static final float EASE = 50;
+
+		final int bone;
+		final double chargeLevel;
+		final Vector3f origPos;
+		final Vector3f targetPos;
+		final Quaternionf origRot;
+		final Vector3f pos;
+		final Quaternionf rot;
+
+		Pip(JsonObject pip, Pose rest) {
+			this.bone = pip.get("bone").getAsInt();
+			this.chargeLevel = pip.get("chargeLevel").getAsDouble();
+			JsonArray push = pip.getAsJsonArray("pushAmount");
+			this.origPos = new Vector3f(rest.px(this.bone), rest.py(this.bone), rest.pz(this.bone));
+			this.targetPos = new Vector3f(push.get(0).getAsFloat(), push.get(1).getAsFloat(), push.get(2).getAsFloat()).mul(0.01F).add(this.origPos);
+			this.origRot = new Quaternionf(rest.qx(this.bone), rest.qy(this.bone), rest.qz(this.bone), rest.qw(this.bone));
+			this.pos = new Vector3f(this.origPos);
+			this.rot = new Quaternionf(this.origRot);
+		}
+
+		/** RailCannonPip.LateUpdate, then onto the pose. */
+		void update(double dt, double charge, Pose pose) {
+			boolean charged = charge >= this.chargeLevel;
+			Vector3f target = charged ? this.origPos : this.targetPos;
+			Vector3f toward = new Vector3f(target).sub(this.pos);
+			float step = (float)(toward.length() * EASE * dt);
+			this.pos.set(toward.length() <= step ? target : this.pos.add(toward.normalize(step)));
+			if (charged) {
+				this.rot.rotateY((float)Math.toRadians(SPIN * dt));
+			} else {
+				this.rot.set(this.origRot);
+			}
+			pose.setPosition(this.bone, this.pos.x, this.pos.y, this.pos.z);
+			pose.setRotation(this.bone, this.rot.x, this.rot.y, this.rot.z, this.rot.w);
+		}
+	}
+
 	/** A model with the Animator that plays it, and the ports of the scripts that draw on it. */
 	private static final class Viewmodel {
 		final UltraModel model;
 		final Animator animator;
 		final Pose pose;
 		final @Nullable RevolverCylinder cylinder;
+		final List<Pip> pips = new ArrayList<>();
+		/** A railcannon's FullCharge particle systems, which only run at full charge. */
+		final List<ViewmodelParticles> fullChargeParticles = new ArrayList<>();
 
 		Viewmodel(UltraModel model, Animator animator) {
 			this.model = model;
@@ -157,6 +212,22 @@ public final class FirstPersonWeapons {
 			this.pose = model.rest().copy();
 			JsonObject cylinder = model.script("cylinder");
 			this.cylinder = cylinder == null ? null : new RevolverCylinder(cylinder, model.rest());
+			for (JsonElement pip : model.scripts("railcannonPips")) {
+				this.pips.add(new Pip(pip.getAsJsonObject(), model.rest()));
+			}
+			JsonObject railcannon = model.script("railcannon");
+			if (railcannon != null) {
+				int fullCharge = railcannon.get("fullCharge").getAsInt();
+				for (JsonElement system : model.particles()) {
+					int bone = system.getAsJsonObject().get("bone").getAsInt();
+					while (bone >= 0 && bone != fullCharge) {
+						bone = model.parent(bone);
+					}
+					if (bone == fullCharge) {
+						this.fullChargeParticles.add(new ViewmodelParticles(system.getAsJsonObject()));
+					}
+				}
+			}
 		}
 
 		static @Nullable Viewmodel load(String name) {
@@ -194,6 +265,11 @@ public final class FirstPersonWeapons {
 	/** The worn-out chainsaw's shake: where it is from its place, and where it's heading. */
 	private final Vector3f sawShake = new Vector3f();
 	private final Vector3f sawShakeTarget = new Vector3f();
+	/** The railcannons' charge, 0 to 5 (WeaponCharges.raicharge). */
+	private double railcannonCharge = 5;
+	/** The HUD camera's field of view (degrees), and whether a zoom narrows it (CameraController.Zoom). */
+	private double weaponFov = WEAPON_FOV;
+	private boolean zooming;
 
 	private FirstPersonWeapons() {
 	}
@@ -291,11 +367,15 @@ public final class FirstPersonWeapons {
 		if (bone < 0) {
 			return null;
 		}
-		Vector3f hand = viewmodel.model.boneMatrices(viewmodel.pose, this.armRotation)[bone].getTranslation(new Vector3f());
+		return drawnAt(viewmodel.model.boneMatrices(viewmodel.pose, this.armRotation)[bone].getTranslation(new Vector3f()));
+	}
+
+	/** The world point that shows where a point of a viewmodel (camera space, units) is drawn, at its depth. */
+	private Vec3 drawnAt(Vector3f point) {
 		Camera camera = Minecraft.getInstance().gameRenderer.mainCamera();
-		float spread = (float)(FOV_SCALE * Math.tan(Math.toRadians(camera.getFov() / 2)) / Math.tan(Math.toRadians(HUD_FOV / 2)));
-		hand.mul(spread, spread, 1).mul((float)PlayerShape.BLOCKS_PER_UNIT);
-		Vector3f world = new Quaternionf(camera.rotation()).transform(hand);
+		float spread = (float)(fovScale() * Math.tan(Math.toRadians(camera.getFov() / 2)) / Math.tan(Math.toRadians(HUD_FOV / 2)));
+		point.mul(spread, spread, 1).mul((float)PlayerShape.BLOCKS_PER_UNIT);
+		Vector3f world = new Quaternionf(camera.rotation()).transform(point);
 		return camera.position().add(world.x, world.y, world.z);
 	}
 
@@ -335,6 +415,10 @@ public final class FirstPersonWeapons {
 		Animator animator = animator(weapon);
 		if (animator != null) {
 			animator.reset();
+		}
+		Viewmodel viewmodel = weapon(weapon);
+		if (viewmodel != null) {
+			viewmodel.fullChargeParticles.forEach(ViewmodelParticles::stop);
 		}
 	}
 
@@ -434,24 +518,50 @@ public final class FirstPersonWeapons {
 		new Matrix3f(x, y, z).getNormalizedRotation(out);
 	}
 
+	/** How much bigger the HUD camera draws the viewmodels than Minecraft's hand camera would. */
+	private float fovScale() {
+		return (float)(Math.tan(Math.toRadians(HUD_FOV / 2)) / Math.tan(Math.toRadians(this.weaponFov / 2)));
+	}
+
+	/** CameraController.Zoom and StopZoom: the HUD camera narrows to half the player's field of view. */
+	public void zoom(boolean zooming) {
+		this.zooming = zooming;
+	}
+
 	/**
 	 * Runs the held weapon's and the arm's Animators, and the scripts that move them after.
+	 *
+	 * @param railcannonCharge the railcannons' charge, 0 to 5
 	 */
-	public void update(double dt, @Nullable Weapon held, RevolverState state, ShotgunState shotgun, Events events) {
+	public void update(double dt, @Nullable Weapon held, RevolverState state, ShotgunState shotgun, double railcannonCharge, Events events) {
 		this.held = held;
 		this.state = state;
 		this.shotgun = shotgun;
+		this.railcannonCharge = railcannonCharge;
+		double fovTarget = this.zooming ? Minecraft.getInstance().options.fov().get() / 2.0 : WEAPON_FOV;
+		double fovStep = 300 * dt;
+		this.weaponFov = Math.abs(fovTarget - this.weaponFov) <= fovStep ? fovTarget : this.weaponFov + Math.signum(fovTarget - this.weaponFov) * fovStep;
 		if (held != null) {
 			Viewmodel weapon = weapon(held);
 			if (weapon != null) {
 				if (held.revolver()) {
 					weapon.animator.setBool("Spinning", state.spinning());
 					weapon.animator.setFloat("TwirlSpeed", (float)state.twirlSpeed());
-				} else {
+				} else if (!held.railcannon()) {
 					weapon.animator.setBool("Sawing", shotgun.saw().sawing());
 				}
 				weapon.update(dt, function -> events.weaponEvent(held, function));
 				twirl(weapon, state.twirlAngle());
+				for (Pip pip : weapon.pips) {
+					pip.update(dt, railcannonCharge, weapon.pose);
+				}
+				for (ViewmodelParticles system : weapon.fullChargeParticles) {
+					if (railcannonCharge >= 5) {
+						system.update(dt);
+					} else {
+						system.stop();
+					}
+				}
 				shakeSaw(dt, weapon, shotgun.saw().broken());
 				if (weapon.cylinder != null && weapon.cylinder.update(dt, state.cylinderSpin(), weapon.pose)) {
 					events.cylinderClicked();
@@ -536,7 +646,7 @@ public final class FirstPersonWeapons {
 	 */
 	public boolean submit(PoseStack poseStack, SubmitNodeCollector collector, int light) {
 		poseStack.pushPose();
-		poseStack.scale(FOV_SCALE, FOV_SCALE, 1);
+		poseStack.scale(fovScale(), fovScale(), 1);
 		Viewmodel arm = arm();
 		if (arm != null) {
 			arm.model.submit(poseStack, collector, light, arm.model.boneMatrices(arm.pose, this.armRotation));
@@ -551,6 +661,8 @@ public final class FirstPersonWeapons {
 		Viewmodel weapon = this.held == null ? null : weapon(this.held);
 		if (weapon != null && this.held.revolver()) {
 			submitRevolver(poseStack, collector, light, weapon);
+		} else if (weapon != null && this.held.railcannon()) {
+			submitRailcannon(poseStack, collector, light, weapon);
 		} else if (weapon != null) {
 			submitShotgun(poseStack, collector, light, weapon);
 		}
@@ -593,6 +705,70 @@ public final class FirstPersonWeapons {
 			}
 		}
 		poseStack.popPose();
+	}
+
+	/**
+	 * The railcannon (Railcannon.SetMaterialIntensity): recharging, its body glows by the charge and each pip lights
+	 * up in turn; fully charged, everything glows, the gun trembles, and its FullCharge sprite and arcs show, in
+	 * the variant's color.
+	 */
+	private void submitRailcannon(PoseStack poseStack, SubmitNodeCollector collector, int light, Viewmodel weapon) {
+		JsonObject script = weapon.model.script("railcannon");
+		if (script == null) {
+			return;
+		}
+		double charge = this.railcannonCharge;
+		boolean full = charge >= 5;
+		poseStack.pushPose();
+		if (full) {
+			float jitter = 0.005F;
+			poseStack.translate(this.random.nextFloat() * 2 * jitter - jitter, this.random.nextFloat() * 2 * jitter - jitter, this.random.nextFloat() * 2 * jitter - jitter);
+		}
+		float[] color = variationColor(script);
+		String body = script.get("body").getAsString();
+		List<String> pips = new ArrayList<>();
+		for (JsonElement pip : script.getAsJsonArray("pips")) {
+			pips.add(pip.getAsString());
+		}
+		Matrix4f[] world = weapon.model.boneMatrices(weapon.pose, new Quaternionf());
+		weapon.model.submitGlowing(poseStack, collector, light, world, object -> {
+			double intensity;
+			if (full) {
+				intensity = 1;
+			} else if (object.equals(body)) {
+				intensity = charge / 5;
+			} else if (pips.contains(object)) {
+				int i = pips.indexOf(object);
+				intensity = charge > i + 1 ? 1 : Math.max(0, (charge - i) % 1);
+			} else {
+				return null;
+			}
+			float glow = (float)intensity;
+			return 0xFF000000 | channel(color[0] * glow) << 16 | channel(color[1] * glow) << 8 | channel(color[2] * glow);
+		});
+		if (full) {
+			int fullCharge = script.get("fullCharge").getAsInt();
+			for (UltraModel.Sprite sprite : weapon.model.sprites()) {
+				if (weapon.model.parent(sprite.bone()) == fullCharge) {
+					ModelOverlays.sprite(poseStack, collector, RenderTypes.text(sprite.texture()), world[sprite.bone()], sprite.rect(), sprite.color());
+				}
+			}
+			for (ViewmodelParticles system : weapon.fullChargeParticles) {
+				system.submit(poseStack, collector, world[system.bone], color);
+			}
+		}
+		poseStack.popPose();
+	}
+
+	/** Where the railcannon's Shootpoint shows in the world, as it's posed now. */
+	public @Nullable Vec3 railcannonShootPoint(Weapon weapon) {
+		Viewmodel viewmodel = weapon(weapon);
+		JsonObject script = viewmodel == null ? null : viewmodel.model.script("railcannon");
+		if (script == null) {
+			return null;
+		}
+		Matrix4f matrix = viewmodel.model.boneMatrices(viewmodel.pose, new Quaternionf())[script.get("shootPoint").getAsInt()];
+		return drawnAt(matrix.getTranslation(new Vector3f()));
 	}
 
 	/** Shotgun.UpdateMeter's color. */

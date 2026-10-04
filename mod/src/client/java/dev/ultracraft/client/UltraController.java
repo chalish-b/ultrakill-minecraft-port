@@ -170,4 +170,9 @@ public final class UltraController {
 	public float fovMultiplier() {
 		return this.movement != null ? (float)this.movement.fovMultiplier() : 1;
 	}
+
+	/** How much slower the view turns, while a zoom narrows it. */
+	public double lookScale() {
+		return this.movement != null ? this.movement.lookScale() : 1;
+	}
 }

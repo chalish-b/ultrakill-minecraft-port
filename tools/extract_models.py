@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import UnityPy
 from UnityPy.helpers.MeshHelper import MeshHandler
+from UnityPy.helpers.ResourceReader import get_resource_data
 
 sys.path.insert(0, str(Path(__file__).parent))
 from ultrakill_paths import BUNDLES, REPO  # noqa: E402
@@ -41,6 +42,8 @@ MODELS = {
     "shotgun_core_eject": ("Shotgun Grenade", "Shotgun", (0, 0, 0)),
     "shotgun_pump_charge": ("Shotgun Pump", "Shotgun", (0, 0, 0)),
     "shotgun_sawed_on": ("Shotgun Saw", "Shotgun", (0, 0, 0)),
+    "railcannon_electric": ("Railcannon Electric", "Railcannon", (0, 0, 0)),
+    "railcannon_malicious": ("Railcannon Malicious", "Railcannon", (0, 0, 0)),
     "feedbacker": ("Arm Blue", "Punch", (0, -0.225, 0)),
     "knuckleblaster": ("Arm Red", "Punch", (0, -0.225, 0)),
     "whiplash": ("Hook Arm", "HookArm", (0, -0.225, 0)),
@@ -63,11 +66,14 @@ REFERENCED = {
     "slam_shockwave": ("GroundCheck", "GroundCheck", "shockwave"),
     "whiplash_clink": ("HookArm", "Hook Arm", "clinkSparks"),
     "whiplash_clink_object": ("HookArm", "Hook Arm", "clinkObjectSparks"),
+    "railcannon_beam": ("Railcannon", "Railcannon Electric", "beam"),
+    "railcannon_beam_malicious": ("Railcannon", "Railcannon Malicious", "beam"),
 }
 NESTED = {
     "explosion_chunk": ("explosion", "Explosion", "explosionChunk"),
     "chainsaw_ricochet": ("chainsaw_thrown", "Chainsaw", "ricochetEffect"),
     "chainsaw_sawblade": ("chainsaw_thrown", "Chainsaw", "sawbladeVersion"),
+    "explosion_malicious_railcannon": ("railcannon_beam_malicious", "RevolverBeam", "hitParticle"),
 }
 
 # AnimatorControllerParameterType and AnimatorConditionMode values.
@@ -248,13 +254,16 @@ def particle_values(system):
     main, emission, shape = t["InitialModule"], t["EmissionModule"], t["ShapeModule"]
     values = {
         "duration": t["lengthInSec"], "looping": bool(t["looping"]), "scalingMode": t["scalingMode"],
+        "simulationSpace": t["moveWithTransform"],
         "lifetime": curve_value(main["startLifetime"]), "speed": curve_value(main["startSpeed"]),
         "size": curve_value(main["startSize"]), "color": color_value(main["startColor"]),
         "gravity": curve_value(main["gravityModifier"]), "rotation": curve_value(main["startRotation"]),
         "rate": curve_value(emission["rateOverTime"]),
         "bursts": [[b["time"], curve_value(b["countCurve"])] for b in emission["m_Bursts"]],
         "shape": {"type": shape["type"], "radius": shape["radius"]["value"], "angle": shape["angle"],
-                  "thickness": shape["radiusThickness"]} if shape["enabled"] else None,
+                  "thickness": shape["radiusThickness"],
+                  **{key: [shape[field]["x"], shape[field]["y"], shape[field]["z"]] for key, field in
+                     (("position", "m_Position"), ("rotation", "m_Rotation"), ("scale", "m_Scale"))}} if shape["enabled"] else None,
     }
     if t["SizeModule"]["enabled"]:
         values["sizeOverLifetime"] = curve_value(t["SizeModule"]["curve"])
@@ -268,6 +277,21 @@ def particle_values(system):
                            "sizeAffectsWidth": bool(trail["sizeAffectsWidth"]),
                            "inheritParticleColor": bool(trail["inheritParticleColor"])}
     return values
+
+
+def animated_texture(exporter, go):
+    """The object's AnimatedTexture, if it swaps its renderer's texture between an array's slices by itself:
+    the slices, how often it swaps, and whether to a random one."""
+    for c in go.m_Component:
+        obj = c.component.deref()
+        if obj.type.name == "MonoBehaviour" and script_name(obj) == "AnimatedTexture":
+            script = obj.read()
+            tree = obj.read_typetree()
+            if tree["manualTrigger"] or not script.arrayTex.path_id or tree["textureType"] != 0:
+                return {}
+            return {"animatedTexture": {"frames": exporter.texture_array(script.arrayTex), "delay": tree["delay"],
+                                        "randomFrame": bool(tree["randomFrame"])}}
+    return {}
 
 
 def texture_name(material):
@@ -294,6 +318,31 @@ class Exporter:
             tex.image.save(path)
             self.textures[name] = path
         return f"{NAMESPACE}:textures/viewmodel/{name}.png", name
+
+    def texture_array(self, pptr):
+        """Each slice of an uncompressed RGBA Texture2DArray, as its own texture."""
+        array = pptr.deref()
+        tree = array.read_typetree()
+        name = file_name(tree["m_Name"])
+        width, height, depth = tree["m_Width"], tree["m_Height"], tree["m_Depth"]
+        data = array.read().image_data
+        if not data:
+            stream = tree["m_StreamData"]
+            data = get_resource_data(stream["path"], array.assets_file, stream["offset"], stream["size"])
+        if len(data) != width * height * 4 * depth:
+            sys.exit(f"{tree['m_Name']}: not an uncompressed RGBA array")
+        from PIL import Image
+        names = []
+        for i in range(depth):
+            frame = f"{name}_{i}"
+            if frame not in self.textures:
+                path = OUT / "textures" / "viewmodel" / f"{frame}.png"
+                size = width * height * 4
+                # Unity stores rows bottom up.
+                Image.frombytes("RGBA", (width, height), bytes(data[i * size:(i + 1) * size])).transpose(Image.FLIP_TOP_BOTTOM).save(path)
+                self.textures[frame] = path
+            names.append(f"{NAMESPACE}:textures/viewmodel/{frame}.png")
+        return names
 
     def sprite(self, pptr):
         """A Sprite's own pixels (cut out of its texture), as a texture."""
@@ -415,6 +464,7 @@ def export_parts(exporter, rig, glow_colors):
                     "materials": exporter.particle_materials(r),
                     "renderMode": obj.read_typetree()["m_RenderMode"],
                     **particle_values(system),
+                    **animated_texture(exporter, go),
                 })
                 continue
             if kind == "SkinnedMeshRenderer":
@@ -671,6 +721,40 @@ def line_values(exporter, go):
     return {"width": params["widthMultiplier"] * params["widthCurve"]["m_Curve"][0]["value"], "material": renderer_material(exporter, renderer.read())}
 
 
+def beam_lines(exporter, go):
+    """A beam's LineRenderers: its own, then the ones under it that copy its points and width (CopyLineRenderer),
+    each with its width, its colors along the beam, how its texture runs along it and its material."""
+    lines = []
+
+    def add(renderer, components):
+        tree = renderer.read_typetree()
+        params = tree["m_Parameters"]
+        scale = params["textureScale"]
+        line = {"width": params["widthMultiplier"] * params["widthCurve"]["m_Curve"][0]["value"],
+                "color": gradient_value(params["colorGradient"]), "textureMode": params["textureMode"],
+                "textureScale": [scale["x"], scale["y"]], "material": renderer_material(exporter, renderer.read())}
+        electricity = next((c for c in components if c.type.name == "MonoBehaviour" and script_name(c) == "ElectricityLine"), None)
+        if electricity is not None:
+            values = electricity.read_typetree()
+            line["electricity"] = {"frames": exporter.texture_array(electricity.read().electricityArray),
+                                   "colors": gradient_value(values["colors"]),
+                                   **{k: values[k] for k in ("minWidth", "maxWidth", "fadeSpeed")}}
+        lines.append(line)
+
+    def walk(transform, root):
+        child = transform.m_GameObject.read()
+        components = [c.component.deref() for c in child.m_Component]
+        renderer = next((c for c in components if c.type.name == "LineRenderer"), None)
+        copies = any(c.type.name == "MonoBehaviour" and script_name(c) == "CopyLineRenderer" for c in components)
+        if renderer is not None and (root or copies):
+            add(renderer, components)
+        for c in transform.m_Children:
+            walk(c.deref().read(), False)
+
+    walk(transform_of(go), True)
+    return lines
+
+
 def go_name_of(component_pptr):
     """The name of the GameObject a referenced component sits on, or None."""
     return component_pptr.deref().read().m_GameObject.read().m_Name if component_pptr.path_id else None
@@ -711,6 +795,28 @@ def export_scripts(exporter, rig, colors, placed):
                 shotgun = obj.read()
                 if shotgun.sawZone.path_id:
                     scripts["shotgun"].update(chainsaw_values(exporter, rig, shotgun))
+            elif kind == "Railcannon":
+                railcannon = obj.read()
+                tree = obj.read_typetree()
+                scripts["railcannon"] = {
+                    "variation": tree["variation"],
+                    "variationColor": list(colors[tree["variation"]]),
+                    "body": go_name_of(railcannon.body),
+                    "pips": [go_name_of(p) for p in railcannon.pips],
+                    "fullCharge": rig.index[transform_of(railcannon.fullCharge.deref().read()).object_reader.path_id],
+                    "shootPoint": rig.index[railcannon.shootPoint.path_id],
+                }
+            elif kind == "RailCannonPip":
+                tree = obj.read_typetree()
+                push = tree["pushAmount"]
+                scripts.setdefault("railcannonPips", []).append({
+                    "bone": rig.index[transform_of(go).object_reader.path_id],
+                    "chargeLevel": tree["chargeLevel"],
+                    "pushAmount": [push["x"], push["y"], push["z"]],
+                })
+            elif kind == "RevolverBeam" and active:
+                tree = obj.read_typetree()
+                scripts["beam"] = {**{k: tree[k] for k in ("damage", "hitAmount", "maxHitsPerTarget")}, "lines": beam_lines(exporter, go)}
             elif kind == "Chainsaw":
                 tree = obj.read_typetree()
                 scripts["chainsaw"] = {"damage": tree["damage"], "hitAmount": tree["hitAmount"], "box": box_values(go),

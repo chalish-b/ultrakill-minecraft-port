@@ -46,10 +46,12 @@ import net.minecraft.world.entity.projectile.Projectile;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.VoxelShape;
 import org.joml.Matrix3f;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
@@ -60,6 +62,7 @@ import org.jspecify.annotations.Nullable;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -70,11 +73,12 @@ import java.util.function.UnaryOperator;
 
 /**
  * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the shotgun's pellets, the
- * arms' punches (and boosting pellets with them) and the Knuckleblaster's blast, the Whiplash, explosions, weapon
- * charges (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the server, which applies them.
+ * railcannon's beams, the arms' punches (and boosting pellets with them) and the Knuckleblaster's blast, the
+ * Whiplash, explosions, weapon charges (WeaponCharges) and the hitstops after a parry or a punch. Hits go to the
+ * server, which applies them.
  */
-public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events, Explosion.Hits, SawZone.Hits,
-	ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits {
+public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Railcannon.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events, Explosion.Hits,
+	SawZone.Hits, ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
@@ -151,6 +155,19 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	private static final double SAW_PUNCH_BOX = 0.3 * S;
 	/** A Feedbacker punch sends on punchable sawblades within a sphere this big, this far ahead. */
 	private static final double SAWBLADE_PUNCH_RADIUS = 3 * S;
+	/**
+	 * "Railcannon Beam" (RevolverBeam): a 1.2 unit sphere swept along the shot, hitting every enemy in its way up
+	 * to 4 times for 2 each. Each hit stops time for a moment (TimeController.HitStop), and the beam goes on to
+	 * the next a moment later, sooner past an enemy that's dead.
+	 */
+	private static final double RAIL_RADIUS = 1.2 * S;
+	private static final float RAIL_DAMAGE = 2;
+	private static final int RAIL_HITS = 4;
+	private static final double RAIL_HITSTOP = 0.05;
+	private static final double RAIL_STEP = 0.025;
+	private static final double RAIL_STEP_DEAD = 0.01;
+	/** The Electric railcannon's beam bores through the blocks it breaks, up to this far past the first one it meets. */
+	private static final double RAIL_TUNNEL_DEPTH = 12;
 
 	private final UltraSounds sounds = new UltraSounds();
 	private final Effects effects = new Effects();
@@ -170,6 +187,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	private final Set<Integer> slammed = new HashSet<>();
 	private final List<Sawblade> sawblades = new ArrayList<>();
 	private final Whiplash whiplash = new Whiplash(this.sounds, this);
+	private final Railcannon railcannon = new Railcannon(this.sounds);
+	/** Railcannon beams still working their way through what they hit. */
+	private final List<RailShot> railShots = new ArrayList<>();
 	/** The Feedbacker's punch is still active and hasn't punched a chainsaw yet. */
 	private boolean sawPunchPending;
 	/** The chainsaw idling on the gun, and grinding a wall. */
@@ -181,6 +201,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	/** Since the grinding chainsaw last hit the wall; below 0 while not grinding. */
 	private double sinceSawWallHit = -1;
 	private FirstPersonWeapons.@Nullable Weapon held;
+	private boolean wasFire1;
 	private boolean wasFire2;
 	private double coinCharge = 400;
 	private int readyCoins = 4;
@@ -244,6 +265,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			this.shockwaves.clear();
 			this.slammed.clear();
 			this.whiplash.cancel();
+			this.railShots.forEach(shot -> this.effects.fade(shot.beam));
+			this.railShots.clear();
 			return;
 		}
 		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
@@ -273,7 +296,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			this.sounds.play("sharpshooter_ready", 1, 1 + (shots - 1) / 2F);
 		}
 		this.readyShots = shots;
+		this.railcannon.recharge(dt);
 		updateRicochets(dt, minecraft.level, player);
+		updateRailShots(dt, minecraft.level, player);
 		this.punchStamina = Math.min(this.punchStamina + 1.25 * dt, 2);
 		this.fistCooldown = Math.max(this.fistCooldown - 2 * dt, 0);
 		if (this.punchActiveLeft > 0) {
@@ -350,6 +375,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			if (shotgun != null) {
 				shotgun.update(dt, this.input, this);
 			}
+			if (railcannonVariant(this.held) != null) {
+				this.railcannon.update(dt, this.input, this);
+			}
 			saw(dt, minecraft.level, player, shotgun);
 			slam(minecraft.level, player);
 		} else {
@@ -379,7 +407,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			: new FirstPersonWeapons.ShotgunState(shotgun.heat(), shotgun.meter(), shotgun.tint(), shotgun.reddening(), shotgun.jitter(), new FirstPersonWeapons.SawState(
 				shotgun.variant == Shotgun.Variant.SAWED_ON && shotgun.sawAttached(), shotgun.sawing(), shotgun.sawBroken(), shotgun.bladeScroll()
 			));
-		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, this);
+		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, this.railcannon.charge(), this);
 	}
 
 	private void updateHeld(FirstPersonWeapons.@Nullable Weapon weapon) {
@@ -394,7 +422,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		if (shotgun != null) {
 			shotgun.holster();
 		}
+		if (railcannonVariant(this.held) != null) {
+			this.railcannon.holster(this);
+		}
 		this.held = weapon;
+		this.wasFire1 = true;
 		this.wasFire2 = false;
 		if (weapon != null) {
 			revolver = revolver(weapon);
@@ -404,6 +436,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			shotgun = shotgun(weapon);
 			if (shotgun != null) {
 				shotgun.equip();
+			}
+			Railcannon.Variant variant = railcannonVariant(weapon);
+			if (variant != null) {
+				this.railcannon.equip(variant);
 			}
 			FirstPersonWeapons.INSTANCE.equip(weapon);
 		}
@@ -534,7 +570,41 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		if (stack.is(UltraItems.SHOTGUN_PUMP_CHARGE)) {
 			return FirstPersonWeapons.Weapon.SHOTGUN_PUMP_CHARGE;
 		}
+		if (stack.is(UltraItems.RAILCANNON_ELECTRIC)) {
+			return FirstPersonWeapons.Weapon.RAILCANNON_ELECTRIC;
+		}
+		if (stack.is(UltraItems.RAILCANNON_MALICIOUS)) {
+			return FirstPersonWeapons.Weapon.RAILCANNON_MALICIOUS;
+		}
 		return stack.is(UltraItems.SHOTGUN_SAWED_ON) ? FirstPersonWeapons.Weapon.SHOTGUN_SAWED_ON : null;
+	}
+
+	private static Railcannon.@Nullable Variant railcannonVariant(FirstPersonWeapons.@Nullable Weapon weapon) {
+		if (weapon == null) {
+			return null;
+		}
+		return switch (weapon) {
+			case RAILCANNON_ELECTRIC -> Railcannon.Variant.ELECTRIC;
+			case RAILCANNON_MALICIOUS -> Railcannon.Variant.MALICIOUS;
+			default -> null;
+		};
+	}
+
+	private static FirstPersonWeapons.Weapon weapon(Railcannon.Variant variant) {
+		return switch (variant) {
+			case ELECTRIC -> FirstPersonWeapons.Weapon.RAILCANNON_ELECTRIC;
+			case MALICIOUS -> FirstPersonWeapons.Weapon.RAILCANNON_MALICIOUS;
+		};
+	}
+
+	/** Whether the stack is one of the railcannons, which show their shared charge as a cooldown. */
+	public static boolean isRailcannon(ItemStack stack) {
+		return stack.is(UltraItems.RAILCANNON_ELECTRIC) || stack.is(UltraItems.RAILCANNON_MALICIOUS);
+	}
+
+	/** The railcannons' cooldown as the hotbar shows it: 1 just after a shot, 0 once fully charged. */
+	public double railcannonCooldown() {
+		return this.railcannon.cooldown();
 	}
 
 	/** Whether the held item is an ULTRAKILL weapon in use, so attacking and using belong to it. */
@@ -552,8 +622,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	}
 
 	private void sampleInput(Options options) {
+		boolean fire1 = options.keyAttack.isDown();
 		boolean fire2 = options.keyUse.isDown();
-		this.input.fire1Held = options.keyAttack.isDown();
+		this.input.fire1Held = fire1;
+		this.input.fire1Pressed = fire1 && !this.wasFire1;
+		this.wasFire1 = fire1;
 		this.input.fire2Held = fire2;
 		this.input.fire2Pressed = fire2 && !this.wasFire2;
 		this.input.fire2Released = !fire2 && this.wasFire2;
@@ -855,6 +928,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		float pitch = coin.power > 2 ? 1 + (coin.power - 2) / 5 : 1;
 		this.sounds.play("coin_hit", 1, pitch);
 		this.sounds.play("coin_hit_flip", 1, 1);
+		if (coin.beam == Effects.BeamStyle.RAILCANNON || coin.beam == Effects.BeamStyle.MALICIOUS) {
+			railPassOn(coin, level, player);
+			return;
+		}
 
 		Coin next = this.coins.stream()
 			.filter(c -> c != coin && c.hittable() && Hitscan.clear(level, player, coin.position, c.position))
@@ -991,6 +1068,322 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			.orElse(null);
 	}
 
+	// ---- railcannon ----------------------------------------------------------------------------
+
+	/**
+	 * Railcannon.Shoot: the variant's beam out of the camera along the aim, drawn from the gun's Shootpoint with its
+	 * muzzle flash there; its fire sound, its Shoot animation and a camera shake.
+	 */
+	@Override
+	public void fireRailcannon(Railcannon.Variant variant) {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (player == null || minecraft.level == null || movement == null) {
+			return;
+		}
+		FirstPersonWeapons.Weapon weapon = weapon(variant);
+		// The fire sound prefab's sources (the Malicious railcannon's has three).
+		for (int i = 0; i < 3; i++) {
+			this.sounds.play("railcannon_fire." + variant.sounds + "." + i, 1, 1);
+		}
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon);
+		if (animator != null) {
+			animator.setTrigger("Shoot");
+		}
+		movement.shake(2);
+		Vec3 eye = movement.eyePosition();
+		Vec3 look = player.getLookAngle();
+		Vec3 shootPoint = FirstPersonWeapons.INSTANCE.railcannonShootPoint(weapon);
+		Vec3 drawFrom = shootPoint != null ? shootPoint : eye;
+		Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
+		if (variant == Railcannon.Variant.ELECTRIC) {
+			this.effects.beamFlash(drawFrom, camera, Effects.BeamStyle.RAILCANNON);
+			electricBeam(minecraft.level, player, eye, look, drawFrom, RAIL_DAMAGE, Float.NaN, new HashSet<>());
+		} else {
+			this.effects.beamFlash(drawFrom, camera, Effects.BeamStyle.MALICIOUS);
+			maliciousBeam(minecraft.level, player, eye, look, drawFrom, 0, Float.NaN, new HashSet<>());
+		}
+	}
+
+	@Override
+	public void zoom(double share) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (movement != null) {
+			movement.zoom(share);
+		}
+		FirstPersonWeapons.INSTANCE.zoom(share > 0);
+	}
+
+	/**
+	 * The Electric railcannon's beam ("Railcannon Beam", a piercing RevolverBeam): it bores through the blocks it
+	 * breaks, and sweeps up everything in its way to the block that stops it, or to a coin, which fires it on. Its
+	 * hits then land one after another, nearest first, and it stays at full width until they're done.
+	 *
+	 * @param damage each hit's, a block's being all four hits'
+	 * @param coinPower the power a coin it hits takes, or NaN for the coin to keep its own
+	 * @param chainHits the enemies coins have already sent this beam at
+	 */
+	private void electricBeam(Level level, LocalPlayer player, Vec3 from, Vec3 direction, Vec3 drawFrom, float damage, float coinPower, Set<Integer> chainHits) {
+		Tunnel tunnel = tunnel(level, player, from, direction, damage * RAIL_HITS);
+		List<Hitscan.Hit> hits = new ArrayList<>(tunnel.blocks());
+		for (Hitscan.Hit hit : Hitscan.sweep(level, player, from, tunnel.end(), RAIL_RADIUS, this.coins, this.cores)) {
+			for (int i = 0; i < (hit.kind() == Hitscan.Kind.ENTITY ? RAIL_HITS : 1); i++) {
+				hits.add(hit);
+			}
+		}
+		hits.sort(Comparator.comparingDouble(Hitscan.Hit::distance));
+		Vec3 end = tunnel.end();
+		for (int i = 0; i < hits.size(); i++) {
+			if (hits.get(i).kind() == Hitscan.Kind.COIN) {
+				end = hits.get(i).coin().position;
+				hits = hits.subList(0, i + 1);
+				break;
+			}
+		}
+		RailShot shot = new RailShot(hits, this.effects.heldBeam(drawFrom, end, Effects.BeamStyle.RAILCANNON), damage, coinPower, chainHits);
+		this.railShots.add(shot);
+		advance(shot, level, player);
+	}
+
+	/**
+	 * The blocks a railcannon beam bores through and the one that stops it, nearest first, and where it ends. Along
+	 * its middle it goes through each block its damage breaks, up to {@link #RAIL_TUNNEL_DEPTH} past the first
+	 * block it meets, and stops at the next. Over that depth, every block within its radius is hit too.
+	 */
+	private record Tunnel(List<Hitscan.Hit> blocks, Vec3 end) {
+	}
+
+	private static Tunnel tunnel(Level level, LocalPlayer player, Vec3 from, Vec3 direction, float damage) {
+		Vec3 to = from.add(direction.scale(RANGE));
+		Set<BlockPos> bored = new HashSet<>();
+		List<Hitscan.Hit> blocks = new ArrayList<>();
+		double first = -1;
+		Vec3 end = to;
+		while (true) {
+			BlockHitResult hit = Hitscan.clip(level, player, from, to, bored);
+			if (hit.getType() == HitResult.Type.MISS) {
+				break;
+			}
+			double distance = hit.getLocation().distanceTo(from);
+			if (first < 0) {
+				first = distance;
+			}
+			BlockPos pos = hit.getBlockPos();
+			if (distance - first <= RAIL_TUNNEL_DEPTH && BlockDamage.breaksInOneHit(level, pos, damage)) {
+				bored.add(pos);
+				blocks.add(new Hitscan.Hit(Hitscan.Kind.BLOCK, hit.getLocation(), distance, null, null, null, false, null, pos));
+				continue;
+			}
+			end = hit.getLocation();
+			bored.add(pos);
+			blocks.add(new Hitscan.Hit(Hitscan.Kind.BLOCK, end, distance, null, null, null, false, hit.getDirection(), pos));
+			break;
+		}
+		if (first >= 0) {
+			Vec3 start = from.add(direction.scale(first));
+			Vec3 last = from.add(direction.scale(Math.min(end.distanceTo(from), first + RAIL_TUNNEL_DEPTH)));
+			AABB area = new AABB(start, last).inflate(RAIL_RADIUS);
+			for (BlockPos pos : BlockPos.betweenClosed(BlockPos.containing(area.minX, area.minY, area.minZ), BlockPos.containing(area.maxX, area.maxY, area.maxZ))) {
+				if (bored.contains(pos)) {
+					continue;
+				}
+				BlockState state = level.getBlockState(pos);
+				if (state.isAir()) {
+					continue;
+				}
+				VoxelShape shape = state.getCollisionShape(level, pos);
+				if (shape.isEmpty()) {
+					continue;
+				}
+				AABB box = shape.bounds().move(pos);
+				if (nearSegment(box, start, last, RAIL_RADIUS)) {
+					Vec3 center = box.getCenter();
+					blocks.add(new Hitscan.Hit(Hitscan.Kind.BLOCK, center, center.subtract(from).dot(direction), null, null, null, false, null, pos.immutable()));
+				}
+			}
+		}
+		return new Tunnel(blocks, end);
+	}
+
+	/** A railcannon beam working its way through its hits (RevolverBeam.PiercingShotCheck). */
+	private static final class RailShot {
+		final List<Hitscan.Hit> hits;
+		final Effects.Beam beam;
+		final float damage;
+		final float coinPower;
+		final Set<Integer> chainHits;
+		/** Each enemy's health when the beam first reached it, and the health the beam has taken from it since. */
+		final Map<Integer, Float> health = new HashMap<>();
+		final Map<Integer, Float> taken = new HashMap<>();
+		int next;
+		double wait;
+		boolean done;
+
+		RailShot(List<Hitscan.Hit> hits, Effects.Beam beam, float damage, float coinPower, Set<Integer> chainHits) {
+			this.hits = hits;
+			this.beam = beam;
+			this.damage = damage;
+			this.coinPower = coinPower;
+			this.chainHits = chainHits;
+		}
+	}
+
+	private void updateRailShots(double dt, Level level, LocalPlayer player) {
+		for (RailShot shot : List.copyOf(this.railShots)) {
+			shot.wait -= dt;
+			advance(shot, level, player);
+		}
+		this.railShots.removeIf(shot -> shot.done);
+	}
+
+	/** Lands the shot's hits that are due, until one stops time; once they're all in, the beam fades. */
+	private void advance(RailShot shot, Level level, LocalPlayer player) {
+		while (shot.wait <= 0 && shot.next < shot.hits.size() && this.hitstopLeft <= 0) {
+			shot.wait += railHit(shot, shot.hits.get(shot.next++), level, player);
+		}
+		if (shot.next >= shot.hits.size() && !shot.done) {
+			shot.done = true;
+			this.effects.fade(shot.beam);
+		}
+	}
+
+	/** One of a railcannon beam's hits, and how long until the next. */
+	private double railHit(RailShot shot, Hitscan.Hit hit, Level level, LocalPlayer player) {
+		switch (hit.kind()) {
+			case ENTITY -> {
+				LivingEntity target = hit.entity();
+				int id = target.getId();
+				float health = shot.health.computeIfAbsent(id, i -> target.getHealth() + target.getAbsorptionAmount());
+				float taken = shot.taken.getOrDefault(id, 0F);
+				if (taken >= health) {
+					// Most likely dead already: the server only applies the hit if it isn't.
+					ClientPlayNetworking.send(new WeaponHitPayload(id, shot.damage, hit.head(), hit.position()));
+					return RAIL_STEP_DEAD;
+				}
+				shot.taken.put(id, taken + shot.damage * ServerCombat.HEALTH_PER_DAMAGE);
+				damage(level, target, shot.damage, hit.head(), hit.position());
+				this.hitstopLeft = Math.max(this.hitstopLeft, RAIL_HITSTOP);
+				ClientPlayNetworking.send(new HitstopPayload((int)(RAIL_HITSTOP * 1000)));
+				UltraMovement movement = UltraController.INSTANCE.movement();
+				if (movement != null) {
+					movement.shake(1);
+				}
+				return RAIL_STEP;
+			}
+			case COIN -> hit.coin().hit(Float.isNaN(shot.coinPower) ? hit.coin().power : shot.coinPower, shot.chainHits, Effects.BeamStyle.RAILCANNON);
+			case CORE -> coreShot(hit.core());
+			case BLOCK -> {
+				if (hit.face() != null) {
+					this.effects.impact(level, hit.position());
+				}
+				hitBlock(hit.block(), shot.damage * RAIL_HITS);
+			}
+			default -> {
+			}
+		}
+		return 0;
+	}
+
+	/**
+	 * The Malicious railcannon's beam ("Railcannon Beam Malicious", a RevolverBeam with one hit): a 0.4 unit sphere
+	 * along the aim stops at the first enemy, coin or core in its way, else at the wall, and its hit particle, an
+	 * explosion, goes off there. A coin fires it on instead. A core goes off as a super explosion twice as big that
+	 * ultraboosts the player, and the beam's own explosion then spares the player.
+	 *
+	 * @param added damage coins have added to the beam, which its explosion gets 20 times over
+	 */
+	private void maliciousBeam(Level level, LocalPlayer player, Vec3 from, Vec3 direction, Vec3 drawFrom, float added, float coinPower, Set<Integer> chainHits) {
+		Hitscan.Hit wall = Hitscan.cast(level, player, from, direction, RANGE, List.of()).getLast();
+		List<Hitscan.Hit> hits = Hitscan.sweep(level, player, from, wall.position(), MALICIOUS_RADIUS, this.coins, this.cores);
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (movement != null) {
+			movement.shake(2);
+		}
+		Hitscan.Hit hit = hits.isEmpty() ? wall : hits.getFirst();
+		this.effects.beam(drawFrom, hit.position(), Effects.BeamStyle.MALICIOUS);
+		Vec3 back = direction.scale(-1);
+		switch (hit.kind()) {
+			case COIN -> hit.coin().hit(Float.isNaN(coinPower) ? hit.coin().power : coinPower, chainHits, Effects.BeamStyle.MALICIOUS);
+			case ENTITY -> {
+				damage(level, hit.entity(), RAIL_DAMAGE + added, hit.head(), hit.position());
+				if (movement != null) {
+					movement.shake(0.5);
+				}
+				maliciousExplosion(hit.position(), back, added, false);
+			}
+			case CORE -> {
+				coreNuke(hit.core());
+				maliciousExplosion(hit.position(), back, added, true);
+			}
+			case BLOCK -> {
+				this.effects.impact(level, hit.position());
+				hitBlock(hit.block(), RAIL_DAMAGE + added);
+				maliciousExplosion(hit.position(), hit.face() != null ? hit.face().getUnitVec3() : back, added, false);
+			}
+			default -> {
+			}
+		}
+	}
+
+	private void maliciousExplosion(Vec3 at, Vec3 facing, float added, boolean sparesPlayer) {
+		explode(EXPLOSION_MALICIOUS, at, facing, false, MALICIOUS_BLOCK_POWER, settings -> {
+			Explosion.Settings set = settings.withAddedDamage(added);
+			return sparesPlayer ? set.enemiesOnly() : set;
+		}, MALICIOUS_PITCH);
+	}
+
+	/** RevolverBeam's Malicious railcannon beam on a core: the parry flash, and a super explosion twice as big that ultraboosts. */
+	private void coreNuke(Core core) {
+		if (core.removed) {
+			return;
+		}
+		parryFlash();
+		ClientPlayNetworking.send(new HitstopPayload((int)(PARRY_HITSTOP * 1000)));
+		core.removed = true;
+		explode(EXPLOSION_SUPER, core.position, null, false, SUPER_BLOCK_POWER, settings -> settings.ultraboosted(CORE_NUKE_SIZE));
+	}
+
+	/**
+	 * Coin.ReflectRevolver with a railcannon's beam: the coin fires the beam again, at the nearest coin it can see,
+	 * else a core, else the nearest enemy's head, else anywhere. Going on to anything but a coin, it hits harder by a
+	 * quarter of the coin's power.
+	 */
+	private void railPassOn(Coin coin, Level level, LocalPlayer player) {
+		Coin next = this.coins.stream()
+			.filter(c -> c != coin && c.hittable() && Hitscan.clear(level, player, coin.position, c.position))
+			.min(Comparator.comparingDouble(c -> c.position.distanceToSqr(coin.position)))
+			.orElse(null);
+		Vec3 target = null;
+		float added = coin.power / 4;
+		if (next != null) {
+			target = next.position;
+			added = 0;
+		} else {
+			Core core = this.cores.stream()
+				.filter(c -> !c.removed && c.position.distanceTo(player.position()) < CORE_TARGET_RANGE && Hitscan.clear(level, player, coin.position, c.position))
+				.min(Comparator.comparingDouble(c -> c.position.distanceToSqr(coin.position)))
+				.orElse(null);
+			if (core != null) {
+				target = core.position;
+			} else {
+				LivingEntity enemy = coinTarget(coin, level, player);
+				if (enemy != null) {
+					coin.chainHits.add(enemy.getId());
+					target = enemy.getEyePosition();
+				}
+			}
+		}
+		Vec3 direction = target != null
+			? target.subtract(coin.position).normalize()
+			: new Vec3(this.random.nextGaussian(), this.random.nextGaussian(), this.random.nextGaussian()).normalize();
+		if (coin.beam == Effects.BeamStyle.RAILCANNON) {
+			electricBeam(level, player, coin.position, direction, coin.position, RAIL_DAMAGE + added, coin.power + 1, coin.chainHits);
+		} else {
+			maliciousBeam(level, player, coin.position, direction, coin.position, added, coin.power + 1, coin.chainHits);
+		}
+	}
+
 	// ---- arms ----------------------------------------------------------------------------------
 
 	/** FistControl.ForceArm, then Punch.PunchStart. */
@@ -1122,7 +1515,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 		ClientPlayNetworking.send(new ExplosionHitPayload(object.getId(), 0, velocity));
 	}
 
-	/** Explosion.Collide on the player: it launches them, and hurts them unless they're dashing. */
+	/**
+	 * Explosion.Collide on the player: it launches them (an ultrabooster twice within 12 units), and hurts them
+	 * unless they're dashing.
+	 */
 	@Override
 	public void player(Explosion explosion) {
 		UltraMovement movement = UltraController.INSTANCE.movement();
@@ -1130,10 +1526,15 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			return;
 		}
 		Explosion.Settings settings = explosion.settings;
+		double distance = movement.rootPosition().distanceTo(explosion.origin) / S;
 		movement.explosionLaunch(explosion.origin, settings.pushForceMultiplier(), settings.maxSize(), settings.rocketExplosion(), explosion.boosted, explosion.harmful());
+		if (settings.ultrabooster() && distance < 12 && !explosion.boosted) {
+			movement.explosionLaunch(explosion.origin, settings.pushForceMultiplier(), settings.maxSize(), settings.rocketExplosion(), false, explosion.harmful());
+		}
 		if (explosion.harmful() && !movement.invincible()) {
-			movement.hurtByExplosion(explosion.playerDamage());
-			ClientPlayNetworking.send(new ExplosionHurtPayload(explosion.playerDamage()));
+			int damage = explosion.playerDamage(distance);
+			movement.hurtByExplosion(damage);
+			ClientPlayNetworking.send(new ExplosionHurtPayload(damage));
 		}
 	}
 
@@ -1925,6 +2326,14 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	static final String EXPLOSION = "explosion";
 	/** "Explosion Super": a core shot with a revolver. */
 	static final String EXPLOSION_SUPER = "explosion_super";
+	/** "Explosion Malicious Railcannon": where the Malicious railcannon's beam hit. */
+	static final String EXPLOSION_MALICIOUS = "explosion_malicious_railcannon";
+	/** Its RandomPitch: half pitch (baked into its sound), a fifth of that either way. */
+	private static final float[] MALICIOUS_PITCH = {0.8F, 1.2F};
+	/** A core the Malicious railcannon shoots goes off this many times as big. */
+	private static final double CORE_NUKE_SIZE = 2;
+	/** RevolverBeam sweeps a single-target beam, as the Malicious railcannon's is, with a sphere this big. */
+	private static final double MALICIOUS_RADIUS = 0.4 * S;
 	/**
 	 * The powers of the Minecraft explosions that break blocks for each of the player's: a ghast's fireball is 1,
 	 * a creeper 3 and TNT 4.
@@ -1933,6 +2342,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 	private static final float CORE_BLOCK_POWER = 2;
 	private static final float OVERPUMP_BLOCK_POWER = 3;
 	private static final float SUPER_BLOCK_POWER = 4;
+	private static final float MALICIOUS_BLOCK_POWER = 3.5F;
+	/** An explosion's RandomPitch: up to a quarter either way. */
+	private static final float[] EXPLOSION_PITCH = {0.75F, 1.25F};
 
 	/**
 	 * An explosion prefab where something blew up, facing the way it was going (or the world's way): its
@@ -1945,6 +2357,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 
 	/** An explosion prefab whose Explosions the weapon setting it off changes first. */
 	private void explode(String prefab, Vec3 at, @Nullable Vec3 facing, boolean boosted, float blockPower, UnaryOperator<Explosion.Settings> setUp) {
+		explode(prefab, at, facing, boosted, blockPower, setUp, EXPLOSION_PITCH);
+	}
+
+	/** Like {@link #explode(String, Vec3, Vec3, boolean, float, UnaryOperator)}, its sound's pitch picked from {@code pitch}'s range. */
+	private void explode(String prefab, Vec3 at, @Nullable Vec3 facing, boolean boosted, float blockPower, UnaryOperator<Explosion.Settings> setUp, float[] pitch) {
 		UltraModel model = UltraModel.get(prefab);
 		if (model == null) {
 			return;
@@ -1967,8 +2384,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Pe
 			}
 			movement.shake(shake);
 		}
-		// The explosion's RandomPitch: up to a quarter either way.
-		this.sounds.play(prefab, 1, this.sounds.randomPitch(0.75F, 1.25F));
+		this.sounds.play(prefab, 1, this.sounds.randomPitch(pitch[0], pitch[1]));
 	}
 
 	/**

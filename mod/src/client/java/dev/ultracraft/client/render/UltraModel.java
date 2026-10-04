@@ -196,7 +196,20 @@ public final class UltraModel {
 		submit(poseStack, collector, light, world, part -> object.test(part.object));
 	}
 
+	/**
+	 * Like {@link #submit(PoseStack, SubmitNodeCollector, int, Matrix4f[])}, with each mesh's glow tinted by the
+	 * color (ARGB) {@code glow} gives for its object's name, as a material property block would set it; null keeps
+	 * the glow's own.
+	 */
+	public void submitGlowing(PoseStack poseStack, SubmitNodeCollector collector, int light, Matrix4f[] world, Function<String, @Nullable Integer> glow) {
+		submit(poseStack, collector, light, world, part -> true, glow);
+	}
+
 	private void submit(PoseStack poseStack, SubmitNodeCollector collector, int light, Matrix4f[] world, Predicate<Part> drawn) {
+		submit(poseStack, collector, light, world, drawn, object -> null);
+	}
+
+	private void submit(PoseStack poseStack, SubmitNodeCollector collector, int light, Matrix4f[] world, Predicate<Part> drawn, Function<String, @Nullable Integer> glow) {
 		for (Part part : this.parts) {
 			if (!drawn.test(part)) {
 				continue;
@@ -204,7 +217,11 @@ public final class UltraModel {
 			float[][] skinned = part.skin(world);
 			collector.submitCustomGeometry(poseStack, RenderTypes.entityCutout(part.texture), (p, buffer) -> part.emit(p, buffer, skinned[0], skinned[1], 0xFFFFFFFF, light));
 			if (part.emissive != null) {
-				collector.submitCustomGeometry(poseStack, part.emissive, (p, buffer) -> part.emit(p, buffer, skinned[0], skinned[1], part.emissiveColor, LightCoordsUtil.FULL_BRIGHT));
+				Integer tint = glow.apply(part.object);
+				int color = tint != null ? tint : part.emissiveColor;
+				if ((color & 0xFFFFFF) != 0) {
+					collector.submitCustomGeometry(poseStack, part.emissive, (p, buffer) -> part.emit(p, buffer, skinned[0], skinned[1], color, LightCoordsUtil.FULL_BRIGHT));
+				}
 			}
 		}
 	}

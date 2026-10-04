@@ -61,11 +61,12 @@ final class Explosion {
 	 * @param playerDamageOverride the player's damage in place of {@code damage}, or -1
 	 * @param touchShake how much a Screenshaker on the sphere shakes the camera when the sphere reaches the
 	 *     player, or 0
+	 * @param ultrabooster whether it launches a nearby player twice as hard, and hurts them a set amount
 	 */
 	record Settings(
 		double scale, double startScale, double colliderRadius, double speed, double maxSize, int damage,
 		double enemyDamageMultiplier, double pushForceMultiplier, boolean halved, Subjects canHit,
-		boolean rocketExplosion, int playerDamageOverride, double touchShake
+		boolean rocketExplosion, int playerDamageOverride, double touchShake, boolean ultrabooster
 	) {
 		/** An Explosion on an extracted prefab, scaled by the bones above it. */
 		static Settings of(UltraModel model, JsonObject explosion) {
@@ -84,7 +85,7 @@ final class Explosion {
 				scale, model.rest().sx(bone), explosion.get("colliderRadius").getAsDouble(), explosion.get("speed").getAsDouble(),
 				explosion.get("maxSize").getAsDouble(), explosion.get("damage").getAsInt(), explosion.get("enemyDamageMultiplier").getAsDouble(),
 				explosion.get("pushForceMultiplier").getAsDouble(), explosion.get("halved").getAsInt() != 0,
-				Subjects.values()[explosion.get("canHit").getAsInt()], false, -1, touchShake
+				Subjects.values()[explosion.get("canHit").getAsInt()], false, -1, touchShake, false
 			);
 		}
 
@@ -92,7 +93,36 @@ final class Explosion {
 		Settings overridden(double sizeMultiplier, int damage, double enemyDamageMultiplier) {
 			return new Settings(
 				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize * sizeMultiplier, damage, enemyDamageMultiplier,
-				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster
+			);
+		}
+
+		/** Grenade.Explode's sizeMultiplier and ultrabooster: {@code sizeMultiplier} times as big and as fast. */
+		Settings ultraboosted(double sizeMultiplier) {
+			return new Settings(
+				this.scale, this.startScale, this.colliderRadius, this.speed * sizeMultiplier, this.maxSize * sizeMultiplier, this.damage, this.enemyDamageMultiplier,
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, true
+			);
+		}
+
+		/**
+		 * RevolverBeam's hit particle after coins added to the beam's damage: the damage goes up by 20 for each point
+		 * added, but the player still takes the prefab's.
+		 */
+		Settings withAddedDamage(float added) {
+			if (this.damage <= 0 || added <= 0) {
+				return this;
+			}
+			return new Settings(
+				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize, this.damage + Math.round(added * 20), this.enemyDamageMultiplier,
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.damage, this.touchShake, this.ultrabooster
+			);
+		}
+
+		Settings enemiesOnly() {
+			return new Settings(
+				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize, this.damage, this.enemyDamageMultiplier,
+				this.pushForceMultiplier, this.halved, Subjects.ENEMIES_ONLY, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster
 			);
 		}
 	}
@@ -303,8 +333,17 @@ final class Explosion {
 		return this.damage > 0;
 	}
 
-	/** The player's damage in HP, if it's {@link #harmful}. */
-	int playerDamage() {
-		return this.settings.playerDamageOverride >= 0 ? this.settings.playerDamageOverride : this.damage;
+	/**
+	 * The player's damage in HP, if it's {@link #harmful}: an ultrabooster's is 35 within 3 units of the player's
+	 * root and 50 further off.
+	 */
+	int playerDamage(double distance) {
+		if (this.settings.playerDamageOverride >= 0) {
+			return this.settings.playerDamageOverride;
+		}
+		if (this.settings.ultrabooster) {
+			return distance < 3 ? 35 : 50;
+		}
+		return this.damage;
 	}
 }

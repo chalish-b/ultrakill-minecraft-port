@@ -35,6 +35,7 @@ import org.jspecify.annotations.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Beams, blood and impacts, muzzle flashes, explosions' looks, and drawing beams, coins, coin trails, pellets and
@@ -56,7 +57,11 @@ final class Effects {
 		 * "ReflectedBeamPoint", the coin's own beam when it passes a shot on or is punched: 0.5 units wide, orange,
 		 * paler in the middle.
 		 */
-		COIN(0.5, new float[][]{{0, 1, 0.80784315F, 0}, {0.5F, 1, 0.9205858F, 0.7028302F}, {1, 1, 0.80784315F, 0}});
+		COIN(0.5, new float[][]{{0, 1, 0.80784315F, 0}, {0.5F, 1, 0.9205858F, 0.7028302F}, {1, 1, 0.80784315F, 0}}),
+		/** "Railcannon Beam", the Electric railcannon's: 1 unit wide, white to blue, with its arcs and glow over it. */
+		RAILCANNON(1, new float[][]{{0, 1, 1, 1}, {1, 0, 0.8344827F, 1}}, "railcannon_beam"),
+		/** "Railcannon Beam Malicious": 1 unit wide, white to orange, with a glow over it. */
+		MALICIOUS(1, new float[][]{{0, 1, 1, 1}, {1, 1, 0.6308285F, 0}}, "railcannon_beam_malicious");
 
 		/** Blocks. */
 		final double width;
@@ -64,15 +69,51 @@ final class Effects {
 		final double life;
 		/** Each key: where along the beam (0 to 1), then red, green and blue. */
 		final float[][] keys;
+		/** The extracted beam prefab whose other LineRenderers follow this one, if it has any. */
+		final @Nullable String prefab;
 
 		BeamStyle(double units, float[][] keys) {
+			this(units, keys, null);
+		}
+
+		BeamStyle(double units, float[][] keys, @Nullable String prefab) {
 			this.width = units * PlayerShape.BLOCKS_PER_UNIT;
 			this.life = units / 1.5;
 			this.keys = keys;
+			this.prefab = prefab;
 		}
 	}
 
-	private record Beam(Vec3 from, Vec3 to, BeamStyle style, double start) {
+	/** A beam drawn from one point to another; it narrows away once it's fading. */
+	static final class Beam {
+		final Vec3 from;
+		final Vec3 to;
+		final BeamStyle style;
+		/** When it started narrowing, or infinity while it's held at full width. */
+		private double fadeStart;
+		/**
+		 * Its ElectricityLine's current pick, swapped every 0.05 s: the arc frame, the line's width (units), and its
+		 * colors at the start and the end.
+		 */
+		private double arcCooldown;
+		private int arcFrame;
+		private double arcWidth;
+		private float[] arcStart = {1, 1, 1, 1};
+		private float[] arcEnd = {1, 1, 1, 1};
+
+		private Beam(Vec3 from, Vec3 to, BeamStyle style, double fadeStart) {
+			this.from = from;
+			this.to = to;
+			this.style = style;
+			this.fadeStart = fadeStart;
+		}
+	}
+
+	/** ElectricityLine swaps its pick this often. */
+	private static final double ARC_INTERVAL = 0.05;
+
+	/** A railcannon beam's muzzle flash (its SpriteController): turned a random whole number of degrees, it shrinks and fades. */
+	private record BeamFlash(Vec3 position, Quaternionf rotation, BeamStyle style, double start) {
 	}
 
 	private static final BlockState GORE = Blocks.REDSTONE_BLOCK.defaultBlockState();
@@ -151,6 +192,7 @@ final class Effects {
 	private final List<Wave> waves = new ArrayList<>();
 	private final List<ExplosionLook> looks = new ArrayList<>();
 	private final List<MuzzleFlash> muzzleFlashes = new ArrayList<>();
+	private final List<BeamFlash> beamFlashes = new ArrayList<>();
 	private final List<BulletSpark> bulletSparks = new ArrayList<>();
 	/** Particle systems played on their own, out of a prefab. */
 	private final List<Particles> particles = new ArrayList<>();
@@ -159,7 +201,14 @@ final class Effects {
 
 	void update(double dt, Level level, Entity player) {
 		this.clock += dt;
-		this.beams.removeIf(beam -> this.clock - beam.start > beam.style.life);
+		this.beams.removeIf(beam -> this.clock - beam.fadeStart > beam.style.life);
+		for (Beam beam : this.beams) {
+			beam.arcCooldown -= dt;
+			if (beam.arcCooldown <= 0) {
+				pickArc(beam);
+			}
+		}
+		this.beamFlashes.removeIf(flash -> beamFlashScale(flash) <= 0 || beamFlashAlpha(flash) <= 0);
 		this.waves.removeIf(wave -> wave.explosion.removed && spriteAlpha(wave.explosion) <= 0);
 		for (ExplosionLook look : this.looks) {
 			look.update(dt, level, player);
@@ -228,7 +277,112 @@ final class Effects {
 	}
 
 	void beam(Vec3 from, Vec3 to, BeamStyle style) {
-		this.beams.add(new Beam(from, to, style, this.clock));
+		Beam beam = new Beam(from, to, style, this.clock);
+		pickArc(beam);
+		this.beams.add(beam);
+	}
+
+	/** A beam held at full width until it's {@link #fade faded}, as a piercing shot's is while it works through what it hit. */
+	Beam heldBeam(Vec3 from, Vec3 to, BeamStyle style) {
+		Beam beam = new Beam(from, to, style, Double.POSITIVE_INFINITY);
+		pickArc(beam);
+		this.beams.add(beam);
+		return beam;
+	}
+
+	/** ElectricityLine.Update: a random arc frame, width between its two, and colors along its gradient for both ends. */
+	private void pickArc(Beam beam) {
+		beam.arcCooldown = ARC_INTERVAL;
+		JsonObject electricity = electricity(beam.style);
+		if (electricity == null) {
+			return;
+		}
+		beam.arcFrame = this.random.nextInt(electricity.getAsJsonArray("frames").size());
+		double min = electricity.get("minWidth").getAsDouble();
+		beam.arcWidth = min + this.random.nextDouble() * (electricity.get("maxWidth").getAsDouble() - min);
+		beam.arcStart = gradientAt(electricity.getAsJsonObject("colors"), this.random.nextDouble());
+		beam.arcEnd = gradientAt(electricity.getAsJsonObject("colors"), this.random.nextDouble());
+	}
+
+	/** The style's beam prefab line that has an ElectricityLine, if any. */
+	private static @Nullable JsonObject electricity(BeamStyle style) {
+		UltraModel model = style.prefab == null ? null : UltraModel.get(style.prefab);
+		JsonObject script = model == null ? null : model.script("beam");
+		if (script == null) {
+			return null;
+		}
+		for (JsonElement line : script.getAsJsonArray("lines")) {
+			if (line.getAsJsonObject().has("electricity")) {
+				return line.getAsJsonObject().getAsJsonObject("electricity");
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * The beam's muzzle flash at the barrel (RevolverBeam puts it there, turned the way the beam goes): its prefab's
+	 * flash sprite, facing along {@code rotation} (the camera's).
+	 */
+	void beamFlash(Vec3 position, Quaternionf rotation, BeamStyle style) {
+		Quaternionf rolled = new Quaternionf(rotation).rotateZ((float)Math.toRadians(this.random.nextInt(360)));
+		this.beamFlashes.add(new BeamFlash(position, rolled, style, this.clock));
+	}
+
+	/** The flash sprite's world scale (its MuzzleFlash parent's, times its own as it shrinks), in units. */
+	private double beamFlashScale(BeamFlash flash) {
+		UltraModel model = flash.style.prefab == null ? null : UltraModel.get(flash.style.prefab);
+		if (model == null || model.sprites().isEmpty()) {
+			return 0;
+		}
+		int bone = model.sprites().getFirst().bone();
+		double parents = 1;
+		for (int b = model.parent(bone); b >= 0; b = model.parent(b)) {
+			parents *= model.rest().sx(b);
+		}
+		return parents * (model.rest().sx(bone) - spriteController(model, bone, "shrinkSpeed") * (this.clock - flash.start));
+	}
+
+	private double beamFlashAlpha(BeamFlash flash) {
+		UltraModel model = flash.style.prefab == null ? null : UltraModel.get(flash.style.prefab);
+		if (model == null || model.sprites().isEmpty()) {
+			return 0;
+		}
+		UltraModel.Sprite sprite = model.sprites().getFirst();
+		return sprite.color()[3] - spriteController(model, sprite.bone(), "fadeSpeed") * (this.clock - flash.start);
+	}
+
+	private static double spriteController(UltraModel model, int bone, String field) {
+		for (JsonElement controller : model.scripts("spriteController")) {
+			if (controller.getAsJsonObject().get("bone").getAsInt() == bone) {
+				return controller.getAsJsonObject().get(field).getAsDouble();
+			}
+		}
+		return 0;
+	}
+
+	private void renderBeamFlashes(LevelRenderContext context, Vec3 camera) {
+		PoseStack poseStack = context.poseStack();
+		for (BeamFlash flash : this.beamFlashes) {
+			UltraModel model = UltraModel.get(flash.style.prefab);
+			double scale = beamFlashScale(flash);
+			double alpha = beamFlashAlpha(flash);
+			if (model == null || scale <= 0 || alpha <= 0) {
+				continue;
+			}
+			UltraModel.Sprite sprite = model.sprites().getFirst();
+			poseStack.pushPose();
+			poseStack.translate(flash.position.x - camera.x, flash.position.y - camera.y, flash.position.z - camera.z);
+			poseStack.rotate(flash.rotation);
+			float size = (float)(scale * PlayerShape.BLOCKS_PER_UNIT);
+			poseStack.scale(size, size, size);
+			float[] color = sprite.color();
+			quad(context, RenderTypes.beaconBeam(sprite.texture(), true), sprite.rect(), color[0], color[1], color[2], (float)alpha);
+			poseStack.popPose();
+		}
+	}
+
+	void fade(Beam beam) {
+		beam.fadeStart = Math.min(beam.fadeStart, this.clock);
 	}
 
 	void blood(Level level, Vec3 at, Gore gore) {
@@ -269,10 +423,12 @@ final class Effects {
 		if (!this.beams.isEmpty()) {
 			context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.debugQuads(), (pose, buffer) -> {
 				for (Beam beam : this.beams) {
-					float fade = (float)(1 - (this.clock - beam.start) / beam.style.life);
-					quad(pose, buffer, beam, camera, fade);
+					quad(pose, buffer, beam, camera, beamWidth(beam));
 				}
 			});
+			for (Beam beam : this.beams) {
+				renderLines(context, beam, camera, beamWidth(beam));
+			}
 		}
 		context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.lightning(), (pose, buffer) -> {
 			for (Coin coin : coins) {
@@ -293,6 +449,7 @@ final class Effects {
 		renderPellets(context, camera, pellets);
 		renderCores(context, camera, cores);
 		renderMuzzleFlashes(context, camera);
+		renderBeamFlashes(context, camera);
 		renderBulletSparks(context, camera);
 		UltraModel shell = UltraModel.get("shotgun_shell");
 		if (shell != null) {
@@ -933,6 +1090,123 @@ final class Effects {
 			}
 		});
 		poseStack.popPose();
+	}
+
+	/** The beam's width multiplier: 1, narrowing to nothing as it fades. */
+	private float beamWidth(Beam beam) {
+		return (float)Math.clamp(1 - (this.clock - beam.fadeStart) / beam.style.life, 0, 1);
+	}
+
+	/**
+	 * The beam prefab's other LineRenderers (CopyLineRenderer): along the same points, each at its own width times
+	 * the beam's multiplier, its texture stretched along it or repeated by the length (both times its texture scale),
+	 * shaded by its colors. The one with an ElectricityLine shows the beam's current arc pick instead.
+	 */
+	private static void renderLines(LevelRenderContext context, Beam beam, Vec3 camera, float multiplier) {
+		UltraModel model = beam.style.prefab == null ? null : UltraModel.get(beam.style.prefab);
+		JsonObject script = model == null ? null : model.script("beam");
+		if (script == null || multiplier <= 0) {
+			return;
+		}
+		Vec3 from = beam.from.subtract(camera);
+		Vec3 to = beam.to.subtract(camera);
+		Vec3 along = to.subtract(from);
+		double units = along.length() / PlayerShape.BLOCKS_PER_UNIT;
+		Vec3 facing = along.cross(from.add(to).scale(0.5)).normalize();
+		JsonArray lines = script.getAsJsonArray("lines");
+		for (int l = 1; l < lines.size(); l++) {
+			JsonObject line = lines.get(l).getAsJsonObject();
+			JsonObject material = line.getAsJsonObject("material");
+			JsonObject electricity = line.has("electricity") ? line.getAsJsonObject("electricity") : null;
+			Identifier texture = Identifier.parse(electricity != null
+				? electricity.getAsJsonArray("frames").get(beam.arcFrame).getAsString()
+				: material.get("texture").getAsString());
+			float[] tint = material.getAsJsonObject("colors").has("_Color") ? floats(material.getAsJsonObject("colors").getAsJsonArray("_Color")) : new float[]{1, 1, 1, 1};
+			JsonArray textureScale = line.getAsJsonArray("textureScale");
+			float uScale = textureScale.get(0).getAsFloat();
+			float vScale = textureScale.get(1).getAsFloat();
+			boolean tile = line.get("textureMode").getAsInt() == 1;
+			double width = electricity != null ? beam.arcWidth : line.get("width").getAsDouble();
+			Vec3 side = facing.scale(width * multiplier * PlayerShape.BLOCKS_PER_UNIT / 2);
+			JsonObject gradient = line.getAsJsonObject("color");
+			double[] times = electricity != null ? new double[]{0, 1} : gradientTimes(gradient);
+			context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.beaconBeam(texture, true), (pose, buffer) -> {
+				for (int i = 0; i + 1 < times.length; i++) {
+					float[] a = electricity != null ? beam.arcStart : gradientAt(gradient, times[i]);
+					float[] b = electricity != null ? beam.arcEnd : gradientAt(gradient, times[i + 1]);
+					float ua = (float)((tile ? times[i] * units : times[i]) * uScale);
+					float ub = (float)((tile ? times[i + 1] * units : times[i + 1]) * uScale);
+					Vec3 pa = from.add(along.scale(times[i]));
+					Vec3 pb = from.add(along.scale(times[i + 1]));
+					// Both faces: the strip is seen from either side of its winding.
+					lineCorner(pose, buffer, pa.add(side), ua, 0, a, tint);
+					lineCorner(pose, buffer, pa.subtract(side), ua, vScale, a, tint);
+					lineCorner(pose, buffer, pb.subtract(side), ub, vScale, b, tint);
+					lineCorner(pose, buffer, pb.add(side), ub, 0, b, tint);
+					lineCorner(pose, buffer, pb.add(side), ub, 0, b, tint);
+					lineCorner(pose, buffer, pb.subtract(side), ub, vScale, b, tint);
+					lineCorner(pose, buffer, pa.subtract(side), ua, vScale, a, tint);
+					lineCorner(pose, buffer, pa.add(side), ua, 0, a, tint);
+				}
+			});
+		}
+	}
+
+	private static void lineCorner(PoseStack.Pose pose, VertexConsumer buffer, Vec3 at, float u, float v, float[] color, float[] tint) {
+		buffer.addVertex(pose, new Vector3f((float)at.x, (float)at.y, (float)at.z))
+			.setColor(color[0] * tint[0], color[1] * tint[1], color[2] * tint[2], color[3] * tint[3])
+			.setUv(u, v)
+			.setLight(LightCoordsUtil.FULL_BRIGHT)
+			.setNormal(pose, 0, 0, 1);
+	}
+
+	/** Where a gradient's color and alpha keys are, in order, from 0 to 1. */
+	private static double[] gradientTimes(JsonObject gradient) {
+		TreeSet<Double> times = new TreeSet<>(List.of(0.0, 1.0));
+		for (String keys : new String[]{"colors", "alphas"}) {
+			for (JsonElement key : gradient.getAsJsonArray(keys)) {
+				times.add(key.getAsJsonArray().get(0).getAsDouble());
+			}
+		}
+		return times.stream().mapToDouble(Double::doubleValue).toArray();
+	}
+
+	/** A gradient's color and alpha at {@code t}, blended between its keys. */
+	private static float[] gradientAt(JsonObject gradient, double t) {
+		float[] rgb = sample(gradient.getAsJsonArray("colors"), t, 3);
+		float[] alpha = sample(gradient.getAsJsonArray("alphas"), t, 1);
+		return new float[]{rgb[0], rgb[1], rgb[2], alpha[0]};
+	}
+
+	private static float[] sample(JsonArray keys, double t, int channels) {
+		JsonArray previous = keys.get(0).getAsJsonArray();
+		for (JsonElement element : keys) {
+			JsonArray key = element.getAsJsonArray();
+			double time = key.get(0).getAsDouble();
+			if (time >= t) {
+				double start = previous.get(0).getAsDouble();
+				double blend = time > start ? Math.clamp((t - start) / (time - start), 0, 1) : 1;
+				float[] values = new float[channels];
+				for (int c = 0; c < channels; c++) {
+					values[c] = (float)(previous.get(c + 1).getAsDouble() + (key.get(c + 1).getAsDouble() - previous.get(c + 1).getAsDouble()) * blend);
+				}
+				return values;
+			}
+			previous = key;
+		}
+		float[] values = new float[channels];
+		for (int c = 0; c < channels; c++) {
+			values[c] = previous.get(c + 1).getAsFloat();
+		}
+		return values;
+	}
+
+	private static float[] floats(JsonArray array) {
+		float[] values = new float[array.size()];
+		for (int i = 0; i < values.length; i++) {
+			values[i] = array.get(i).getAsFloat();
+		}
+		return values;
 	}
 
 	/** A flat strip from one end of the beam to the other, turned to face the camera, a piece per color key. */

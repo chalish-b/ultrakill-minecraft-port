@@ -4,7 +4,7 @@ import dev.ultracraft.client.UltraConfig;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.phys.Vec3;
 
-/** ULTRAKILL's CameraController: crouch height, walk bob, screen shake, strafe tilt and dash FOV. */
+/** ULTRAKILL's CameraController: crouch height, walk bob, screen shake, strafe tilt, dash FOV and zoom. */
 final class UltraCamera {
 	/** The camera's height above the player's root, in units (Player/Main Camera). */
 	static final double ORIGINAL_HEIGHT = 1.4;
@@ -27,6 +27,10 @@ final class UltraCamera {
 	int dodgeDirection;
 	/** Field of view relative to the player's setting. */
 	private double fovRatio = 1;
+	/** CameraController.Zoom: the share of the player's field of view the view narrows to, or 0 while not zooming. */
+	private double zoom;
+	/** The view is narrowed by a zoom, or still widening back from one. */
+	private boolean zoomed;
 	private final RandomSource random = RandomSource.create();
 
 	/** CameraController.StopShake. */
@@ -46,6 +50,19 @@ final class UltraCamera {
 	/** Weapons widen the view for a moment when they fire (cam.fieldOfView += defaultFov / 40). */
 	void kickFov(double amount) {
 		this.fovRatio += amount;
+	}
+
+	/** CameraController.Zoom while {@code share} is above 0, StopZoom at 0. */
+	void zoom(double share) {
+		this.zoom = share;
+		if (share > 0) {
+			this.zoomed = true;
+		}
+	}
+
+	/** How much slower the view turns: while zooming, by how far it has narrowed. */
+	double lookScale() {
+		return this.zoom > 0 ? this.fovRatio : 1;
 	}
 
 	void crouch() {
@@ -103,7 +120,9 @@ final class UltraCamera {
 			this.tilt = U.moveTowards(current, 0, dt * 25 * (Math.abs(current) + 0.01));
 		}
 
-		if (movement.boost) {
+		if (this.zoom > 0) {
+			this.fovRatio = U.moveTowards(this.fovRatio, this.zoom, dt * 300 / defaultFov);
+		} else if (movement.boost) {
 			if (this.dodgeDirection == 0) {
 				this.fovRatio = 1 - 1 / 20.0;
 			} else if (this.dodgeDirection == 1) {
@@ -111,6 +130,9 @@ final class UltraCamera {
 			}
 		} else {
 			this.fovRatio = U.moveTowards(this.fovRatio, 1, dt * 300 / defaultFov);
+		}
+		if (this.zoom == 0 && this.fovRatio >= 1) {
+			this.zoomed = false;
 		}
 
 		if (this.defaultPos != this.defaultTarget) {
@@ -153,6 +175,6 @@ final class UltraCamera {
 	}
 
 	double fovMultiplier() {
-		return UltraConfig.get().fovEffects ? this.fovRatio : 1;
+		return UltraConfig.get().fovEffects || this.zoomed ? this.fovRatio : 1;
 	}
 }
