@@ -561,9 +561,7 @@ final class Effects {
 			Vec3 forward = drill.forward;
 			poseStack.pushPose();
 			poseStack.translate(drill.position.x - camera.x, drill.position.y - camera.y, drill.position.z - camera.z);
-			Vector3f up = Math.abs(forward.y) > 0.999 ? new Vector3f(0, 0, 1) : new Vector3f(0, 1, 0);
-			// The conjugated look rotation takes +z along the direction it's given; the model's forward is -z.
-			poseStack.rotate(new Quaternionf().lookAlong((float)-forward.x, (float)-forward.y, (float)-forward.z, up.x, up.y, up.z).conjugate());
+			poseStack.rotate(facing(forward));
 			poseStack.rotate(Axis.ZP.rotationDegrees((float)drill.spin));
 			poseStack.scale(units, units, units);
 			int light = LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(drill.position));
@@ -579,6 +577,17 @@ final class Effects {
 		}
 	}
 
+	/**
+	 * The rotation that turns a prefab (mirrored into Minecraft's axes, so its forward is -z) to face along
+	 * {@code direction}, keeping its up as near the world's as it can. The conjugated look rotation takes +z along
+	 * the direction it's given.
+	 */
+	static Quaternionf facing(Vec3 direction) {
+		Vec3 back = direction.normalize().scale(-1);
+		Vector3f up = Math.abs(back.y) > 0.999 ? new Vector3f(0, 0, 1) : new Vector3f(0, 1, 0);
+		return new Quaternionf().lookAlong((float)back.x, (float)back.y, (float)back.z, up.x, up.y, up.z).conjugate();
+	}
+
 	/** A saw's model at {@code position} facing {@code forward}, its blade's texture scrolled, and its glint (if it has one, at {@code glint} of its size). */
 	private static void submitSaw(LevelRenderContext context, UltraModel model, Vec3 position, Vec3 forward, double scroll, Vec3 camera, boolean showModel, float glint, double age) {
 		PoseStack poseStack = context.poseStack();
@@ -586,8 +595,7 @@ final class Effects {
 		int light = LightCoordsUtil.getLightCoords(Minecraft.getInstance().level, BlockPos.containing(position));
 		poseStack.pushPose();
 		poseStack.translate(position.x - camera.x, position.y - camera.y, position.z - camera.z);
-		Vector3f up = Math.abs(forward.y) > 0.999 ? new Vector3f(0, 0, 1) : new Vector3f(0, 1, 0);
-		poseStack.rotate(new Quaternionf().lookAlong((float)forward.x, (float)forward.y, (float)forward.z, up.x, up.y, up.z).conjugate());
+		poseStack.rotate(facing(forward));
 		poseStack.scale(units, units, units);
 		Matrix4f[] world = model.boneMatrices(model.rest(), new Quaternionf());
 		if (showModel) {

@@ -2082,9 +2082,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 	public void sawRicochet(Vec3 at, Direction face, boolean sound, boolean gibs) {
 		Minecraft minecraft = Minecraft.getInstance();
 		Vec3 normal = new Vec3(face.getStepX(), face.getStepY(), face.getStepZ());
-		Vector3f up = Math.abs(normal.y) > 0.99 ? new Vector3f(0, 0, 1) : new Vector3f(0, 1, 0);
-		Quaternionf facing = new Quaternionf().lookAlong((float)normal.x, (float)normal.y, (float)normal.z, up.x, up.y, up.z).conjugate();
-		this.effects.particles("chainsaw_ricochet", null, at, facing);
+		this.effects.particles("chainsaw_ricochet", null, at, Effects.facing(normal));
 		if (sound) {
 			this.sounds.play("chainsaw_spark", 1, this.sounds.randomPitch(0.85F, 1.15F));
 		}
@@ -2623,9 +2621,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ra
 	@Override
 	public void clink(Vec3 at, Vec3 facing, boolean object) {
 		String prefab = object ? "whiplash_clink_object" : "whiplash_clink";
-		Vector3f up = Math.abs(facing.normalize().y) > 0.99 ? new Vector3f(0, 0, 1) : new Vector3f(0, 1, 0);
-		Quaternionf rotation = new Quaternionf().lookAlong((float)facing.x, (float)facing.y, (float)facing.z, up.x, up.y, up.z).conjugate();
-		this.effects.particles(prefab, null, at, rotation);
+		this.effects.particles(prefab, null, at, Effects.facing(facing));
 		this.sounds.once().update(prefab, 1, object ? this.sounds.randomPitch(1.8F, 2.2F) : this.sounds.randomPitch(1.3F, 1.7F), at);
 	}
 
