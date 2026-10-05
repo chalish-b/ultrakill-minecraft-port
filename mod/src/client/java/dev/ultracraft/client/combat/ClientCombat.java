@@ -205,6 +205,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	private final UltraSounds sounds = new UltraSounds();
 	private final Effects effects = new Effects();
+	private final SlideEffects slideEffects = new SlideEffects(this.effects);
 	private final Map<Revolver.Variant, Revolver> revolvers = new EnumMap<>(Revolver.Variant.class);
 	private final List<Coin> coins = new ArrayList<>();
 	private final List<Explosion> explosions = new ArrayList<>();
@@ -471,7 +472,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			}
 			saw(dt, minecraft.level, player, shotgun);
 			slam(minecraft.level, player);
+			this.slideEffects.update(UltraController.INSTANCE.movement());
 		} else {
+			this.slideEffects.update(null);
 			this.lastHealth = -1;
 			saw(dt, minecraft.level, player, null);
 			this.whiplash.cancel();

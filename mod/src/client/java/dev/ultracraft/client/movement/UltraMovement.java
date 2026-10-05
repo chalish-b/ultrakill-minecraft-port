@@ -94,6 +94,7 @@ public final class UltraMovement {
 	private boolean jumpCooldown;
 	private int currentWallJumps;
 	private double clingFade;
+	private @Nullable Scrape wallScrapeParticles;
 	boolean boost;
 	private double boostCharge = 300;
 	private double boostLeft;
@@ -109,6 +110,7 @@ public final class UltraMovement {
 	private double slamCooldown;
 	boolean sliding;
 	private double slideSafety;
+	private @Nullable SlideParticles slideParticles;
 	private boolean slideEnding;
 	private boolean crouching;
 	boolean standing = true;
@@ -498,6 +500,7 @@ public final class UltraMovement {
 		handleInputs();
 		if (this.onGround) {
 			this.sounds.wallScrape(null);
+			this.wallScrapeParticles = null;
 		} else {
 			cling(dt);
 		}
@@ -632,8 +635,8 @@ public final class UltraMovement {
 
 	/** Sliding down a wall: holding into it while falling slows the fall at first. */
 	private void cling(double dt) {
-		boolean againstWall = this.onWall && raycast(root(), this.inputDir, 1) >= 0;
-		if (!this.sliding && againstWall && !this.heavyFall && upwardSpeed() < -1) {
+		BlockHitResult wall = this.onWall ? raycastHit(root(), this.inputDir, 1) : null;
+		if (!this.sliding && wall != null && !this.heavyFall && upwardSpeed() < -1) {
 			Vec3 right = right();
 			Vec3 forward = forward();
 			double sideways = U.clamp(-1, 1, right.dot(this.body.velocity));
@@ -641,8 +644,11 @@ public final class UltraMovement {
 			this.body.velocity = right.scale(sideways).add(forward.scale(forwards)).add(G.scale(2 * this.clingFade));
 			this.clingFade = U.moveTowards(this.clingFade, 50, dt * 4);
 			this.sounds.wallScrape(wallSurface());
+			Vec3 position = wall.getLocation().add(0, S, 0);
+			this.wallScrapeParticles = new Scrape(position, wall.getDirection().getUnitVec3(), surfaceTowards(position.subtract(root()), 5));
 		} else {
 			this.sounds.wallScrape(null);
+			this.wallScrapeParticles = null;
 		}
 	}
 
@@ -661,6 +667,13 @@ public final class UltraMovement {
 				this.sounds.slide(!this.onGround ? wallSurface() : groundSurface());
 			} else {
 				this.sounds.slide(null);
+			}
+			if (this.sliding) {
+				Vec3 along = U.normalized(U.projectOnPlane(U.normalized(this.body.velocity), UP));
+				Vec3 root = root();
+				Scrape scrape = this.onGround || this.onWall
+					? new Scrape(root.add(along.scale(S)), along.reverse(), !this.onGround ? wallSurfaceData() : groundSurfaceData()) : null;
+				this.slideParticles = new SlideParticles(root.add(along.scale(10 * S)), this.dodgeDirection, this.boostLeft > 0 && this.invincible, scrape);
 			}
 			return;
 		}
@@ -721,6 +734,7 @@ public final class UltraMovement {
 
 	private void stopSlide() {
 		this.sounds.slide(null);
+		this.slideParticles = null;
 		this.sounds.play("slide_stop", 1, 1);
 		this.camera.resetToDefaultPos();
 		this.sliding = false;
@@ -985,16 +999,66 @@ public final class UltraMovement {
 
 	/** The surface under the player, found like SceneHelper.TryGetSurfaceData: straight down, 3 units. */
 	private String groundSurface() {
+		return groundSurfaceData().type();
+	}
+
+	private SurfaceData groundSurfaceData() {
 		Vec3 from = this.player.position().add(0, 0.1, 0);
 		BlockHitResult hit = level().clip(new ClipContext(from, from.add(0, -3 * S, 0), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, this.player));
-		return hit.getType() == HitResult.Type.MISS ? Surfaces.GENERIC : Surfaces.of(level().getBlockState(hit.getBlockPos()));
+		return hit.getType() == HitResult.Type.MISS ? SurfaceData.NONE : surfaceData(hit.getBlockPos());
 	}
 
 	/** The surface of the wall the wall check touches. */
 	private String wallSurface() {
+		return wallSurfaceData().type();
+	}
+
+	private SurfaceData wallSurfaceData() {
 		Vec3 inwards = U.normalized(this.pointOfCollision.subtract(wallCheckCenter())).scale(0.01);
-		BlockState state = level().getBlockState(BlockPos.containing(this.pointOfCollision.add(inwards)));
-		return state.isAir() ? Surfaces.GENERIC : Surfaces.of(state);
+		BlockPos pos = BlockPos.containing(this.pointOfCollision.add(inwards));
+		return level().getBlockState(pos).isAir() ? SurfaceData.NONE : surfaceData(pos);
+	}
+
+	/** SceneHelper.TryGetSurfaceData: the surface {@code lengthUnits} along {@code direction} from the player's root. */
+	private SurfaceData surfaceTowards(Vec3 direction, double lengthUnits) {
+		BlockHitResult hit = raycastHit(root(), direction, lengthUnits);
+		return hit == null ? SurfaceData.NONE : surfaceData(hit.getBlockPos());
+	}
+
+	private SurfaceData surfaceData(BlockPos pos) {
+		BlockState state = level().getBlockState(pos);
+		return new SurfaceData(Surfaces.of(state), state.getMapColor(level(), pos).col);
+	}
+
+	/**
+	 * SceneHelper.HitSurfaceData: a surface's type, and the color bits of it come off in, its block's map color (0
+	 * when it has none).
+	 */
+	public record SurfaceData(String type, int particleColor) {
+		/** No surface found: Generic, untinted. */
+		public static final SurfaceData NONE = new SurfaceData(Surfaces.GENERIC, 0);
+	}
+
+	/** A scrape's particles: where they are (blocks), the way they face (Unity's forward), and what they scrape. */
+	public record Scrape(Vec3 position, Vec3 forward, SurfaceData surface) {
+	}
+
+	/**
+	 * The slide's particles: slideParticle ahead of the player (blocks) facing back along {@code dodgeDirection},
+	 * in its invincible colors while the dash's invincibility lasts, and the slide scrape while on the ground or a
+	 * wall.
+	 */
+	public record SlideParticles(Vec3 position, Vec3 dodgeDirection, boolean invincible, @Nullable Scrape scrape) {
+	}
+
+	/** What the slide shows this frame, or null when not sliding. */
+	public @Nullable SlideParticles slideParticles() {
+		return this.slideParticles;
+	}
+
+	/** The wall scrape clinging to a wall shows this frame, or null when not clinging. */
+	public @Nullable Scrape wallScrapeParticles() {
+		return this.wallScrapeParticles;
 	}
 
 	/** Stops the sounds that keep playing on their own. */
@@ -1265,12 +1329,17 @@ public final class UltraMovement {
 	 * @return the hit distance in units, or -1
 	 */
 	private double raycast(Vec3 from, Vec3 direction, double lengthUnits) {
+		BlockHitResult hit = raycastHit(from, direction, lengthUnits);
+		return hit == null ? -1 : from.distanceTo(hit.getLocation()) / S;
+	}
+
+	private @Nullable BlockHitResult raycastHit(Vec3 from, Vec3 direction, double lengthUnits) {
 		if (U.isZero(direction)) {
-			return -1;
+			return null;
 		}
 		Vec3 to = from.add(U.normalized(direction).scale(lengthUnits * S));
 		BlockHitResult hit = level().clip(new ClipContext(from, to, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, this.player));
-		return hit.getType() == HitResult.Type.MISS ? -1 : from.distanceTo(hit.getLocation()) / S;
+		return hit.getType() == HitResult.Type.MISS ? null : hit;
 	}
 
 	private double rootHeight() {

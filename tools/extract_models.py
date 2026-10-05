@@ -28,6 +28,7 @@ from UnityPy.helpers.ResourceReader import get_resource_data
 
 sys.path.insert(0, str(Path(__file__).parent))
 from ultrakill_paths import BUNDLES, REPO  # noqa: E402
+from ultrakill_surfaces import SURFACES  # noqa: E402
 
 OUT = REPO / "mod" / "src" / "generated" / "resources" / "assets" / "ultracraft"
 NAMESPACE = "ultracraft"
@@ -82,7 +83,11 @@ REFERENCED = {
     "zapper": ("Nailgun", "Nailgun Zapper", "zapper"),
     "zap_sparks": ("Zapper", "Zapper", "zapParticle"),
     "electric_line": ("DefaultReferenceManager", "DefaultReferenceManager", "electricLine"),
+    "slide_particle": ("NewMovement", "Player", "slideParticle"),
 }
+# FootstepSet's per-surface prefabs: model name prefix -> the list field. Each surface it lists is written as
+# <prefix>_<surface>.
+FOOTSTEP_PARTICLES = {"slide_scrape": "slideParticles", "wall_scrape": "wallScrapeParticles"}
 NESTED = {
     "explosion_chunk": ("explosion", "Explosion", "explosionChunk"),
     "chainsaw_ricochet": ("chainsaw_thrown", "Chainsaw", "ricochetEffect"),
@@ -215,6 +220,11 @@ def referenced_roots(env):
             return None
 
         found[model] = (walk(transform_of(found[parent][0])), None)
+    footsteps = next(obj.read() for obj in env.objects if obj.type.name == "MonoBehaviour" and script_name(obj) == "FootstepSet")
+    for prefix, field in FOOTSTEP_PARTICLES.items():
+        for entry in getattr(footsteps, field):
+            surface = SURFACES[getattr(entry, "<SurfaceType>k__BackingField")]
+            found[f"{prefix}_{surface}"] = (prefab(getattr(entry, "<particle>k__BackingField")), None)
     return found
 
 
@@ -269,7 +279,7 @@ def material_values(material_pptr, texture_path):
     props = tree["m_SavedProperties"]
     colors = {k: [v["r"], v["g"], v["b"], v["a"]] for k, v in props["m_Colors"] if k in ("_Color", "_EmissionColor", "_TintColor")}
     floats = {k: v for k, v in props["m_Floats"] if k in ("_SrcBlend", "_DstBlend", "_BlendMode", "_Mode", "_Cull", "_CullMode")}
-    alpha = np.array(Image.open(texture_path).convert("RGBA"))[..., 3].mean() / 255
+    alpha = np.array(Image.open(texture_path).convert("RGBA"))[..., 3].mean() / 255 if texture_path else 1
     return {"colors": colors, "floats": floats, "keywords": tree.get("m_ValidKeywords") or [], "textureAlpha": round(float(alpha), 4)}
 
 
@@ -503,7 +513,10 @@ class Exporter:
         values = []
         for material in renderer.m_Materials:
             tex_pptr = texture_name(material.deref().read())[0] if material.path_id else None
-            values.append(material_values(material, self.textures[self.texture(tex_pptr)[1]]) if tex_pptr else None)
+            if not material.path_id:
+                values.append(None)
+                continue
+            values.append(material_values(material, self.textures[self.texture(tex_pptr)[1]] if tex_pptr else None))
         return values
 
     def emissive(self, material_pptr):
@@ -569,6 +582,13 @@ def export_parts(exporter, rig, glow_colors):
     quads = []
     sprites = []
     particles = []
+    # The systems an EnviroGibModifier takes the color of the surface they come off.
+    tinted = set()
+    for go_id, active in rig.active.items():
+        for c in _objects[go_id].read().m_Component:
+            obj = c.component.deref()
+            if obj.type.name == "MonoBehaviour" and script_name(obj) == "EnviroGibModifier":
+                tinted.add(obj.read().particleSystem.path_id)
     for go_id, active in rig.active.items():
         if not active:
             continue
@@ -585,6 +605,7 @@ def export_parts(exporter, rig, glow_colors):
                     "textures": exporter.particle_textures(r),
                     "materials": exporter.particle_materials(r),
                     "renderMode": obj.read_typetree()["m_RenderMode"],
+                    "surfaceTinted": system.path_id in tinted,
                     **particle_values(system),
                     **animated_texture(exporter, go),
                 })

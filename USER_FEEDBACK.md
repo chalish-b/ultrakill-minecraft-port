@@ -1,6 +1,5 @@
 Bugs
 - Water is completely broken, same with ladders and stuff, anything that changes the movement "mode" I think
-- Sliding should also show particle effects (similar to sawed-on sparks I think, or maybe even the same idk)
 - Coins don't prioritize the closet targets?
 - Ricochet aim assist doesn't work that well? Especially when shooting the ground. In Ultrakill, the auto-aim basically redirects a ground shot to an enemy near, even if I shoot straight down.
 

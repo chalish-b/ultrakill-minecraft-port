@@ -19,18 +19,12 @@ import UnityPy
 
 sys.path.insert(0, str(Path(__file__).parent))
 from ultrakill_paths import BUNDLES, REPO  # noqa: E402
+from ultrakill_surfaces import SURFACES  # noqa: E402
 
 OUT = REPO / "mod" / "src" / "generated" / "resources" / "assets" / "ultracraft"
 NAMESPACE = "ultracraft"
 # PlayerShape.BLOCKS_PER_UNIT: the player is 3.5 units tall in ULTRAKILL and 1.8 blocks in Minecraft.
 BLOCKS_PER_UNIT = 1.8 / 3.5
-
-# ULTRAKILL's SurfaceType enum.
-SURFACES = {
-    0: "generic", 1: "carpet", 2: "flesh", 3: "glass", 4: "grass", 5: "gravel", 6: "hologram", 7: "marble",
-    8: "metal", 9: "metal_grill", 10: "metal_thin", 11: "rubble", 12: "sand", 13: "wet", 14: "wood",
-    15: "wood_thin", 16: "metal_high", 17: "metal_low", 18: "dirt", 19: "crunchy", 20: "snow",
-}
 
 
 def file_name(clip_name):

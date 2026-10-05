@@ -279,6 +279,11 @@ final class Effects {
 		}
 	}
 
+	/** A particle system played until it's done, which its owner can still move, turn and stop. */
+	void play(Particles system) {
+		this.particles.add(system);
+	}
+
 	void explosion(ExplosionLook look) {
 		this.looks.add(look);
 	}

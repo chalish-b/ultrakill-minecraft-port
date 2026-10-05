@@ -6,6 +6,8 @@ import com.google.gson.JsonObject;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import dev.ultracraft.PlayerShape;
+import dev.ultracraft.client.render.UltraModel;
+import dev.ultracraft.client.render.animation.Pose;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.rendertype.RenderType;
@@ -24,10 +26,10 @@ import java.util.List;
 
 /**
  * One of a prefab's ParticleSystems, from its extracted settings: bursts and a steady rate over its duration, out
- * of a sphere or a cone, each particle flying straight (and falling with its gravity) as its size and color
+ * of a sphere, a cone or a box, each particle flying straight (and falling with its gravity) as its size and color
  * change over its life. Particles are drawn as sprites facing the camera, and with a trail module as streaks
- * back to where they started. Its scaling mode is Local, so only its own scale (1) counts. Particles don't
- * collide.
+ * back to where they started. A system simulated in World space leaves its particles where they came out; one
+ * simulated in Local space carries them along as it moves and turns. Particles don't collide.
  */
 final class Particles {
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
@@ -36,8 +38,15 @@ final class Particles {
 	/** ParticleSystemShapeType's hemispheres. */
 	private static final int HEMISPHERE = 2;
 	private static final int HEMISPHERE_SHELL = 3;
+	/** ParticleSystemShapeType.Box. */
+	private static final int BOX = 5;
 	/** ParticleSystemShapeType.Circle. */
 	private static final int CIRCLE = 10;
+	/** ParticleSystemSimulationSpace.World. */
+	private static final int WORLD = 1;
+	/** ParticleSystemScalingMode.Hierarchy and Local. */
+	private static final int HIERARCHY = 0;
+	private static final int LOCAL = 1;
 
 	/** How a particle material blends: Legacy Particles/Multiply (Double) has no counterpart, so it's laid over. */
 	private enum Blend {
@@ -45,18 +54,25 @@ final class Particles {
 		ADDITIVE
 	}
 
+	/**
+	 * Simulated in World space, {@code start} is where it came out (blocks) and {@code velocity} is in the world's
+	 * axes; in Local space, both are in the prefab's Unity axes, from the system's origin. Either way in units.
+	 */
 	private record Particle(Vec3 start, Vec3 velocity, double size, double lifetime, double born, float[] color, float roll) {
 	}
 
 	private final JsonObject settings;
 	/** Blocks. */
 	private Vec3 origin;
-	/** The system's own scale, which its particles' sizes and places go by (scaling mode Local). */
-	private final double scale;
-	/** It keeps emitting past its duration, as a looping system does while it's on. */
+	/** The scale its scaling mode takes, along the system's own axes: its particles' places and speeds go by it. */
+	private final Vector3f scale;
+	/** Its particles' sizes go by its largest scale. */
+	private final double sizeScale;
+	/** It keeps emitting past its duration, as a looping system does while it's on, its bursts coming round again. */
 	private final boolean looping;
+	private final boolean worldSpace;
 	/** The system's rotation in the world, as Minecraft draws it (Unity's local axes, mirrored). */
-	private final Quaternionf rotation;
+	private Quaternionf rotation;
 	/** The system's rotation in Unity's axes, for its shape. */
 	private final Quaternionf unityRotation;
 	private final RandomSource random = RandomSource.create();
@@ -67,9 +83,20 @@ final class Particles {
 	private final float headColorScale;
 	private final @Nullable Blend trailBlend;
 	private final @Nullable Identifier trailTexture;
+	/** Legacy Particles/Additive doubles its tint into the color. */
+	private final float[] trailColorScale;
+	/** The trail's colorOverLifetime as the code set it, in place of the prefab's. */
+	private @Nullable JsonObject trailColor;
+	/** EnviroGibModifier: the color of the surface its particles start in, keeping their alpha. */
+	private float @Nullable [] surfaceColor;
+	private boolean emitting = true;
+	/** Moved far off (out of sight): what it emits and what it carries along aren't seen. */
+	private boolean away;
 	private double age;
 	private double rateDue;
 	private int burstsDone;
+	/** Where the looping system's current cycle started. */
+	private double cycleStart;
 
 	/**
 	 * @param worldRotation the prefab's rotation, as Minecraft draws it
@@ -80,15 +107,40 @@ final class Particles {
 	}
 
 	/**
-	 * A system on an object that moves and stays on: its particles (simulated in its Local space) go where it goes.
+	 * A system on an object that moves and stays on.
 	 *
 	 * @param scale the system's own scale
 	 */
 	Particles(JsonObject settings, Vec3 origin, Quaternionf worldRotation, Quaternionf unityRotation, double scale, boolean looping) {
+		this(settings, origin, worldRotation, unityRotation, new Vector3f((float)scale), looping);
+	}
+
+	/**
+	 * A looping system out of {@code model}, on an object that moves, turns and stays on until it's {@link #stop
+	 * stopped}, scaled as its scaling mode says: by its own scale (Local), or by its and its parents' (Hierarchy).
+	 */
+	static Particles looping(UltraModel model, JsonObject settings, Vec3 origin, Quaternionf worldRotation) {
+		int bone = settings.get("bone").getAsInt();
+		Pose rest = model.rest();
+		Vector3f scale = new Vector3f(1);
+		int mode = settings.get("scalingMode").getAsInt();
+		if (mode == LOCAL) {
+			scale.set(rest.sx(bone), rest.sy(bone), rest.sz(bone));
+		} else if (mode == HIERARCHY) {
+			for (int b = bone; b >= 0; b = model.parent(b)) {
+				scale.mul(rest.sx(b), rest.sy(b), rest.sz(b));
+			}
+		}
+		return new Particles(settings, origin, worldRotation, ExplosionLook.unityRotation(model, bone), scale, true);
+	}
+
+	private Particles(JsonObject settings, Vec3 origin, Quaternionf worldRotation, Quaternionf unityRotation, Vector3f scale, boolean looping) {
 		this.settings = settings;
 		this.origin = origin;
 		this.scale = scale;
+		this.sizeScale = Math.max(scale.x, Math.max(scale.y, scale.z));
 		this.looping = looping;
+		this.worldSpace = settings.get("simulationSpace").getAsInt() == WORLD;
 		this.unityRotation = unityRotation;
 		this.rotation = worldRotation;
 		JsonArray textures = settings.getAsJsonArray("textures");
@@ -99,6 +151,17 @@ final class Particles {
 		this.headColorScale = this.headBlend == null ? 1 : multiplier(materials.get(0));
 		this.trailBlend = settings.has("trail") && materials.size() > 1 ? blend(materials.get(1)) : null;
 		this.trailTexture = this.trailBlend == null || textures.size() < 2 || textures.get(1).isJsonNull() ? null : Identifier.parse(textures.get(1).getAsString());
+		this.trailColorScale = this.trailBlend == Blend.ADDITIVE ? additiveTint(materials.get(1)) : new float[]{1, 1, 1, 1};
+	}
+
+	/** Legacy Particles/Additive: twice its tint color, or 1 for a material without one. */
+	private static float[] additiveTint(JsonElement material) {
+		JsonObject colors = material.getAsJsonObject().getAsJsonObject("colors");
+		if (!colors.has("_TintColor")) {
+			return new float[]{1, 1, 1, 1};
+		}
+		float[] tint = floats(colors.getAsJsonArray("_TintColor"));
+		return new float[]{2 * tint[0], 2 * tint[1], 2 * tint[2], 1};
 	}
 
 	private static @Nullable Blend blend(JsonElement material) {
@@ -119,25 +182,66 @@ final class Particles {
 
 	boolean done() {
 		double duration = this.settings.get("duration").getAsDouble();
-		return !this.looping && this.age > duration && this.particles.isEmpty();
+		boolean finished = !this.emitting || !this.looping && this.age > duration;
+		return finished && this.particles.isEmpty();
 	}
 
-	/** Its object moved to {@code origin}, its particles with it. */
+	/** Its object moved to {@code origin}; what it simulates in Local space goes with it. */
 	void moveTo(Vec3 origin) {
 		this.origin = origin;
+	}
+
+	/** Its object turned to {@code rotation} (as Minecraft draws it); what it simulates in Local space turns with it. */
+	void turnTo(Quaternionf rotation) {
+		this.rotation = rotation;
+	}
+
+	/**
+	 * Its object moved far off ({@code away}) or back: nothing it emits there is seen, and what it carries along is
+	 * out of sight until it's back.
+	 */
+	void setAway(boolean away) {
+		this.away = away;
+	}
+
+	/** ParticleSystem.Stop: it emits no more, and what it has out plays to its end. */
+	void stop() {
+		this.emitting = false;
+	}
+
+	/** Destroyed with its object: its particles go too. */
+	void destroy() {
+		this.emitting = false;
+		this.particles.clear();
+	}
+
+	/** SetParticlesColors: its particles start in {@code rgb}'s color, keeping their own alpha. */
+	void tint(int rgb) {
+		this.surfaceColor = new float[]{(rgb >> 16 & 0xFF) / 255F, (rgb >> 8 & 0xFF) / 255F, (rgb & 0xFF) / 255F};
+	}
+
+	/** trails.colorOverLifetime set to {@code gradient} (as the extractor writes one), or back to the prefab's. */
+	void setTrailGradient(@Nullable JsonObject gradient) {
+		if (gradient == null) {
+			this.trailColor = null;
+			return;
+		}
+		JsonObject color = new JsonObject();
+		color.add("gradient", gradient);
+		this.trailColor = color;
 	}
 
 	void update(double dt) {
 		double duration = this.settings.get("duration").getAsDouble();
 		JsonArray bursts = this.settings.getAsJsonArray("bursts");
-		while (this.burstsDone < bursts.size() && bursts.get(this.burstsDone).getAsJsonArray().get(0).getAsDouble() <= this.age + dt) {
-			int count = (int)Math.round(sample(bursts.get(this.burstsDone).getAsJsonArray().get(1).getAsJsonObject()));
-			for (int i = 0; i < count; i++) {
-				emit(this.age);
-			}
-			this.burstsDone++;
+		if (this.looping && this.age + dt - this.cycleStart > duration && duration > 0) {
+			// The cycle's bursts it hasn't reached yet, then the next cycle's from its start.
+			emitBursts(bursts, duration);
+			this.cycleStart += duration;
+			this.burstsDone = 0;
 		}
-		if (this.age < duration || this.looping) {
+		emitBursts(bursts, this.age + dt - this.cycleStart);
+		if (this.emitting && (this.age < duration || this.looping)) {
 			this.rateDue += sample(this.settings.getAsJsonObject("rate")) * dt;
 			while (this.rateDue >= 1) {
 				this.rateDue -= 1;
@@ -146,6 +250,17 @@ final class Particles {
 		}
 		this.age += dt;
 		this.particles.removeIf(particle -> this.age - particle.born > particle.lifetime);
+	}
+
+	/** The bursts due by {@code time} into the current cycle. */
+	private void emitBursts(JsonArray bursts, double time) {
+		while (this.burstsDone < bursts.size() && bursts.get(this.burstsDone).getAsJsonArray().get(0).getAsDouble() <= time) {
+			int count = (int)Math.round(sample(bursts.get(this.burstsDone).getAsJsonArray().get(1).getAsJsonObject()));
+			for (int i = 0; this.emitting && i < count; i++) {
+				emit(this.age);
+			}
+			this.burstsDone++;
+		}
 	}
 
 	/** A value of a MinMaxCurve at the start of a particle: its constant, or random between its two. */
@@ -240,8 +355,14 @@ final class Particles {
 		return out;
 	}
 
-	/** One particle: placed and aimed by the shape (in the system's own axes), then turned into the world. */
+	/**
+	 * One particle: placed and aimed by the shape (in the shape's own axes, then placed, turned and scaled by its
+	 * transform), scaled with the system, then turned into the prefab and the world.
+	 */
 	private void emit(double born) {
+		if (this.away && this.worldSpace) {
+			return;
+		}
 		Vector3f position = new Vector3f();
 		Vector3f direction = new Vector3f(0, 0, 1);
 		JsonObject shape = this.settings.has("shape") && !this.settings.get("shape").isJsonNull() ? this.settings.getAsJsonObject("shape") : null;
@@ -255,6 +376,9 @@ final class Particles {
 				position.set((float)(Math.cos(angle) * r * radius), (float)(Math.sin(angle) * r * radius), 0);
 				double lean = Math.toRadians(shape.get("angle").getAsDouble()) * r;
 				direction.set((float)(Math.cos(angle) * Math.sin(lean)), (float)(Math.sin(angle) * Math.sin(lean)), (float)Math.cos(lean));
+			} else if (type == BOX) {
+				// Box: anywhere inside it, flying straight ahead.
+				position.set(this.random.nextFloat() - 0.5F, this.random.nextFloat() - 0.5F, this.random.nextFloat() - 0.5F);
 			} else if (type == CIRCLE) {
 				// Circle: anywhere on its disc, flying straight out from its centre across it.
 				double angle = this.random.nextDouble() * Math.PI * 2;
@@ -273,24 +397,49 @@ final class Particles {
 				position.set(point).mul((float)radius);
 				direction.set(point).normalize();
 			}
+			Vector3f shapeScale = vector(shape.getAsJsonArray("scale"));
+			Vector3f shapeAngles = vector(shape.getAsJsonArray("rotation"));
+			// Unity's Euler angles: about z, then x, then y.
+			Quaternionf shapeRotation = new Quaternionf().rotationY((float)Math.toRadians(shapeAngles.y))
+				.rotateX((float)Math.toRadians(shapeAngles.x)).rotateZ((float)Math.toRadians(shapeAngles.z));
+			shapeRotation.transform(position.mul(shapeScale)).add(vector(shape.getAsJsonArray("position")));
+			shapeRotation.transform(direction.mul(shapeScale).normalize());
 		}
+		position.mul(this.scale);
+		direction.mul(this.scale);
 		this.unityRotation.transform(position);
 		this.unityRotation.transform(direction);
-		Vec3 start = world(position);
-		Vec3 velocity = world(direction).scale(sample(this.settings.getAsJsonObject("speed")));
-		this.particles.add(new Particle(start, velocity, sample(this.settings.getAsJsonObject("size")), sample(this.settings.getAsJsonObject("lifetime")),
-			born, startColor(this.settings.getAsJsonObject("color")), (float)sample(this.settings.getAsJsonObject("rotation"))));
+		Vector3f velocity = direction.mul((float)sample(this.settings.getAsJsonObject("speed")));
+		Vec3 start = new Vec3(position.x, position.y, position.z);
+		Vec3 moving = new Vec3(velocity.x, velocity.y, velocity.z);
+		if (this.worldSpace) {
+			start = this.origin.add(world(start).scale(S));
+			moving = world(moving);
+		}
+		float[] color = startColor(this.settings.getAsJsonObject("color"));
+		if (this.surfaceColor != null && this.settings.has("surfaceTinted") && this.settings.get("surfaceTinted").getAsBoolean()) {
+			color = new float[]{this.surfaceColor[0], this.surfaceColor[1], this.surfaceColor[2], color[3]};
+		}
+		this.particles.add(new Particle(start, moving, sample(this.settings.getAsJsonObject("size")) * this.sizeScale,
+			sample(this.settings.getAsJsonObject("lifetime")), born, color, (float)sample(this.settings.getAsJsonObject("rotation"))));
+	}
+
+	private static Vector3f vector(JsonArray array) {
+		return new Vector3f(array.get(0).getAsFloat(), array.get(1).getAsFloat(), array.get(2).getAsFloat());
 	}
 
 	/** A vector in the prefab's Unity axes, in the world's (still in units). */
-	private Vec3 world(Vector3f unity) {
-		Vector3f v = this.rotation.transform(new Vector3f(unity.x, unity.y, -unity.z));
+	private Vec3 world(Vec3 unity) {
+		Vector3f v = this.rotation.transform(new Vector3f((float)unity.x, (float)unity.y, (float)-unity.z));
 		return new Vec3(v.x, v.y, v.z);
 	}
 
 	private Vec3 position(Particle particle, double t) {
 		double fall = 0.5 * GRAVITY * sample(this.settings.getAsJsonObject("gravity")) * t * t;
-		return this.origin.add(particle.start.add(particle.velocity.scale(t)).add(0, -fall, 0).scale(S * this.scale));
+		Vec3 at = this.worldSpace
+			? particle.start.add(particle.velocity.scale(t * S))
+			: this.origin.add(world(particle.start.add(particle.velocity.scale(t))).scale(S));
+		return at.add(0, -fall * S, 0);
 	}
 
 	private float[] color(Particle particle, double life) {
@@ -312,7 +461,7 @@ final class Particles {
 	}
 
 	void render(LevelRenderContext context, Vec3 camera) {
-		if (this.particles.isEmpty()) {
+		if (this.particles.isEmpty() || this.away && !this.worldSpace) {
 			return;
 		}
 		if (this.headTexture != null && this.headBlend != null) {
@@ -333,7 +482,7 @@ final class Particles {
 		for (Particle particle : this.particles) {
 			double t = this.age - particle.born;
 			double life = t / particle.lifetime;
-			double size = particle.size * this.scale;
+			double size = particle.size;
 			if (this.settings.has("sizeOverLifetime")) {
 				size *= evaluate(this.settings.getAsJsonObject("sizeOverLifetime"), life);
 			}
@@ -370,7 +519,7 @@ final class Particles {
 	private void renderTrails(LevelRenderContext context, Vec3 camera) {
 		JsonObject trail = this.settings.getAsJsonObject("trail");
 		JsonObject width = trail.getAsJsonObject("widthOverTrail");
-		JsonObject color = trail.getAsJsonObject("colorOverLifetime");
+		JsonObject color = this.trailColor != null ? this.trailColor : trail.getAsJsonObject("colorOverLifetime");
 		double share = evaluate(trail.getAsJsonObject("lifetime"), 0);
 		boolean sizeAffectsWidth = trail.get("sizeAffectsWidth").getAsBoolean();
 		boolean inherit = !trail.has("inheritParticleColor") || trail.get("inheritParticleColor").getAsBoolean();
@@ -400,7 +549,7 @@ final class Particles {
 				}
 				Vec3 headSide = side.scale(base * evaluate(width, 0));
 				Vec3 tailSide = side.scale(base * evaluate(width, 1));
-				float[] tint = inherit ? color(particle, life) : new float[]{1, 1, 1, 1};
+				float[] tint = times(inherit ? color(particle, life) : new float[]{1, 1, 1, 1}, this.trailColorScale);
 				float[] headColor = times(overLife(color, 0), tint);
 				float[] tailColor = times(overLife(color, span > 0 ? (t - tailAt) / span : 1), tint);
 				if (this.trailBlend == Blend.ADDITIVE && this.trailTexture != null) {
