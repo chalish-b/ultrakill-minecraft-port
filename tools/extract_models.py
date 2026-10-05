@@ -47,6 +47,7 @@ MODELS = {
     "railcannon_malicious": ("Railcannon Malicious", "Railcannon", (0, 0, 0)),
     "nailgun_attractor": ("Nailgun Magnet", "Nailgun", (0, 0, 0)),
     "nailgun_overheat": ("Nailgun Overheat", "Nailgun", (0, 0, 0)),
+    "nailgun_jumpstart": ("Nailgun Zapper", "Nailgun", (0, 0, 0)),
     "feedbacker": ("Arm Blue", "Punch", (0, -0.225, 0)),
     "knuckleblaster": ("Arm Red", "Punch", (0, -0.225, 0)),
     "whiplash": ("Hook Arm", "HookArm", (0, -0.225, 0)),
@@ -78,6 +79,9 @@ REFERENCED = {
     "magnet": ("Nailgun", "Nailgun Magnet", "magnetNail"),
     "nailgun_muzzle_flash": ("Nailgun", "Nailgun Overheat", "muzzleFlash"),
     "nailgun_muzzle_flash_heated": ("Nailgun", "Nailgun Overheat", "muzzleFlash2"),
+    "zapper": ("Nailgun", "Nailgun Zapper", "zapper"),
+    "zap_sparks": ("Zapper", "Zapper", "zapParticle"),
+    "electric_line": ("DefaultReferenceManager", "DefaultReferenceManager", "electricLine"),
 }
 NESTED = {
     "explosion_chunk": ("explosion", "Explosion", "explosionChunk"),
@@ -147,6 +151,41 @@ def activate_controlled(rig, root_go):
                     walk(child.deref().read())
 
             walk(transform_of(target.deref().read()))
+
+
+def activate_scripted(rig, root_go):
+    """Objects the zapper and the JumpStart show and hide themselves, which their prefabs store hidden: the zapper's
+    closed prongs and its pulse orb, and the JumpStart's recharge overlay."""
+    def walk(t):
+        rig.active[t.m_GameObject.path_id] = True
+        for child in t.m_Children:
+            walk(child.deref().read())
+
+    for go_id in list(rig.active):
+        go = _objects[go_id].read()
+        for c in go.m_Component:
+            obj = c.component.deref()
+            if obj.type.name != "MonoBehaviour":
+                continue
+            kind = script_name(obj)
+            if kind == "Zapper":
+                zapper = obj.read()
+                for pptr in (zapper.openProngs, zapper.closedProngs):
+                    walk(transform_of(pptr.deref().read()))
+                walk(zapper.lightningPulseOrb.deref().read())
+            elif kind == "Nailgun" and obj.read().rechargingOverlay.path_id:
+                walk(transform_of(obj.read().rechargingOverlay.deref().read()))
+
+
+def code_shown_images(rig):
+    """Images a script turns on and off itself, which their prefabs store turned off: the JumpStart's warning X."""
+    shown = set()
+    for go_id in rig.active:
+        for c in _objects[go_id].read().m_Component:
+            obj = c.component.deref()
+            if obj.type.name == "MonoBehaviour" and script_name(obj) == "Nailgun" and obj.read().warningX.path_id:
+                shown.add(obj.read().warningX.path_id)
+    return shown
 
 
 def referenced_roots(env):
@@ -325,9 +364,11 @@ FONT_OVERSAMPLE = 8
 
 
 class Exporter:
-    def __init__(self):
+    def __init__(self, ttf_fonts):
         self.textures = {}
         self.fonts = {}
+        # The game's fonts by file name, as pointers to them.
+        self.ttf_fonts = ttf_fonts
 
     def texture(self, pptr):
         tex = pptr.deref().read()
@@ -366,7 +407,7 @@ class Exporter:
 
     def font(self, pptr):
         """A UI Text's font, as a Minecraft TrueType font: its TTF under font/, and a definition naming it."""
-        font = pptr.deref().read()
+        font = (pptr.deref() if callable(getattr(pptr, "deref", None)) else pptr).read()
         name = file_name(font.m_Name)
         if name not in self.fonts:
             folder = OUT / "font"
@@ -376,6 +417,15 @@ class Exporter:
             (folder / f"{name}.json").write_text(json.dumps(definition, indent=1))
             self.fonts[name] = True
         return f"{NAMESPACE}:{name}"
+
+    def tmp_font(self, pptr):
+        """A TextMeshPro font asset's font, as a Minecraft TrueType font. Its source font isn't in the game, so this
+        is the game's TrueType font of the same name."""
+        name = file_name(pptr.deref().read_typetree()["m_Name"])
+        font = next((f for n, f in sorted(self.ttf_fonts.items()) if n.startswith(name)), None)
+        if font is None:
+            sys.exit(f"no TrueType font for {name}")
+        return self.font(font)
 
     def sprite(self, pptr):
         """A Sprite's own pixels (cut out of its texture), as a texture."""
@@ -470,6 +520,44 @@ class Exporter:
 
 # Unity's built-in Quad mesh (in "Library/unity default resources"): 1 x 1, centered, facing -z.
 BUILTIN_QUAD = 10210
+# Unity's built-in Cube mesh: 1 x 1 x 1, centered, each face mapping its texture once.
+BUILTIN_CUBE = 10202
+
+
+def cube_part(exporter, renderer, bone):
+    """A built-in Cube as a part on `bone`, with its renderer's first material."""
+    material_pptr = renderer.m_Materials[0]
+    tex_pptr, scale, offset = texture_name(material_pptr.deref().read())
+    if tex_pptr is None:
+        return None
+    texture, tex_file = exporter.texture(tex_pptr)
+    positions, normals, uvs, indices = [], [], [], []
+    for axis in range(3):
+        for sign in (1, -1):
+            normal = [0, 0, 0]
+            normal[axis] = sign
+            u_axis, v_axis = [0, 0, 0], [0, 0, 0]
+            u_axis[(axis + 1) % 3] = 1
+            v_axis[(axis + 2) % 3] = 1
+            base = len(positions) // 3
+            for u, v in ((-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)):
+                positions += [normal[i] * 0.5 + u_axis[i] * u + v_axis[i] * v for i in range(3)]
+                normals += normal
+                uvs += [(u + 0.5) * scale[0] + offset[0], 1 - ((v + 0.5) * scale[1] + offset[1])]
+            # Unity's front faces wind with their cross product along the normal; reversed, as the mod flips z.
+            first = [base, base + 1, base + 2, base, base + 2, base + 3] if sign > 0 else [base, base + 2, base + 1, base, base + 3, base + 2]
+            indices += [first[i] for i in (0, 2, 1, 3, 5, 4)]
+    part = {
+        "texture": texture, "textureFile": tex_file, "material": material_pptr.deref().read().m_Name,
+        "materialValues": material_values(material_pptr, exporter.textures[tex_file]),
+        "positions": positions, "normals": normals, "uvs": uvs, "indices": indices,
+        "joints": [bone], "binds": [np.eye(4).flatten().tolist()], "influences": 1,
+        "jointIndices": [0] * (len(positions) // 3), "jointWeights": [1.0] * (len(positions) // 3),
+    }
+    emissive = exporter.emissive(material_pptr)
+    if emissive:
+        part["emissive"] = emissive
+    return part
 
 
 def export_parts(exporter, rig, glow_colors):
@@ -526,7 +614,12 @@ def export_parts(exporter, rig, glow_colors):
                 try:
                     mesh = mesh_filter.m_Mesh.deref().read()
                 except FileNotFoundError:
-                    if mesh_filter.m_Mesh.path_id == BUILTIN_QUAD and r.m_Materials and r.m_Materials[0].path_id:
+                    if mesh_filter.m_Mesh.path_id == BUILTIN_CUBE and r.m_Materials and r.m_Materials[0].path_id:
+                        part = cube_part(exporter, r, rig.index[transform_of(go).object_reader.path_id])
+                        if part is not None:
+                            part["name"] = go.m_Name
+                            parts.append(part)
+                    elif mesh_filter.m_Mesh.path_id == BUILTIN_QUAD and r.m_Materials and r.m_Materials[0].path_id:
                         tex_pptr, _, _ = texture_name(r.m_Materials[0].deref().read())
                         quads.append({
                             "name": go.m_Name,
@@ -577,13 +670,21 @@ IMAGE_TYPES = {0: "simple", 1: "sliced", 2: "tiled", 3: "filled"}
 FILL_METHODS = {0: "horizontal", 1: "vertical", 2: "radial90", 3: "radial180", 4: "radial360"}
 
 
-def export_canvases(exporter, rig):
-    """World-space canvases: each Image's rect in its canvas's units, laid out by RectTransform anchors.
+# TextMeshPro's alignments, as UI Text's TextAnchor columns and rows.
+TMP_COLUMNS = {1: 0, 2: 1, 4: 2, 8: 0, 16: 0, 32: 1}
+TMP_ROWS = {256: 0, 512: 1, 1024: 2, 2048: 2, 4096: 1, 8192: 0}
 
-    Returns the canvases and, by Image component path id, where each image landed (canvas, index).
+
+def export_canvases(exporter, rig, shown_by_code):
+    """World-space canvases: each Image's rect in its canvas's units, laid out by RectTransform anchors. Images
+    that are off are left out, unless a script turns them on (`shown_by_code`); those say they start off.
+
+    Returns the canvases; by Image and Text component path id, where each landed (canvas, index); and by
+    transform path id, each laid out rect.
     """
     canvases = []
     placed = {}
+    rects = {}
     for go_id, active in rig.active.items():
         if not active:
             continue
@@ -614,8 +715,26 @@ def export_canvases(exporter, rig):
             child_go = transform.m_GameObject.read()
             if not rig.active.get(child_go.object_reader.path_id):
                 return
+            rects[transform.object_reader.path_id] = own_rect
             for c in child_go.m_Component:
                 obj = c.component.deref()
+                if obj.type.name == "MonoBehaviour" and script_name(obj) == "TextMeshProUGUI":
+                    tree = obj.read_typetree()
+                    if tree["m_Enabled"]:
+                        color = tree["m_fontColor"]
+                        placed[obj.path_id] = (len(canvases), len(texts))
+                        texts.append({
+                            "name": child_go.m_Name,
+                            "rect": [round(v, 6) for v in own_rect],
+                            "pivot": [transform.m_Pivot.x, transform.m_Pivot.y],
+                            "scale": transform.m_LocalScale.x,
+                            "color": [color["r"], color["g"], color["b"], color["a"]],
+                            "font": exporter.tmp_font(obj.read().m_fontAsset),
+                            "fontSize": tree["m_fontSize"],
+                            "alignment": TMP_ROWS[tree["m_VerticalAlignment"]] * 3 + TMP_COLUMNS[tree["m_HorizontalAlignment"]],
+                            "text": tree["m_text"],
+                        })
+                    continue
                 if obj.type.name == "MonoBehaviour" and script_name(obj) == "Text":
                     tree = obj.read_typetree()
                     if tree["m_Enabled"]:
@@ -638,7 +757,7 @@ def export_canvases(exporter, rig):
                     continue
                 tree = obj.read_typetree()
                 image = obj.read()
-                if not tree["m_Enabled"]:
+                if not tree["m_Enabled"] and obj.path_id not in shown_by_code:
                     continue
                 color = tree["m_Color"]
                 placed[obj.path_id] = (len(canvases), len(images))
@@ -669,13 +788,15 @@ def export_canvases(exporter, rig):
                     "fillClockwise": bool(tree["m_FillClockwise"]),
                     "fillAmount": tree["m_FillAmount"],
                 })
+                if not tree["m_Enabled"]:
+                    images[-1]["enabled"] = False
             for child in transform.m_Children:
                 t = child.deref().read()
                 walk(t, layout(t, own_rect))
 
         walk(root, rect)
         canvases.append({"bone": rig.index[root.object_reader.path_id], "images": images, "texts": texts})
-    return canvases, placed
+    return canvases, placed, rects
 
 
 def coin_flash(exporter, flash_go):
@@ -817,7 +938,23 @@ def color_list(color):
     return [color.r, color.g, color.b, color.a]
 
 
-def export_scripts(exporter, rig, colors, placed):
+def placed_under(transform, placed):
+    """Where the Images and Texts in a transform's subtree landed (canvas, index), as two lists."""
+    images, texts = [], []
+
+    def walk(t):
+        for c in t.m_GameObject.read().m_Component:
+            obj = c.component.deref()
+            if obj.path_id in placed and obj.type.name == "MonoBehaviour":
+                (texts if script_name(obj) in ("Text", "TextMeshProUGUI") else images).append(list(placed[obj.path_id]))
+        for child in t.m_Children:
+            walk(child.deref().read())
+
+    walk(transform)
+    return {"images": images, "texts": texts}
+
+
+def export_scripts(exporter, rig, colors, placed, rects):
     """Values from ULTRAKILL scripts on the model that the mod's ports of them need."""
     scripts = {}
     for go_id, active in rig.active.items():
@@ -910,6 +1047,20 @@ def export_scripts(exporter, rig, colors, placed):
                     "emptyColor": color(tree["emptyColor"]),
                     "fullColor": color(tree["fullColor"]),
                 }
+                if nailgun.zapperAttachTransform.path_id:
+                    slider_fill = lambda p: list(placed[next(  # noqa: E731
+                        c.component.deref().path_id for c in p.deref().read().m_FillRect.deref().read().m_GameObject.read().m_Component
+                        if c.component.deref().type.name == "MonoBehaviour" and script_name(c.component.deref()) == "Image")])
+                    scripts["nailgun"].update({
+                        "zapperAttach": rig.index[nailgun.zapperAttachTransform.path_id],
+                        "statusText": list(placed[nailgun.statusText.path_id]),
+                        "distanceMeter": slider_fill(nailgun.distanceMeter),
+                        "zapMeter": slider_fill(nailgun.zapMeter),
+                        "zapMeterParts": placed_under(transform_of(nailgun.zapMeter.deref().read().m_GameObject.read()), placed),
+                        "warningX": list(placed[nailgun.warningX.path_id]),
+                        "rechargingOverlay": placed_under(transform_of(nailgun.rechargingOverlay.deref().read()), placed),
+                        "rechargingMeter": list(placed[nailgun.rechargingMeter.path_id]),
+                    })
             elif kind == "Spin" and active:
                 tree = obj.read_typetree()
                 axis = tree["spinDirection"]
@@ -935,6 +1086,13 @@ def export_scripts(exporter, rig, colors, placed):
                         "direction": obj.read_typetree()["m_Direction"],
                         "fillExtra": [fill.m_SizeDelta.x, fill.m_SizeDelta.y],
                     })
+                    # The handle sits at the value's place across its slide area, keeping its own size.
+                    handle = slider.m_HandleRect.deref().read() if slider.m_HandleRect.path_id else None
+                    handle_image = handle and next((c.component.deref().path_id for c in handle.m_GameObject.read().m_Component
+                                                    if c.component.deref().type.name == "MonoBehaviour" and script_name(c.component.deref()) == "Image"), None)
+                    if handle_image in placed and handle.m_Father.path_id in rects:
+                        scripts["sliders"][-1]["handle"] = list(placed[handle_image])
+                        scripts["sliders"][-1]["handleArea"] = [round(v, 6) for v in rects[handle.m_Father.path_id]]
             elif kind == "CopyColor" and active:
                 copy = obj.read()
                 own = next(c.component.deref().path_id for c in go.m_Component
@@ -949,7 +1107,47 @@ def export_scripts(exporter, rig, colors, placed):
                 scale = transform_of(go).m_LocalScale.x
                 scripts["nail"] = {**{k: tree[k] for k in ("damage", "fodderDamageBoost", "heated")},
                                    "mass": body.m_Mass, "triggerRadius": trigger.m_Radius * scale, "radius": capsule.m_Radius * scale,
-                                   "trail": trail_values(exporter, go)}
+                                   "trail": trail_values(exporter, go), "zapTexture": material_texture(exporter, obj.read().zapMaterial)}
+            elif kind == "Zapper":
+                zapper = obj.read()
+                tree = obj.read_typetree()
+                trigger = next(c.component.deref().read() for c in go.m_Component if c.component.deref().type.name == "SphereCollider")
+                body = next(t for t in transform_of(go).m_Children if any(
+                    c.component.deref().type.name == "BoxCollider" for c in t.deref().read().m_GameObject.read().m_Component))
+                body_go = body.deref().read().m_GameObject.read()
+                line = next(c.component.deref() for c in go.m_Component if c.component.deref().type.name == "LineRenderer")
+                orb_go = zapper.lightningPulseOrb.deref().read().m_GameObject.read()
+                orb_line = next(c.component.deref() for c in orb_go.m_Component if c.component.deref().type.name == "LineRenderer")
+                line_params = lambda r: r.read_typetree()["m_Parameters"]  # noqa: E731
+                scripts["zapper"] = {
+                    **{k: tree[k] for k in ("damage", "maxDistance")},
+                    "triggerRadius": trigger.m_Radius,
+                    "body": rig.index[body.path_id],
+                    "box": box_values(body_go),
+                    "openProngs": rig.index[transform_of(zapper.openProngs.deref().read()).object_reader.path_id],
+                    "closedProngs": rig.index[transform_of(zapper.closedProngs.deref().read()).object_reader.path_id],
+                    "orb": rig.index[zapper.lightningPulseOrb.path_id],
+                    "line": {"width": line_params(line)["widthMultiplier"], "color": gradient_value(line_params(line)["colorGradient"]),
+                             "material": renderer_material(exporter, line.read())},
+                    "orbLine": {"width": line_params(orb_line)["widthMultiplier"],
+                                "widthCurve": [[k["time"], k["value"]] for k in line_params(orb_line)["widthCurve"]["m_Curve"]],
+                                "color": gradient_value(line_params(orb_line)["colorGradient"]),
+                                "material": renderer_material(exporter, orb_line.read())},
+                }
+            elif kind == "ElectricityLine":
+                values = obj.read_typetree()
+                renderer = next(c.component.deref() for c in go.m_Component if c.component.deref().type.name == "LineRenderer")
+                removal = next((c.component.deref().read_typetree() for c in go.m_Component
+                                if c.component.deref().type.name == "MonoBehaviour" and script_name(c.component.deref()) == "RemoveOnTime"), None)
+                if removal is None:
+                    continue
+                scripts["electricityLine"] = {
+                    "frames": exporter.texture_array(obj.read().electricityArray),
+                    "colors": gradient_value(values["colors"]),
+                    **{k: values[k] for k in ("minWidth", "maxWidth", "fadeSpeed")},
+                    "lifetime": removal["time"],
+                    "material": renderer_material(exporter, renderer.read()),
+                }
             elif kind == "Magnet":
                 tree = obj.read_typetree()
                 collider = next(c.component.deref().read() for c in go.m_Component if c.component.deref().type.name == "SphereCollider")
@@ -1217,10 +1415,11 @@ def variation_glow(root_go, colors):
 def export_model(exporter, root_go, offset, colors):
     rig = Rig(root_go, at_origin=offset is None)
     activate_controlled(rig, root_go)
+    activate_scripted(rig, root_go)
     parts, quads, sprites, particles = export_parts(exporter, rig, variation_glow(root_go, colors))
-    canvases, placed = export_canvases(exporter, rig)
+    canvases, placed, rects = export_canvases(exporter, rig, code_shown_images(rig))
     model = {"origin": list(offset or (0, 0, 0)), "bones": rig.bones, "parts": parts, "quads": quads, "sprites": sprites, "particles": particles,
-             "canvases": canvases, "scripts": export_scripts(exporter, rig, colors, placed)}
+             "canvases": canvases, "scripts": export_scripts(exporter, rig, colors, placed, rects)}
     animator = find_animator(rig)
     if animator is not None and animator.m_Controller.path_id:
         model["animator"] = export_animator(animator, rig)
@@ -1398,7 +1597,7 @@ def main():
     from PIL import Image
     Image.new("RGBA", (1, 1), (255, 255, 255, 255)).save(OUT / "textures" / "viewmodel" / "blank.png")
 
-    exporter = Exporter()
+    exporter = Exporter({file_name(obj.read().m_Name): obj for obj in env.objects if obj.type.name == "Font"})
     colors = variation_colors(env)
     for name, (root, offset) in roots.items():
         export_icon(root, name, colors)

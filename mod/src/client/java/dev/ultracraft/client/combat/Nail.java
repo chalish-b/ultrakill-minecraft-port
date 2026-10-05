@@ -98,6 +98,8 @@ final class Nail {
 	final List<Magnet> magnets = new ArrayList<>();
 	/** The nail bomb it's part of. */
 	@Nullable Burst burst;
+	/** Nail.Zap: the enemy it's in conducts; it shows its zap material, and comes out with sparks. */
+	boolean zapped;
 	/** The enemy it's stuck in, where in it (relative to its position, turned with its body) and how it points there. */
 	@Nullable LivingEntity stuckIn;
 	private Vec3 offset = Vec3.ZERO;

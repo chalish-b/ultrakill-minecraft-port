@@ -38,8 +38,8 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Beams, blood and impacts, muzzle flashes, explosions' looks, and drawing beams, coins, coin trails, pellets,
- * shells, nails and magnets in the world.
+ * Beams, blood and impacts, muzzle flashes, explosions' looks, electric arcs, and drawing beams, coins, coin trails,
+ * pellets, shells, nails, magnets and the zapper in the world.
  */
 final class Effects {
 	/**
@@ -181,6 +181,27 @@ final class Effects {
 	private record MuzzleFlash(Vec3 position, Quaternionf rotation, double start) {
 	}
 
+	/** "ElectricityLine": a zap's arc from one point to another, fading out (its ElectricityLine's fadeSpeed). */
+	private static final class Arc {
+		final Vec3 from;
+		final Vec3 to;
+		final double start;
+		/** Its current pick, swapped every 0.05 s: the arc frame, the width (units) and the colors at either end. */
+		double cooldown;
+		int frame;
+		double width;
+		float[] startColor = {1, 1, 1, 1};
+		float[] endColor = {1, 1, 1, 1};
+
+		Arc(Vec3 from, Vec3 to, double start) {
+			this.from = from;
+			this.to = to;
+			this.start = start;
+		}
+	}
+
+	private static final String ELECTRIC_LINE = "electric_line";
+
 	private record BulletSpark(Vec3 start, Vec3 velocity, double born) {
 	}
 
@@ -197,6 +218,7 @@ final class Effects {
 	private final List<MuzzleFlash> muzzleFlashes = new ArrayList<>();
 	private final List<PrefabFlash> prefabFlashes = new ArrayList<>();
 	private final List<BulletSpark> bulletSparks = new ArrayList<>();
+	private final List<Arc> arcs = new ArrayList<>();
 	/** Particle systems played on their own, out of a prefab. */
 	private final List<Particles> particles = new ArrayList<>();
 	private final RandomSource random = RandomSource.create();
@@ -222,6 +244,16 @@ final class Effects {
 		this.looks.removeIf(ExplosionLook::done);
 		this.muzzleFlashes.removeIf(flash -> (this.clock - flash.start) * MUZZLE_FADE >= 1);
 		this.bulletSparks.removeIf(spark -> this.clock - spark.born > BULLET_SPARK_LIFETIME);
+		JsonObject electricity = electricityLine();
+		if (electricity != null) {
+			this.arcs.removeIf(arc -> arcFade(arc, electricity) <= 0 || this.clock - arc.start >= electricity.get("lifetime").getAsDouble());
+			for (Arc arc : this.arcs) {
+				arc.cooldown -= dt;
+				if (arc.cooldown <= 0) {
+					pickArc(arc, electricity);
+				}
+			}
+		}
 		for (Particles system : this.particles) {
 			system.update(dt);
 		}
@@ -308,6 +340,68 @@ final class Effects {
 		beam.arcWidth = min + this.random.nextDouble() * (electricity.get("maxWidth").getAsDouble() - min);
 		beam.arcStart = gradientAt(electricity.getAsJsonObject("colors"), this.random.nextDouble());
 		beam.arcEnd = gradientAt(electricity.getAsJsonObject("colors"), this.random.nextDouble());
+	}
+
+	/** A zap's arc from {@code from} to {@code to}. */
+	void arc(Vec3 from, Vec3 to) {
+		JsonObject electricity = electricityLine();
+		if (electricity == null) {
+			return;
+		}
+		Arc arc = new Arc(from, to, this.clock);
+		pickArc(arc, electricity);
+		this.arcs.add(arc);
+	}
+
+	private static @Nullable JsonObject electricityLine() {
+		UltraModel model = UltraModel.get(ELECTRIC_LINE);
+		return model == null ? null : model.script("electricityLine");
+	}
+
+	/** ElectricityLine.Update's pick: a random arc frame, width between its two, and colors along its gradient for both ends. */
+	private void pickArc(Arc arc, JsonObject electricity) {
+		arc.cooldown = ARC_INTERVAL;
+		arc.frame = this.random.nextInt(electricity.getAsJsonArray("frames").size());
+		double min = electricity.get("minWidth").getAsDouble();
+		arc.width = min + this.random.nextDouble() * (electricity.get("maxWidth").getAsDouble() - min);
+		arc.startColor = gradientAt(electricity.getAsJsonObject("colors"), this.random.nextDouble());
+		arc.endColor = gradientAt(electricity.getAsJsonObject("colors"), this.random.nextDouble());
+	}
+
+	/** How much of the arc is left as it fades: 1 to 0. */
+	private double arcFade(Arc arc, JsonObject electricity) {
+		return 1 - (this.clock - arc.start) * electricity.get("fadeSpeed").getAsDouble();
+	}
+
+	/** Each arc: a strip from end to end facing the camera, its frame stretched along it, faded. */
+	private void renderArcs(LevelRenderContext context, Vec3 camera) {
+		JsonObject electricity = electricityLine();
+		if (electricity == null) {
+			return;
+		}
+		for (Arc arc : this.arcs) {
+			float fade = (float)Math.clamp(arcFade(arc, electricity), 0, 1);
+			Identifier texture = Identifier.parse(electricity.getAsJsonArray("frames").get(arc.frame).getAsString());
+			Vec3 from = arc.from.subtract(camera);
+			Vec3 to = arc.to.subtract(camera);
+			Vec3 side = to.subtract(from).cross(from.add(to).scale(0.5)).normalize().scale(arc.width * PlayerShape.BLOCKS_PER_UNIT / 2);
+			if (!Double.isFinite(side.x)) {
+				continue;
+			}
+			float[] a = {arc.startColor[0], arc.startColor[1], arc.startColor[2], arc.startColor[3] * fade};
+			float[] b = {arc.endColor[0], arc.endColor[1], arc.endColor[2], arc.endColor[3] * fade};
+			float[] tint = {1, 1, 1, 1};
+			context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.beaconBeam(texture, true), (pose, buffer) -> {
+				lineCorner(pose, buffer, from.add(side), 0, 0, a, tint);
+				lineCorner(pose, buffer, from.subtract(side), 0, 1, a, tint);
+				lineCorner(pose, buffer, to.subtract(side), 1, 1, b, tint);
+				lineCorner(pose, buffer, to.add(side), 1, 0, b, tint);
+				lineCorner(pose, buffer, to.add(side), 1, 0, b, tint);
+				lineCorner(pose, buffer, to.subtract(side), 1, 1, b, tint);
+				lineCorner(pose, buffer, from.subtract(side), 0, 1, a, tint);
+				lineCorner(pose, buffer, from.add(side), 0, 0, a, tint);
+			});
+		}
 	}
 
 	/** The style's beam prefab line that has an ElectricityLine, if any. */
@@ -474,6 +568,7 @@ final class Effects {
 		renderMuzzleFlashes(context, camera);
 		renderPrefabFlashes(context, camera);
 		renderBulletSparks(context, camera);
+		renderArcs(context, camera);
 		UltraModel shell = UltraModel.get("shotgun_shell");
 		if (shell != null) {
 			for (Shell s : shells) {
@@ -618,7 +713,16 @@ final class Effects {
 			poseStack.translate(nail.position.x - camera.x, nail.position.y - camera.y, nail.position.z - camera.z);
 			poseStack.rotate(facing(nail.forward));
 			poseStack.scale(units, units, units);
-			model.submit(poseStack, context.submitNodeCollector(), LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(nail.position)));
+			if (nail.zapped) {
+				Identifier zapTexture = Identifier.parse(nail.script.get("zapTexture").getAsString());
+				Matrix4f[] world = model.boneMatrices(model.rest(), new Quaternionf());
+				for (int i = 0; i < model.meshCount(); i++) {
+					model.submitMaterial(poseStack, context.submitNodeCollector(), world, model.meshMaterialName(i), texture -> RenderTypes.entityTranslucentEmissive(zapTexture),
+						0xFFFFFFFF, LightCoordsUtil.FULL_BRIGHT);
+				}
+			} else {
+				model.submit(poseStack, context.submitNodeCollector(), LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(nail.position)));
+			}
 			poseStack.popPose();
 		}
 	}
@@ -653,6 +757,115 @@ final class Effects {
 			}
 			poseStack.popPose();
 		}
+	}
+
+	/**
+	 * The zapper: its model, its prongs open or (attached) closed; its cable from where it starts, in its color; and
+	 * once attached, its pulse orb on the cable with its line back to the cable's start.
+	 */
+	void renderZapper(LevelRenderContext context, Zapper zapper) {
+		Minecraft minecraft = Minecraft.getInstance();
+		UltraModel model = UltraModel.get("zapper");
+		if (minecraft.level == null || model == null || zapper.removed) {
+			return;
+		}
+		Vec3 camera = minecraft.gameRenderer.mainCamera().position();
+		JsonObject script = model.script("zapper");
+		PoseStack poseStack = context.poseStack();
+		float units = (float)PlayerShape.BLOCKS_PER_UNIT;
+		int light = LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(zapper.position));
+		int hidden = script.get(zapper.attached ? "openProngs" : "closedProngs").getAsInt();
+		int orb = script.get("orb").getAsInt();
+		poseStack.pushPose();
+		poseStack.translate(zapper.position.x - camera.x, zapper.position.y - camera.y, zapper.position.z - camera.z);
+		poseStack.rotate(facing(zapper.forward));
+		poseStack.scale(units, units, units);
+		Matrix4f[] world = model.boneMatrices(model.rest(), new Quaternionf());
+		model.submitGlowing(poseStack, context.submitNodeCollector(), light, world, bone -> !descends(model, bone, hidden) && !descends(model, bone, orb), object -> null);
+		poseStack.popPose();
+
+		JsonObject line = script.getAsJsonObject("line");
+		Identifier texture = Identifier.parse(line.getAsJsonObject("material").get("texture").getAsString());
+		double width = line.get("width").getAsDouble() * PlayerShape.BLOCKS_PER_UNIT;
+		float[] color = zapper.cableColor();
+		Vec3 from = zapper.lineStart.subtract(camera);
+		Vec3 to = zapper.position.subtract(camera);
+		int startLight = LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(zapper.lineStart));
+		context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.entityCutout(texture), (pose, buffer) -> {
+			Vec3 side = to.subtract(from).cross(from.add(to).scale(0.5)).normalize().scale(width / 2);
+			if (!Double.isFinite(side.x)) {
+				return;
+			}
+			Vec3[] corners = {from.add(side), from.subtract(side), to.subtract(side), to.add(side)};
+			float[][] uvs = {{0, 0}, {0, 1}, {1, 1}, {1, 0}};
+			int[] lights = {startLight, startLight, light, light};
+			for (int k = 0; k < 4; k++) {
+				cableVertex(pose, buffer, corners[k], uvs[k], color, lights[k]);
+			}
+			for (int k = 3; k >= 0; k--) {
+				cableVertex(pose, buffer, corners[k], uvs[k], color, lights[k]);
+			}
+		});
+
+		if (!zapper.attached) {
+			return;
+		}
+		Vec3 pulse = zapper.pulsePosition();
+		if (zapper.orb != null) {
+			zapper.orb.render(context, camera);
+		}
+		UltraModel.Quad quad = model.quads().isEmpty() ? null : model.quads().getFirst();
+		if (quad != null && quad.texture() != null) {
+			float size = (float)(model.rest().sx(orb) * PlayerShape.BLOCKS_PER_UNIT);
+			poseStack.pushPose();
+			poseStack.translate(pulse.x - camera.x, pulse.y - camera.y, pulse.z - camera.z);
+			poseStack.rotate(facing(zapper.forward));
+			poseStack.scale(size, size, size);
+			quad(context, RenderTypes.beaconBeam(quad.texture(), true), new float[]{-0.5F, -0.5F, 0.5F, 0.5F}, 1, 1, 1, 1);
+			poseStack.popPose();
+		}
+		JsonObject orbLine = script.getAsJsonObject("orbLine");
+		JsonObject material = orbLine.getAsJsonObject("material");
+		float tint = material.getAsJsonObject("colors").has("_TintColor") ? 2 * material.getAsJsonObject("colors").getAsJsonArray("_TintColor").get(0).getAsFloat() : 1;
+		double orbWidth = orbLine.get("width").getAsDouble() * PlayerShape.BLOCKS_PER_UNIT;
+		JsonArray curve = orbLine.getAsJsonArray("widthCurve");
+		JsonObject gradient = orbLine.getAsJsonObject("color");
+		Vec3 head = pulse.subtract(camera);
+		Vec3 tail = from;
+		context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.lightning(), (pose, buffer) -> {
+			Vec3 along = tail.subtract(head);
+			Vec3 facing = along.cross(head.add(tail).scale(0.5)).normalize();
+			if (!Double.isFinite(facing.x)) {
+				return;
+			}
+			Vec3 headSide = facing.scale(orbWidth * curve(curve, 0) / 2);
+			Vec3 tailSide = facing.scale(orbWidth * curve(curve, 1) / 2);
+			float[] a = Particles.gradient(gradient, 0);
+			float[] b = Particles.gradient(gradient, 1);
+			Vec3[] corners = {head.add(headSide), head.subtract(headSide), tail.subtract(tailSide), tail.add(tailSide)};
+			float[][] colors = {a, a, b, b};
+			for (int k = 0; k < 4; k++) {
+				buffer.addVertex(pose, (float)corners[k].x, (float)corners[k].y, (float)corners[k].z).setColor(colors[k][0] * tint, colors[k][1] * tint, colors[k][2] * tint, colors[k][3]);
+			}
+			for (int k = 3; k >= 0; k--) {
+				buffer.addVertex(pose, (float)corners[k].x, (float)corners[k].y, (float)corners[k].z).setColor(colors[k][0] * tint, colors[k][1] * tint, colors[k][2] * tint, colors[k][3]);
+			}
+		});
+	}
+
+	private static void cableVertex(PoseStack.Pose pose, VertexConsumer buffer, Vec3 at, float[] uv, float[] color, int light) {
+		buffer.addVertex(pose, (float)at.x, (float)at.y, (float)at.z).setColor(color[0], color[1], color[2], color[3]).setUv(uv[0], uv[1])
+			.setOverlay(OverlayTexture.NO_OVERLAY).setLight(light).setNormal(pose, 0, 1, 0);
+	}
+
+	/** Whether {@code bone} is {@code ancestor} or under it. */
+	private static boolean descends(UltraModel model, int bone, int ancestor) {
+		for (int b = bone; b >= 0; b = model.parent(b)) {
+			if (b == ancestor) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

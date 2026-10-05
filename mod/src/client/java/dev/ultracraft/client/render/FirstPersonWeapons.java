@@ -69,6 +69,7 @@ public final class FirstPersonWeapons {
 		SHOTGUN_SAWED_ON("shotgun_sawed_on"),
 		NAILGUN_ATTRACTOR("nailgun_attractor"),
 		NAILGUN_OVERHEAT("nailgun_overheat"),
+		NAILGUN_JUMPSTART("nailgun_jumpstart"),
 		RAILCANNON_ELECTRIC("railcannon_electric"),
 		RAILCANNON_SCREWDRIVER("railcannon_screwdriver"),
 		RAILCANNON_MALICIOUS("railcannon_malicious");
@@ -153,12 +154,29 @@ public final class FirstPersonWeapons {
 	 * @param ammo the Attractor's nails
 	 * @param layerWeight how much its Animator's second layer holds the gun steady
 	 * @param steam whether the Overheat's barrels let off steam
+	 * @param zap the JumpStart's screen
 	 */
 	public record NailgunState(
 		double barrelAngle, double heat, double heatMeter, float[] heatMeterBackground, double[] charges, boolean[] chargesFull, int ammo,
-		float layerWeight, boolean steam
+		float layerWeight, boolean steam, ZapHud zap
 	) {
-		public static final NailgunState NONE = new NailgunState(0, 0, 0, new float[]{0, 0, 0, 0}, new double[0], new boolean[0], 0, 0, false);
+		public static final NailgunState NONE = new NailgunState(0, 0, 0, new float[]{0, 0, 0, 0}, new double[0], new boolean[0], 0, 0, false, ZapHud.NONE);
+	}
+
+	/**
+	 * What the JumpStart's screen shows.
+	 *
+	 * @param recharging whether the recharge overlay is up, and how far round its meter has filled
+	 * @param status the status text and its color, or the variant's color if {@code statusVariant}
+	 * @param distanceMeter the distance meter's value, 0 to 1
+	 * @param zapMeterShown whether the zap meter shows, and its value, 0 to 1
+	 * @param warning whether the warning X shows, and its color
+	 */
+	public record ZapHud(
+		boolean recharging, double rechargeFill, String status, float[] statusColor, boolean statusVariant, double distanceMeter, boolean zapMeterShown,
+		double zapMeter, boolean warning, float[] warningColor
+	) {
+		public static final ZapHud NONE = new ZapHud(false, 0, "", new float[]{1, 1, 1, 1}, false, 0, false, 0, false, new float[]{1, 1, 1, 1});
 	}
 
 	/** The shotgun's meter Slider: 0 to 60, filling from the right, its fill 10 units wider than its share. */
@@ -841,7 +859,8 @@ public final class FirstPersonWeapons {
 	 * The nailgun, its barrels glowing with their heat (BarrelHeat's color, its alpha the heat, adds its orange), and
 	 * its screen: the Overheat's heat meter over a background going from gray to orange, its heat sinks and the
 	 * Attractor's magnet charges filling up gray and showing in the variant's color once full, the Attractor's nail
-	 * count, and the Overheat's steam.
+	 * count, the JumpStart's status, distance meter, zap meter, warning X and recharge overlay, and the Overheat's
+	 * steam.
 	 */
 	private void submitNailgun(PoseStack poseStack, SubmitNodeCollector collector, int light, Viewmodel weapon) {
 		JsonObject script = weapon.model.script("nailgun");
@@ -859,12 +878,15 @@ public final class FirstPersonWeapons {
 		float[] variation = variationColor(script);
 		float[] empty = color(script.getAsJsonArray("emptyColor"));
 		JsonArray charges = script.getAsJsonArray("heatSinkImages");
-		JsonObject slider = weapon.model.scripts("sliders").isEmpty() ? null : weapon.model.scripts("sliders").get(0).getAsJsonObject();
+		boolean jumpstart = script.has("zapperAttach");
+		ZapHud zap = state.zap();
+		JsonArray sliders = weapon.model.scripts("sliders");
 		for (int c = 0; c < weapon.model.canvases().size(); c++) {
 			UltraModel.Canvas canvas = weapon.model.canvases().get(c);
 			// Each image's color and fill, then CopyColor gives its images their targets' colors.
 			float[][] colors = new float[canvas.images().size()][];
 			float[] fills = new float[colors.length];
+			boolean[] hidden = new boolean[colors.length];
 			for (int i = 0; i < colors.length; i++) {
 				colors[i] = canvas.images().get(i).color();
 				fills[i] = canvas.images().get(i).fillAmount();
@@ -874,8 +896,19 @@ public final class FirstPersonWeapons {
 						colors[i] = state.chargesFull()[k] ? variation : empty;
 					}
 				}
-				if (slider != null && at(slider.get("background"), c, i)) {
+				if (!jumpstart && !sliders.isEmpty() && at(sliders.get(0).getAsJsonObject().get("background"), c, i)) {
 					colors[i] = state.heatMeterBackground();
+				}
+				if (jumpstart) {
+					hidden[i] = !zap.recharging() && within(script.getAsJsonObject("rechargingOverlay").getAsJsonArray("images"), c, i)
+						|| !zap.zapMeterShown() && within(script.getAsJsonObject("zapMeterParts").getAsJsonArray("images"), c, i)
+						|| !zap.warning() && at(script.get("warningX"), c, i);
+					if (at(script.get("rechargingMeter"), c, i)) {
+						fills[i] = (float)zap.rechargeFill();
+					}
+					if (at(script.get("warningX"), c, i)) {
+						colors[i] = zap.warningColor();
+					}
 				}
 			}
 			for (JsonElement element : weapon.model.scripts("copyColors")) {
@@ -886,21 +919,77 @@ public final class FirstPersonWeapons {
 				}
 			}
 			for (int i = 0; i < colors.length; i++) {
+				if (hidden[i]) {
+					continue;
+				}
 				UltraModel.Image image = canvas.images().get(i);
-				if (slider != null && at(slider.get("fill"), c, i)) {
-					image = sliderFill(image, slider, state.heatMeter());
+				for (JsonElement element : sliders) {
+					JsonObject slider = element.getAsJsonObject();
+					double value = !jumpstart ? state.heatMeter() : at(slider.get("fill"), script.getAsJsonArray("distanceMeter")) ? zap.distanceMeter() : zap.zapMeter();
+					if (at(slider.get("fill"), c, i)) {
+						image = sliderFill(image, slider, value);
+					}
+					if (slider.has("handle") && at(slider.get("handle"), c, i)) {
+						image = sliderHandle(image, slider, value);
+					}
 				}
 				ModelOverlays.image(poseStack, collector, RenderTypes.text(image.texture()), world[canvas.bone()], image, colors[i], fills[i], i);
 			}
 			for (int t = 0; t < canvas.texts().size(); t++) {
 				UltraModel.Text text = canvas.texts().get(t);
 				String content = at(script.get("ammoText"), c, t) ? Integer.toString(state.ammo()) : text.text();
+				if (jumpstart && !zap.recharging() && within(script.getAsJsonObject("rechargingOverlay").getAsJsonArray("texts"), c, t)) {
+					continue;
+				}
+				if (jumpstart && at(script.get("statusText"), c, t)) {
+					content = zap.status();
+					text = text.withColor(zap.statusVariant() ? variation : zap.statusColor());
+				}
 				ModelOverlays.text(poseStack, collector, world[canvas.bone()], text, content, colors.length + t);
 			}
 		}
 		for (ViewmodelParticles system : weapon.steamParticles) {
 			system.submit(poseStack, collector, world[system.bone], STEAM_COLOR);
 		}
+	}
+
+	/** Whether {@code place} is {@code canvas}'s {@code index}th. */
+	private static boolean at(JsonElement place, JsonArray other) {
+		return at(place, other.get(0).getAsInt(), other.get(1).getAsInt());
+	}
+
+	/** Whether one of {@code places} is {@code canvas}'s {@code index}th. */
+	private static boolean within(JsonArray places, int canvas, int index) {
+		for (JsonElement place : places) {
+			if (at(place, canvas, index)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** A Slider's handle at {@code value}: its middle that far across its slide area, in the slider's direction, keeping its size. */
+	private static UltraModel.Image sliderHandle(UltraModel.Image handle, JsonObject slider, double value) {
+		float[] r = handle.rect();
+		float[] area = floats(slider.getAsJsonArray("handleArea"));
+		int direction = slider.get("direction").getAsInt();
+		float t = (float)Math.clamp(value, 0, 1);
+		if (direction >= 2) {
+			float half = (r[3] - r[1]) / 2;
+			float y = direction == 2 ? area[1] + (area[3] - area[1]) * t : area[3] - (area[3] - area[1]) * t;
+			return handle.withRect(new float[]{r[0], y - half, r[2], y + half});
+		}
+		float half = (r[2] - r[0]) / 2;
+		float x = direction == 0 ? area[0] + (area[2] - area[0]) * t : area[2] - (area[2] - area[0]) * t;
+		return handle.withRect(new float[]{x - half, r[1], x + half, r[3]});
+	}
+
+	private static float[] floats(JsonArray array) {
+		float[] values = new float[array.size()];
+		for (int i = 0; i < values.length; i++) {
+			values[i] = array.get(i).getAsFloat();
+		}
+		return values;
 	}
 
 	/** Whether {@code place} (a canvas and an index on it, or null) is {@code canvas}'s {@code index}th. */

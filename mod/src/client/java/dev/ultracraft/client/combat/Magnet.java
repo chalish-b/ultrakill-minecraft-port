@@ -33,7 +33,7 @@ import java.util.Optional;
  * what they can hold; holding more than that, it breaks. A revolver beam through it, or a slam landing on it,
  * breaks it too. Breaking, it throws out its nails as a nail bomb, and its sawblades back at where it was.
  */
-final class Magnet {
+final class Magnet implements Conductor.Zappable {
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	/** Time.fixedDeltaTime. */
 	private static final double STEP = 0.008;
@@ -99,6 +99,8 @@ final class Magnet {
 	private Vec3 localForward = Vec3.ZERO;
 	/** Its Breakable cube, which revolver beams break it by; gone once it's in a living enemy. */
 	private boolean breakable = true;
+	/** Magnet.health: zaps it passes on wear it down. */
+	private double health;
 	/** The nails it holds, and the magnets it has touched, whose room it shares. */
 	private final List<Nail> nails = new ArrayList<>();
 	private final List<Magnet> connected = new ArrayList<>();
@@ -130,6 +132,7 @@ final class Magnet {
 		this.forward = forward;
 		this.velocity = forward.scale(SPEED);
 		this.bombTimer = model.script("timeBomb").get("timer").getAsDouble();
+		this.health = this.magnet.get("health").getAsDouble();
 		this.beeperPitch = model.script("timeBomb").get("beeperPitch").getAsDouble();
 		this.trail.addFirst(new Pellet.TrailPoint(position, 0));
 	}
@@ -446,6 +449,34 @@ final class Magnet {
 		placed.add("center", offset);
 		placed.add("size", box.getAsJsonArray("size"));
 		return OrientedBox.of(this.position, this.forward, placed, MODEL_SCALE * S);
+	}
+
+	/** The living enemy it's stuck in (EnemyIdentifier.stuckMagnets), if any. */
+	@Nullable LivingEntity onEnemy() {
+		return this.onEnemy;
+	}
+
+	/** EnemyIdentifier.DelayedAfterShock: the enemy it's in conducts, costing it a point of health. */
+	void weaken() {
+		this.health--;
+	}
+
+	/** Magnet.DamageMagnet: a zap it passed on costs it a point of health; out of health, it breaks. */
+	void damage(Level level, LocalPlayer player, Hits hits) {
+		this.health--;
+		if (this.health <= 0) {
+			destroy(level, player, hits);
+		}
+	}
+
+	@Override
+	public Vec3 zapPosition() {
+		return center();
+	}
+
+	@Override
+	public boolean zapGone() {
+		return this.removed;
 	}
 
 	/** Its cube hit by a revolver beam (which goes on through) or a slam's landing: it breaks. */

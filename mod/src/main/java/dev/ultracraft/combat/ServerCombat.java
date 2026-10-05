@@ -16,6 +16,7 @@ import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.SlamHitPayload;
 import dev.ultracraft.net.WeaponHitPayload;
+import dev.ultracraft.net.ZapHurtPayload;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.core.registries.Registries;
@@ -77,6 +78,11 @@ public final class ServerCombat {
 	/** LivingEntity's damage cooldown after a hit (ticks); hit with more of it left than this, an entity doesn't react. */
 	private static final int DAMAGE_COOLDOWN = 20;
 	private static final int DAMAGE_COOLDOWN_REACTS = 10;
+	/** The health the zapper leaves an enemy that conducts its zap. */
+	private static final float CONDUCTOR_HEALTH = 0.001F;
+	/** A zap through the water the player is in (EnemyIdentifier.Zap), as damage that never scales with difficulty. */
+	private static final ResourceKey<DamageType> ZAP = ResourceKey.create(Registries.DAMAGE_TYPE, Ultracraft.id("zap"));
+	private static final int ZAP_HURT = 50;
 	/** How far from the player an explosion can reach something. */
 	private static final double EXPLOSION_REACH = 64;
 	/**
@@ -100,6 +106,7 @@ public final class ServerCombat {
 		ServerPlayNetworking.registerGlobalReceiver(ExplosionHurtPayload.TYPE, (payload, context) -> onExplosionHurt(context.player(), payload.damage()));
 		ServerPlayNetworking.registerGlobalReceiver(SlamHitPayload.TYPE, (payload, context) -> onSlamHit(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(MagnetPullPayload.TYPE, (payload, context) -> onMagnetPull(context.player(), payload));
+		ServerPlayNetworking.registerGlobalReceiver(ZapHurtPayload.TYPE, (payload, context) -> onZapHurt(context.player()));
 		ServerPlayNetworking.registerGlobalReceiver(HitstopPayload.TYPE, (payload, context) -> {
 			if (active(context.player())) {
 				hitstop(context.player().level().getServer(), Math.clamp(payload.millis(), 0, PARRY_HITSTOP_MILLIS));
@@ -137,6 +144,9 @@ public final class ServerCombat {
 			if (hit.kind() == WeaponHitPayload.Kind.DRILL) {
 				BloodZones.add(player.level(), hit.position(), Gore.SMALL, false, DRILL_BLOOD_SCALE);
 			}
+			if (hit.kind() == WeaponHitPayload.Kind.BLEED) {
+				BloodZones.add(player.level(), hit.position(), Gore.SMALL, false);
+			}
 			return;
 		}
 		switch (hit.kind()) {
@@ -145,6 +155,16 @@ public final class ServerCombat {
 			case DRILL_PUNCH -> damage(player, target, hit.damage(), hit.head(), hit.position(), true, false);
 			case NAIL -> nailDamage(player, target, hit.damage(), hit.position(), false);
 			case NAIL_BOMB -> nailDamage(player, target, hit.damage(), hit.position(), true);
+			case ZAP -> damage(player, target, hit.damage(), false, hit.position(), true, false);
+			case ZAP_CONDUCTING -> {
+				// EnemyIdentifier.DeliverDamage: the zapper leaves a conducting enemy a thousandth of a point of health.
+				float left = (target.getHealth() + target.getAbsorptionAmount()) / HEALTH_PER_DAMAGE - CONDUCTOR_HEALTH;
+				float damage = Math.min(hit.damage(), left);
+				if (damage > 0) {
+					damage(player, target, damage, false, hit.position(), true, false);
+				}
+			}
+			case BLEED -> BloodZones.add(player.level(), hit.position(), Gore.SMALL, false);
 		}
 	}
 
@@ -281,6 +301,13 @@ public final class ServerCombat {
 		}
 		player.hurtServer(player.level(), player.damageSources().source(EXPLOSION, player, player), damage / UltraHealth.HP_PER_HEALTH);
 		UltraHealth.onExplosionHurt(player, damage);
+	}
+
+	/** NewMovement.GetHurt from a zap through the water the player is in. */
+	private static void onZapHurt(ServerPlayer player) {
+		if (active(player)) {
+			player.hurtServer(player.level(), player.damageSources().source(ZAP), ZAP_HURT / UltraHealth.HP_PER_HEALTH);
+		}
 	}
 
 	private static void onCycleVariant(ServerPlayer player) {

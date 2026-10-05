@@ -30,7 +30,7 @@ import java.util.OptionalDouble;
  * times before carrying on. Back at the player it lingers a moment to be punched out again, then it's gone. If
  * the chain stays blocked by a wall, it snaps and the chainsaw flies on as a sawblade.
  */
-final class ThrownSaw {
+final class ThrownSaw implements Conductor.Zappable {
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	/** Time.fixedDeltaTime. */
 	private static final double STEP = 0.008;
@@ -390,5 +390,15 @@ final class ThrownSaw {
 
 	private static double moveTowards(double from, double to, double maxDelta) {
 		return Math.abs(to - from) <= maxDelta ? to : from + Math.signum(to - from) * maxDelta;
+	}
+
+	@Override
+	public Vec3 zapPosition() {
+		return this.position;
+	}
+
+	@Override
+	public boolean zapGone() {
+		return this.removed;
 	}
 }

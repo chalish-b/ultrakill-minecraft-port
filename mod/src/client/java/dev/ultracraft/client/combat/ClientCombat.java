@@ -1,6 +1,7 @@
 package dev.ultracraft.client.combat;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import dev.ultracraft.PlayerShape;
 import dev.ultracraft.UltraItems;
@@ -28,6 +29,7 @@ import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.SlamHitPayload;
 import dev.ultracraft.net.WeaponHitPayload;
 import dev.ultracraft.net.WhiplashBrokenPayload;
+import dev.ultracraft.net.ZapHurtPayload;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
 import net.minecraft.client.Minecraft;
@@ -77,12 +79,13 @@ import java.util.function.UnaryOperator;
 
 /**
  * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the shotgun's pellets, the
- * nailgun's nails and magnets, the railcannon's beams, the arms' punches (and boosting pellets with them) and the
+ * nailgun's nails, magnets and zapper and the electricity between enemies, the railcannon's beams, the arms' punches (and boosting pellets with them) and the
  * Knuckleblaster's blast, the Whiplash, explosions, weapon charges (WeaponCharges) and the hitstops after a parry
  * or a punch. Hits go to the server, which applies them.
  */
 public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Nailgun.Actions, Railcannon.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events,
-	Explosion.Hits, SawZone.Hits, ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits, Drill.Hits, Nail.Hits, Magnet.Hits {
+	Explosion.Hits, SawZone.Hits, ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits, Drill.Hits, Nail.Hits, Magnet.Hits, Zapper.Hits,
+	Conductor.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
@@ -196,6 +199,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private static final double LANDING_DUST_RADIUS = 0.625;
 	private static final double LANDING_DUST_GROWTH = 50;
 	private static final double LANDING_DUST_TIME = 0.1;
+	/** The JumpStart's zapper, and its zap's sparks (zapParticle and zapImpactParticle). */
+	private static final String ZAPPER = "zapper";
+	private static final String ZAP_SPARKS = "zap_sparks";
 
 	private final UltraSounds sounds = new UltraSounds();
 	private final Effects effects = new Effects();
@@ -232,6 +238,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	 */
 	private final Map<Integer, Integer> nailCounts = new HashMap<>();
 	private final Map<Integer, List<Nail>> stuckNails = new HashMap<>();
+	/** The JumpStart's zapper, while it's out, and the electricity between enemies. */
+	private @Nullable Zapper zapper;
+	private final Conductor conductor = new Conductor();
 	/** Landing impacts' dust still breaking things: where each went up, and how long ago. */
 	private final List<LandingDust> landingDusts = new ArrayList<>();
 
@@ -331,6 +340,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			this.nailCounts.clear();
 			this.stuckNails.clear();
 			this.landingDusts.clear();
+			if (this.zapper != null) {
+				this.zapper.discard();
+				this.zapper = null;
+			}
+			this.conductor.clear();
 			return;
 		}
 		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
@@ -402,6 +416,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 		this.drills.removeIf(drill -> drill.removed);
 		updateNails(dt, partialTick, minecraft.level, player);
+		updateZapper(dt, partialTick, minecraft.level, player);
+		this.conductor.update(dt, conductorWorld(minecraft.level, player), this);
 		for (Shockwave shockwave : List.copyOf(this.shockwaves)) {
 			shockwave.update(dt, minecraft.level, player, this);
 		}
@@ -593,6 +609,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		return switch (weapon) {
 			case NAILGUN_ATTRACTOR -> this.nailguns.get(Nailgun.Variant.ATTRACTOR);
 			case NAILGUN_OVERHEAT -> this.nailguns.get(Nailgun.Variant.OVERHEAT);
+			case NAILGUN_JUMPSTART -> this.nailguns.get(Nailgun.Variant.JUMPSTART);
 			default -> null;
 		};
 	}
@@ -601,6 +618,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		return switch (variant) {
 			case ATTRACTOR -> FirstPersonWeapons.Weapon.NAILGUN_ATTRACTOR;
 			case OVERHEAT -> FirstPersonWeapons.Weapon.NAILGUN_OVERHEAT;
+			case JUMPSTART -> FirstPersonWeapons.Weapon.NAILGUN_JUMPSTART;
 		};
 	}
 
@@ -685,6 +703,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 		if (stack.is(UltraItems.NAILGUN_OVERHEAT)) {
 			return FirstPersonWeapons.Weapon.NAILGUN_OVERHEAT;
+		}
+		if (stack.is(UltraItems.NAILGUN_JUMPSTART)) {
+			return FirstPersonWeapons.Weapon.NAILGUN_JUMPSTART;
 		}
 		if (stack.is(UltraItems.RAILCANNON_ELECTRIC)) {
 			return FirstPersonWeapons.Weapon.RAILCANNON_ELECTRIC;
@@ -1392,6 +1413,201 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 	}
 
+	/**
+	 * Nailgun.ShootZapper: the zapper out of the camera along the aim, breaking the one already out; the throw's
+	 * sound, and the gun's Shoot animation.
+	 */
+	@Override
+	public void shootZapper(Nailgun.Variant variant, boolean animate) {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		UltraModel model = UltraModel.get(ZAPPER);
+		if (player == null || minecraft.level == null || movement == null || model == null) {
+			return;
+		}
+		if (this.zapper != null) {
+			this.zapper.destroy(false, this);
+		}
+		JsonObject script = model.script("zapper");
+		int orb = script.get("orb").getAsInt();
+		Particles lightning = null;
+		for (JsonElement system : model.particles()) {
+			if (system.getAsJsonObject().get("bone").getAsInt() == orb) {
+				lightning = new Particles(system.getAsJsonObject(), movement.eyePosition(), new Quaternionf(), ExplosionLook.unityRotation(model, orb), model.rest().sx(orb), true);
+			}
+		}
+		this.zapper = new Zapper(script, lightning, this.sounds, movement.eyePosition(), player.getLookAngle(), movement.rootPosition());
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon(variant));
+		if (animator != null && animate) {
+			animator.setTrigger("Shoot");
+		}
+		this.sounds.play("magnet_shoot", 1, this.sounds.randomPitch(1.4F, 1.6F));
+	}
+
+	@Override
+	public boolean zapperAttached() {
+		return this.zapper != null && !this.zapper.removed && this.zapper.attached;
+	}
+
+	@Override
+	public @Nullable Zapper zapper() {
+		return this.zapper;
+	}
+
+	/** Nailgun.UpdateZapHud's raycast: the first enemy or wall along the aim. */
+	@Override
+	public double aimedEnemyDistance() {
+		Minecraft minecraft = Minecraft.getInstance();
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (minecraft.level == null || minecraft.player == null || movement == null) {
+			return Double.NaN;
+		}
+		Hitscan.Hit first = Hitscan.cast(minecraft.level, minecraft.player, movement.eyePosition(), minecraft.player.getLookAngle(), RANGE, List.of()).getFirst();
+		return first.kind() == Hitscan.Kind.ENTITY ? first.distance() / S : Double.NaN;
+	}
+
+	/** The zapper, its cable from the JumpStart's ZapperPosition while it's held, else from the player. */
+	private void updateZapper(double dt, float partialTick, Level level, LocalPlayer player) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (this.zapper == null || movement == null) {
+			return;
+		}
+		Vec3 root = movement.rootPosition();
+		Vec3 lineStart = root;
+		if (this.held == FirstPersonWeapons.Weapon.NAILGUN_JUMPSTART) {
+			FirstPersonWeapons.Frame point = FirstPersonWeapons.INSTANCE.weaponBone(this.held, "ZapperPosition");
+			if (point != null) {
+				Minecraft minecraft = Minecraft.getInstance();
+				Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
+				lineStart = world(camera, point.position()).scale(S).add(minecraft.gameRenderer.mainCamera().position());
+			}
+		}
+		this.zapper.update(dt, partialTick, level, player, lineStart, root, this);
+		if (this.zapper != null && this.zapper.removed) {
+			this.zapper = null;
+		}
+	}
+
+	/**
+	 * Zapper.Zap: the enemy takes the zapper's damage, electric; if it conducts, the zap leaves it alive for its
+	 * aftershock. Sparks fly off it, and the zapper starts recharging.
+	 */
+	@Override
+	public void zap(Zapper zapper, LivingEntity enemy) {
+		Minecraft minecraft = Minecraft.getInstance();
+		if (minecraft.level == null || minecraft.player == null) {
+			return;
+		}
+		boolean conducting = this.conductor.electrify(enemy, conductorWorld(minecraft.level, minecraft.player), this);
+		float damage = zapper.damage();
+		ClientPlayNetworking.send(new WeaponHitPayload(enemy.getId(), damage, false, zapper.position,
+			conducting ? WeaponHitPayload.Kind.ZAP_CONDUCTING : WeaponHitPayload.Kind.ZAP));
+		Gore gore = Gore.of(false, damage, false);
+		this.effects.blood(minecraft.level, zapper.position, gore);
+		this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
+		this.nailgunCharges.zapperRecharge = 0;
+		sparks(enemy.getBoundingBox().getCenter());
+	}
+
+	/** Zapper.Break: its break effect (sparks and bits, with their sounds), and the cable's snap if it snapped. */
+	@Override
+	public void zapperBroke(Zapper zapper, boolean snapped) {
+		this.effects.particles("chainsaw_break", null, zapper.position);
+		this.sounds.play("chainsaw_break", 1, this.sounds.randomPitch(0.9F, 1.1F));
+		this.sounds.play("chainsaw_spark", 1, this.sounds.randomPitch(0.85F, 1.15F));
+		if (snapped) {
+			this.sounds.once().update("zapper_snap", 1, this.sounds.randomPitch(0.9F, 1.1F), zapper.position);
+		}
+	}
+
+	/** SparksNail: a zap's sparks, with their crackle. */
+	private void sparks(Vec3 at) {
+		this.effects.particles(ZAP_SPARKS, null, at);
+		this.sounds.play("zap", 1, this.sounds.randomPitch(0.8F, 1.2F));
+	}
+
+	private Conductor.World conductorWorld(Level level, LocalPlayer player) {
+		List<Conductor.Zappable> zappables = new ArrayList<>();
+		zappables.addAll(this.coins);
+		zappables.addAll(this.saws);
+		zappables.addAll(this.drills);
+		return new Conductor.World(level, player, this.magnets, zappables);
+	}
+
+	@Override
+	public void zapNails(LivingEntity enemy) {
+		for (Nail nail : this.stuckNails.getOrDefault(enemy.getId(), List.of())) {
+			nail.zapped = true;
+		}
+	}
+
+	/** EnemyIdentifier.PreShockBleed: the nails stuck in the enemy come out, each with a little blood, and sparks if zapped. */
+	@Override
+	public void bleedNails(LivingEntity enemy) {
+		Level level = Minecraft.getInstance().level;
+		List<Nail> stuck = this.stuckNails.remove(enemy.getId());
+		if (level != null && stuck != null) {
+			for (Nail nail : stuck) {
+				if (nail.removed) {
+					continue;
+				}
+				ClientPlayNetworking.send(new WeaponHitPayload(enemy.getId(), 0, false, nail.position, WeaponHitPayload.Kind.BLEED));
+				this.effects.blood(level, nail.position, Gore.SMALL);
+				this.sounds.play("gore.small", 1, this.sounds.randomPitch(0.75F, 1.5F));
+				if (nail.zapped) {
+					sparks(nail.position);
+				}
+				nail.remove();
+			}
+		}
+		this.nailCounts.put(enemy.getId(), 0);
+	}
+
+	@Override
+	public void zapEnemy(LivingEntity enemy, float damage, Vec3 at) {
+		Level level = Minecraft.getInstance().level;
+		if (level == null) {
+			return;
+		}
+		ClientPlayNetworking.send(new WeaponHitPayload(enemy.getId(), damage, false, at, WeaponHitPayload.Kind.ZAP));
+		Gore gore = Gore.of(false, damage, false);
+		this.effects.blood(level, at, gore);
+		this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
+	}
+
+	@Override
+	public void zapPlayer(Vec3 from, Vec3 to) {
+		ClientPlayNetworking.send(new ZapHurtPayload());
+		arc(from, to, true);
+	}
+
+	/** ElectricityLine, its crackle halfway along it (RandomPitch), and the zap's sparks where it lands. */
+	@Override
+	public void arc(Vec3 from, Vec3 to, boolean sparks) {
+		this.effects.arc(from, to);
+		this.sounds.once().update("electric_line", 1, this.sounds.randomPitch(0.9F, 1.1F), from.lerp(to, 0.5));
+		if (sparks) {
+			sparks(to);
+		}
+	}
+
+	@Override
+	public void damageMagnet(Magnet magnet) {
+		Minecraft minecraft = Minecraft.getInstance();
+		if (minecraft.level != null && minecraft.player != null) {
+			magnet.damage(minecraft.level, minecraft.player, this);
+		}
+	}
+
+	@Override
+	public void aftershockShake() {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (movement != null) {
+			movement.shake(1);
+		}
+	}
+
 	// ---- railcannon ----------------------------------------------------------------------------
 
 	/**
@@ -1472,6 +1688,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			}
 		}
 		breakMagnets(drawFrom, end);
+		this.conductor.beamThroughWater(from, end, conductorWorld(level, player), this);
 		RailShot shot = new RailShot(hits, this.effects.heldBeam(drawFrom, end, Effects.BeamStyle.RAILCANNON), damage, coinPower, chainHits);
 		this.railShots.add(shot);
 		advance(shot, level, player);
@@ -1593,6 +1810,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 					return RAIL_STEP_DEAD;
 				}
 				shot.taken.put(id, taken + shot.damage * ServerCombat.HEALTH_PER_DAMAGE);
+				this.conductor.electrify(target, conductorWorld(level, player), this);
 				damage(level, target, shot.damage, hit.head(), hit.position());
 				this.hitstopLeft = Math.max(this.hitstopLeft, RAIL_HITSTOP);
 				ClientPlayNetworking.send(new HitstopPayload((int)(RAIL_HITSTOP * 1000)));
@@ -2969,6 +3187,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		this.effects.renderDrills(context, this.drills);
 		this.effects.renderNails(context, this.nails);
 		this.effects.renderMagnets(context, this.magnets);
+		if (this.zapper != null) {
+			this.effects.renderZapper(context, this.zapper);
+		}
 		this.effects.renderShockwaves(context, this.shockwaves);
 		renderWhiplash(context);
 	}

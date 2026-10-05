@@ -20,7 +20,7 @@ import java.util.Set;
  * shot on to the next coin or to an enemy's head. It flashes briefly at the top of its arc and charges up later;
  * then it can be punched, and a piercer's charged shot splits on it.
  */
-final class Coin {
+final class Coin implements Conductor.Zappable {
 	/** The coin's trigger sphere: 1 unit. */
 	static final double HIT_RADIUS = 1 * PlayerShape.BLOCKS_PER_UNIT;
 	private static final double GRAVITY = 40;
@@ -213,5 +213,15 @@ final class Coin {
 		if (this.trail.isEmpty() || this.position.distanceTo(this.trail.peekFirst().position) > TRAIL_MIN_DISTANCE) {
 			this.trail.addFirst(new TrailPoint(this.position, this.age));
 		}
+	}
+
+	@Override
+	public Vec3 zapPosition() {
+		return this.position;
+	}
+
+	@Override
+	public boolean zapGone() {
+		return this.removed;
 	}
 }

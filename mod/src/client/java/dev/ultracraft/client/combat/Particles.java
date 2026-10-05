@@ -50,7 +50,11 @@ final class Particles {
 
 	private final JsonObject settings;
 	/** Blocks. */
-	private final Vec3 origin;
+	private Vec3 origin;
+	/** The system's own scale, which its particles' sizes and places go by (scaling mode Local). */
+	private final double scale;
+	/** It keeps emitting past its duration, as a looping system does while it's on. */
+	private final boolean looping;
 	/** The system's rotation in the world, as Minecraft draws it (Unity's local axes, mirrored). */
 	private final Quaternionf rotation;
 	/** The system's rotation in Unity's axes, for its shape. */
@@ -72,8 +76,19 @@ final class Particles {
 	 * @param unityRotation the system's rotation within the prefab, in Unity's axes
 	 */
 	Particles(JsonObject settings, Vec3 origin, Quaternionf worldRotation, Quaternionf unityRotation) {
+		this(settings, origin, worldRotation, unityRotation, 1, false);
+	}
+
+	/**
+	 * A system on an object that moves and stays on: its particles (simulated in its Local space) go where it goes.
+	 *
+	 * @param scale the system's own scale
+	 */
+	Particles(JsonObject settings, Vec3 origin, Quaternionf worldRotation, Quaternionf unityRotation, double scale, boolean looping) {
 		this.settings = settings;
 		this.origin = origin;
+		this.scale = scale;
+		this.looping = looping;
 		this.unityRotation = unityRotation;
 		this.rotation = worldRotation;
 		JsonArray textures = settings.getAsJsonArray("textures");
@@ -104,7 +119,12 @@ final class Particles {
 
 	boolean done() {
 		double duration = this.settings.get("duration").getAsDouble();
-		return this.age > duration && this.particles.isEmpty();
+		return !this.looping && this.age > duration && this.particles.isEmpty();
+	}
+
+	/** Its object moved to {@code origin}, its particles with it. */
+	void moveTo(Vec3 origin) {
+		this.origin = origin;
 	}
 
 	void update(double dt) {
@@ -117,7 +137,7 @@ final class Particles {
 			}
 			this.burstsDone++;
 		}
-		if (this.age < duration) {
+		if (this.age < duration || this.looping) {
 			this.rateDue += sample(this.settings.getAsJsonObject("rate")) * dt;
 			while (this.rateDue >= 1) {
 				this.rateDue -= 1;
@@ -270,7 +290,7 @@ final class Particles {
 
 	private Vec3 position(Particle particle, double t) {
 		double fall = 0.5 * GRAVITY * sample(this.settings.getAsJsonObject("gravity")) * t * t;
-		return this.origin.add(particle.start.add(particle.velocity.scale(t)).add(0, -fall, 0).scale(S));
+		return this.origin.add(particle.start.add(particle.velocity.scale(t)).add(0, -fall, 0).scale(S * this.scale));
 	}
 
 	private float[] color(Particle particle, double life) {
@@ -313,7 +333,7 @@ final class Particles {
 		for (Particle particle : this.particles) {
 			double t = this.age - particle.born;
 			double life = t / particle.lifetime;
-			double size = particle.size;
+			double size = particle.size * this.scale;
 			if (this.settings.has("sizeOverLifetime")) {
 				size *= evaluate(this.settings.getAsJsonObject("sizeOverLifetime"), life);
 			}

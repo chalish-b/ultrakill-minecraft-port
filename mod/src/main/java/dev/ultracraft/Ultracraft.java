@@ -17,6 +17,7 @@ import dev.ultracraft.net.UltraStatePayload;
 import dev.ultracraft.net.WeaponHitPayload;
 import dev.ultracraft.net.WhiplashBrokenPayload;
 import dev.ultracraft.net.WhiplashPayload;
+import dev.ultracraft.net.ZapHurtPayload;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
@@ -47,6 +48,7 @@ public class Ultracraft implements ModInitializer {
 		PayloadTypeRegistry.serverboundPlay().register(SlamHitPayload.TYPE, SlamHitPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(WhiplashPayload.TYPE, WhiplashPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(MagnetPullPayload.TYPE, MagnetPullPayload.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(ZapHurtPayload.TYPE, ZapHurtPayload.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(PunchResultPayload.TYPE, PunchResultPayload.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(WhiplashBrokenPayload.TYPE, WhiplashBrokenPayload.CODEC);
 		ServerPlayNetworking.registerGlobalReceiver(UltraStatePayload.TYPE, (payload, context) ->

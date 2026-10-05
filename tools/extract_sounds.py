@@ -296,6 +296,7 @@ def combat(env, x):
 
     railcannon(env, x)
     nailgun(env, x)
+    jumpstart(env, x)
 
     ground = next(g for g in (o.read() for o in env.objects if o.type.name == "MonoBehaviour" and script_class(o) == "GroundCheck") if g.shockwave.path_id)
     shockwave = next(m for m in components(ground.shockwave.deref().read(), "MonoBehaviour") if hasattr(m, "soundEffect"))
@@ -412,6 +413,39 @@ def nailgun(env, x):
     x.events["magnet_break"]["sounds"][0]["attenuation_distance"] = round(next(audio_sources_tree(break_go))["MaxDistance"] * BLOCKS_PER_UNIT)
     pitch = next(s for s in components(break_go, "MonoBehaviour") if hasattr(s, "pitchVariation"))
     print("magnet_break pitch", debris.m_Pitch, "RandomPitch", pitch.defaultPitch, pitch.pitchVariation)
+
+
+def jumpstart(env, x):
+    """The JumpStart's chime when the zapper has recharged (its pitch is set on its AudioSource); the zapper's hum while
+    it's attached (its pitch is set by its code), its pulse orb's crackle, its attach sound, its two warnings while the
+    cable is too long or blocked (their pitch is set by its code) and the cable snapping. A zap's sparks, and the
+    electric arc the zap goes along. Those that come from somewhere in the world fade out over their AudioSource's
+    range."""
+    jumpstart = find_class(env, "Nailgun", "Nailgun Zapper", altVersion=0)
+    x.add_source("jumpstart_ready", next(components(jumpstart.m_GameObject.read(), "AudioSource")))
+    zapper_go = jumpstart.zapper.deref().read().m_GameObject.read()
+    zapper = next(s for s in components(zapper_go, "MonoBehaviour") if hasattr(s, "distanceWarningSounds"))
+
+    def placed(event, go, source, volume=None, pitch=1.0):
+        x.add_clip(event, source.m_audioClip, source.m_Volume if volume is None else volume, pitch, mono=True)
+        tree = next(t for t in audio_sources_tree(go) if t["m_audioClip"]["m_PathID"] == source.m_audioClip.path_id)
+        x.events[event]["sounds"][0]["attenuation_distance"] = round(tree["MaxDistance"] * BLOCKS_PER_UNIT)
+
+    placed("zapper_hum", zapper_go, next(components(zapper_go, "AudioSource")))
+    orb_go = zapper.lightningPulseOrb.deref().read().m_GameObject.read()
+    placed("zapper_pulse", orb_go, next(components(orb_go, "AudioSource")), pitch=next(components(orb_go, "AudioSource")).m_Pitch)
+    attach_go = zapper.attachSound.deref().read()
+    placed("zapper_attach", attach_go, next(components(attach_go, "AudioSource")))
+    tighten, warning = (source_ref(p) for p in zapper.distanceWarningSounds)
+    placed("zapper_tighten", tighten.m_GameObject.read(), tighten)
+    x.add_clip("zapper_warning", warning.m_audioClip, warning.m_Volume)
+    snap_go = zapper.cableSnap.deref().read().m_GameObject.read()
+    placed("zapper_snap", snap_go, next(components(snap_go, "AudioSource")))
+    sparks = next(components(zapper.zapParticle.deref().read(), "AudioSource"))
+    x.add_clip("zap", sparks.m_audioClip, sparks.m_Volume)
+    references = next(o.read() for o in env.objects if o.type.name == "MonoBehaviour" and script_class(o) == "DefaultReferenceManager")
+    line_go = references.electricLine.deref().read().m_GameObject.read()
+    placed("electric_line", line_go, next(components(line_go, "AudioSource")))
 
 
 def main():

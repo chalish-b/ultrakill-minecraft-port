@@ -34,7 +34,7 @@ import java.util.Set;
  * glass, and grinds through other blocks while its durability lasts, each costing its hardness and taking longer
  * the harder it is; a block it can't afford stops it, and it breaks.
  */
-final class Drill {
+final class Drill implements Conductor.Zappable {
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	/** Time.fixedDeltaTime. */
 	private static final double STEP = 0.008;
@@ -460,5 +460,15 @@ final class Drill {
 		if (!this.stopped && (this.trail.isEmpty() || this.position.distanceTo(this.trail.peekFirst().position()) > TRAIL_MIN_DISTANCE * S)) {
 			this.trail.addFirst(new Pellet.TrailPoint(this.position, this.age));
 		}
+	}
+
+	@Override
+	public Vec3 zapPosition() {
+		return this.position;
+	}
+
+	@Override
+	public boolean zapGone() {
+		return this.removed;
 	}
 }

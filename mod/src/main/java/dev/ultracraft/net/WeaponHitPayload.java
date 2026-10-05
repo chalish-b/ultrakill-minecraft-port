@@ -37,7 +37,13 @@ public record WeaponHitPayload(int entityId, float damage, boolean head, Vec3 po
 		/** A nail: the enemy isn't knocked back, and flinches no more often than Minecraft's damage cooldown allows. */
 		NAIL,
 		/** A nail bomb's nail: as a nail, and an enemy it kills bursts. */
-		NAIL_BOMB
+		NAIL_BOMB,
+		/** A zap: an enemy it kills bursts. */
+		ZAP,
+		/** The zapper's zap on an enemy that conducts it: it leaves the enemy alive, for the aftershock to come. */
+		ZAP_CONDUCTING,
+		/** No damage: a nail coming out of the enemy as it conducts leaves a little blood. */
+		BLEED
 	}
 
 	@Override

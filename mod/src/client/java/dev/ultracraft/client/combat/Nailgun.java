@@ -2,17 +2,22 @@ package dev.ultracraft.client.combat;
 
 import dev.ultracraft.client.movement.UltraSounds;
 import dev.ultracraft.client.render.FirstPersonWeapons;
+import org.jspecify.annotations.Nullable;
+
+import java.util.Locale;
 
 /**
- * ULTRAKILL's nailgun (Nailgun), as the Attractor or the Overheat. Held down, its barrels spin up and it fires nails
- * from each in turn; their heat glows on the barrels. The Attractor runs on a hundred nails that refill while it
- * isn't firing, and throws magnets. The Overheat fires slower the hotter it gets, and burns out a heat sink to fire
- * a stream of heated nails until it has cooled. It decides when to fire; {@link ClientCombat} does the firing.
+ * ULTRAKILL's nailgun (Nailgun), as the Attractor, the Overheat or the JumpStart. Held down, its barrels spin up and
+ * it fires nails from each in turn; their heat glows on the barrels. The Attractor runs on a hundred nails that
+ * refill while it isn't firing, and throws magnets. The Overheat fires slower the hotter it gets, and burns out a
+ * heat sink to fire a stream of heated nails until it has cooled. The JumpStart fires its zapper, and fires fastest
+ * while the zapper is attached to an enemy. It decides when to fire; {@link ClientCombat} does the firing.
  */
 final class Nailgun {
 	enum Variant {
 		ATTRACTOR(10),
-		OVERHEAT(20);
+		OVERHEAT(20),
+		JUMPSTART(10);
 
 		/** Nailgun.spread: a nail is turned up to a third of this many degrees about each axis. */
 		final double spread;
@@ -32,12 +37,24 @@ final class Nailgun {
 
 		/** Nailgun.ShootMagnet: a magnet thrown along the aim; the gun plays its Shoot animation if {@code animate}. */
 		void shootMagnet(Variant variant, boolean animate);
+
+		/** Nailgun.ShootZapper: the zapper shot along the aim; the gun plays its Shoot animation if {@code animate}. */
+		void shootZapper(Variant variant, boolean animate);
+
+		/** Whether the zapper is out and attached to an enemy. */
+		boolean zapperAttached();
+
+		/** The zapper, if it's out. */
+		@Nullable Zapper zapper();
+
+		/** How many units away the enemy straight ahead of the camera is, before any wall, or NaN if there's none. */
+		double aimedEnemyDistance();
 	}
 
 	/**
 	 * WeaponCharges' nailgun charges, which go on recharging whichever weapon is out: the Overheat's heat sinks and
 	 * the barrels' heat as the last nailgun put away left them, the Attractor's nails and its magnet charges, of
-	 * which there are three less the magnets out.
+	 * which there are three less the magnets out, and the JumpStart's zapper, which recharges after a zap.
 	 */
 	static final class Charges {
 		/** naiHeatsinks and naiheatUp; nai0set: whether a nailgun has left its heat for the next one. */
@@ -49,6 +66,8 @@ final class Nailgun {
 		boolean ammoHeld;
 		/** naiMagnetCharge. */
 		double magnetCharge = MAGNET_CHARGES;
+		/** naiZapperRecharge: the zapper can be shot once it's full. */
+		double zapperRecharge = ZAPPER_RECHARGE;
 
 		/** WeaponCharges.Charge. */
 		void recharge(double dt, int magnets) {
@@ -65,6 +84,7 @@ final class Nailgun {
 			} else if (this.magnetCharge < MAGNET_CHARGES) {
 				this.magnetCharge = toward(this.magnetCharge, MAGNET_CHARGES, dt * MAGNET_RECHARGE);
 			}
+			this.zapperRecharge = toward(this.zapperRecharge, ZAPPER_RECHARGE, dt);
 		}
 	}
 
@@ -83,6 +103,21 @@ final class Nailgun {
 	private static final double AMMO_RECHARGE = 5;
 	private static final int MAGNET_CHARGES = 3;
 	private static final double MAGNET_RECHARGE = 3;
+	/** The zapper recharges this many seconds after a zap. */
+	static final double ZAPPER_RECHARGE = 5;
+	/** The JumpStart's barrels' heat while it fires: full with the zapper attached, else this. */
+	private static final double JUMPSTART_HEAT = 0.33;
+	/** Zapper.maxDistance: the zapper's cable reach. An enemy shows as in range this many units closer. */
+	private static final double ZAPPER_REACH = 20;
+	private static final double ZAPPER_SLACK = 5;
+	/** Without a zapper out, the distance meter moves toward the aimed enemy's distance at this much a second. */
+	private static final double DISTANCE_METER_SPEED = 10;
+	/** About to break, the warning X flashes red and white this often. */
+	private static final double WARNING_FLASH = 0.1;
+	/** Unity's Color.white, Color.gray and Color.red. */
+	private static final float[] WHITE = {1, 1, 1, 1};
+	private static final float[] GRAY = {0.5F, 0.5F, 0.5F, 1};
+	private static final float[] RED = {1, 0, 0, 1};
 	/** The barrels heat up this much a second while the Overheat fires, cool this much while no nailgun fires, and this much burning out. */
 	private static final double HEATING = 0.55;
 	private static final double COOLING = 0.3;
@@ -123,6 +158,10 @@ final class Nailgun {
 	/** The Overheat's heat meter (its Slider's value) and its background's color. */
 	private double heatMeter = 1;
 	private float[] heatMeterBackground = CLEAR;
+	/** The JumpStart's recharge overlay is up; its distance meter; and its screen as it shows now. */
+	private boolean recharging;
+	private double distanceMeter;
+	private FirstPersonWeapons.ZapHud zapHud = FirstPersonWeapons.ZapHud.NONE;
 	private double accumulator;
 
 	Nailgun(Variant variant, Charges charges, UltraSounds sounds) {
@@ -183,8 +222,12 @@ final class Nailgun {
 				this.burnOut = false;
 				this.steaming = false;
 			}
-		} else if (firing && this.heat < 1) {
-			this.heat = this.variant == Variant.ATTRACTOR ? 1 : toward(this.heat, 1, dt * HEATING);
+		} else if (firing && (this.heat < 1 || this.variant == Variant.JUMPSTART)) {
+			this.heat = switch (this.variant) {
+				case ATTRACTOR -> 1;
+				case OVERHEAT -> toward(this.heat, 1, dt * HEATING);
+				case JUMPSTART -> actions.zapperAttached() ? 1 : JUMPSTART_HEAT;
+			};
 		} else if (this.heat > 0 && !firing) {
 			this.heat = toward(this.heat, 0, dt * COOLING);
 		}
@@ -214,10 +257,22 @@ final class Nailgun {
 				noAmmo();
 			}
 		}
+		if (this.variant == Variant.JUMPSTART && input.fire2Pressed) {
+			if (this.charges.zapperRecharge >= ZAPPER_RECHARGE) {
+				this.layerWeight = animationWeight();
+				actions.shootZapper(this.variant, this.canShoot);
+			} else {
+				noAmmo();
+			}
+		}
 		if (this.variant == Variant.OVERHEAT && !input.fire1Held) {
 			this.heatSinks = toward(this.heatSinks, HEAT_SINKS, dt * HEAT_SINK_RECHARGE);
 		}
-		refreshMeter(dt, this.variant == Variant.OVERHEAT ? this.heatSinks : this.charges.magnetCharge);
+		if (this.variant != Variant.JUMPSTART) {
+			refreshMeter(dt, this.variant == Variant.OVERHEAT ? this.heatSinks : this.charges.magnetCharge);
+		} else {
+			updateZapHud(dt, actions);
+		}
 		if (this.steaming) {
 			this.steam.update("nailgun_steam", 1, 1);
 		} else {
@@ -280,17 +335,71 @@ final class Nailgun {
 		actions.shootNail(this.variant, this.barrel, this.burnOut, spread, volume, pitch, steps);
 	}
 
+	/**
+	 * Nailgun.UpdateZapHud: the recharge overlay shows while the zapper recharges, and goes with a chime once it has.
+	 * With no zapper out, the screen reads whether the enemy aimed at is within reach, its distance meter following
+	 * how far; with one out, the cable's length (reddening toward its reach) and the zapper's charge, or a flashing
+	 * X while the cable is too long or blocked.
+	 */
+	private void updateZapHud(double dt, Actions actions) {
+		if (this.charges.zapperRecharge < ZAPPER_RECHARGE) {
+			this.recharging = true;
+			this.distanceMeter = 0;
+			this.zapHud = new FirstPersonWeapons.ZapHud(true, this.charges.zapperRecharge / ZAPPER_RECHARGE, "", WHITE, false, 0, false, 0, false, WHITE);
+			return;
+		}
+		if (this.recharging) {
+			this.sounds.play("jumpstart_ready", 1, 1);
+			this.recharging = false;
+		}
+		Zapper zapper = actions.zapper();
+		if (zapper == null) {
+			double aimed = actions.aimedEnemyDistance();
+			String status = "NO TARGET";
+			float[] color = GRAY;
+			boolean variantColor = false;
+			double target = 0;
+			if (!Double.isNaN(aimed)) {
+				double inRange = ZAPPER_REACH - ZAPPER_SLACK;
+				if (aimed < inRange) {
+					status = "READY";
+					target = 1 - (inRange - aimed) / inRange;
+					color = WHITE;
+				} else {
+					status = "OUT OF RANGE";
+					variantColor = true;
+				}
+			}
+			this.distanceMeter = toward(this.distanceMeter, target, dt * DISTANCE_METER_SPEED);
+			this.zapHud = new FirstPersonWeapons.ZapHud(false, 0, status, color, variantColor, this.distanceMeter, false, 0, false, WHITE);
+			return;
+		}
+		boolean zapMeter = zapper.charge > 0;
+		double charge = zapper.charge / Zapper.FULL_CHARGE;
+		if (zapper.distance > ZAPPER_REACH || zapper.raycastBlocked) {
+			this.distanceMeter = 1;
+			float[] flash = zapper.breakTimer % WARNING_FLASH > WARNING_FLASH / 2 ? RED : WHITE;
+			this.zapHud = new FirstPersonWeapons.ZapHud(false, 0, zapper.raycastBlocked ? "BLOCKED" : "OUT OF RANGE", WHITE, true, 1, zapMeter, charge, true, flash);
+			return;
+		}
+		double left = (ZAPPER_REACH - zapper.distance) / ZAPPER_REACH;
+		this.distanceMeter = 1 - left;
+		float[] color = {RED[0] + (WHITE[0] - RED[0]) * (float)left, RED[1] + (WHITE[1] - RED[1]) * (float)left, RED[2] + (WHITE[2] - RED[2]) * (float)left, 1};
+		String status = String.format(Locale.ROOT, "DISTANCE: %.1f", zapper.distance);
+		this.zapHud = new FirstPersonWeapons.ZapHud(false, 0, status, color, false, this.distanceMeter, zapMeter, charge, false, WHITE);
+	}
+
 	/** The NailgunNoAmmo click. */
 	private void noAmmo() {
 		this.sounds.play("nailgun_no_ammo", 1, this.sounds.randomPitch(0.95F, 1.05F));
 	}
 
 	/**
-	 * Nailgun's fire rate: the Attractor's slows as its heat drops; the Overheat's slows past half heat, and slower
-	 * still with no heat sink left, while a burnout fires fastest.
+	 * Nailgun's fire rate: the Attractor's and the JumpStart's slow as their heat drops; the Overheat's slows past
+	 * half heat, and slower still with no heat sink left, while a burnout fires fastest.
 	 */
 	private double currentFireRate() {
-		if (this.variant == Variant.ATTRACTOR) {
+		if (this.variant != Variant.OVERHEAT) {
 			return FIRE_RATE + 3.5 - this.heat * 3.5;
 		}
 		if (this.burnOut) {
@@ -349,7 +458,7 @@ final class Nailgun {
 			fills[i] = Math.clamp(this.meterFill - i, 0, 1);
 		}
 		return new FirstPersonWeapons.NailgunState(this.barrelAngle, this.heat, this.heatMeter, this.heatMeterBackground, fills, this.meterFull.clone(),
-			(int)Math.rint(this.charges.ammo), this.layerWeight, this.steaming);
+			(int)Math.rint(this.charges.ammo), this.layerWeight, this.steaming, this.zapHud);
 	}
 
 	private static float[] lerp(float[] from, float[] to, float t) {

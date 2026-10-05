@@ -96,6 +96,10 @@ public final class UltraModel {
 	 * @param alignment Unity's TextAnchor: 0 to 8, top left to bottom right
 	 */
 	public record Text(String name, float[] rect, float[] pivot, float scale, float[] color, Identifier font, float fontSize, int alignment, String text) {
+		/** The same text in another color, as a script sets it. */
+		public Text withColor(float[] color) {
+			return new Text(this.name, this.rect, this.pivot, this.scale, color, this.font, this.fontSize, this.alignment, this.text);
+		}
 	}
 
 	/**
