@@ -5,6 +5,8 @@ Bugs
 - Ricochet aim assist doesn't work that well? Especially when shooting the ground. In Ultrakill, the auto-aim basically redirects a ground shot to an enemy near, even if I shoot straight down.
 
 Other feedback or ideas to discuss
+- The tool tiers can be similar to ultrakill weapons
+  - revolver = wood or stone (slab can be stone or iton), shotgun = iron, nailgun = wood or gold, railcannon = diamond etc.
 - Show hard damage in hearts in some way
 - Killing a whiplashed enemy doesn't give any HP. This is because of hard damage I think, but in Ultrakill, since we have style meter and hard damage refill, it sometimes does.
   - And I think ultrakill's hard damage takes some time to apply as well so immediately whiplash + kill still has some time to give HP. Not sure about this one though

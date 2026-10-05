@@ -96,7 +96,7 @@ final class Conductor {
 		boolean waterOnly;
 		boolean hasBeenZapped;
 		double lastZapped;
-		/** It died while a conductor, and has had its death's aftershock. */
+		/** It has had its death's aftershock, or was already dead when it started conducting, so it gets none. */
 		boolean deathShocked;
 
 		Charge(LivingEntity enemy) {
@@ -140,6 +140,7 @@ final class Conductor {
 			return false;
 		}
 		charge.beingZapped = true;
+		charge.deathShocked = !enemy.isAlive();
 		hits.zapNails(enemy);
 		charge.waterOnly = nails == 0 && stuck.isEmpty();
 		delayedAftershock(charge, AFTERSHOCK_DELAY, world);
