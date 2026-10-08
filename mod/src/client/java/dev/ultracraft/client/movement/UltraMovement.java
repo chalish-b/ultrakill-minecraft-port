@@ -862,14 +862,15 @@ public final class UltraMovement {
 
 	/**
 	 * Explosion.Collide's push on the player: NewMovement.LaunchFromPoint, away from the explosion. A boosted
-	 * one (from a boosted projectile) launches at no less than 60 units a second instead. A harmless rocket
-	 * explosion pushes less with every rocket jump in a row, and a harmless explosion can't push again for half a
-	 * second.
+	 * one (from a boosted projectile) launches at no less than 60 units a second instead, and a rocket the Whiplash
+	 * brought to the player ({@code fup}) at 60. A harmless rocket explosion pushes less with every rocket jump in
+	 * a row and lends the player the wind's air control for a moment, and a harmless explosion can't push again for
+	 * half a second.
 	 *
 	 * @param origin the explosion's centre
 	 * @param harmful whether the explosion also hurts the player
 	 */
-	public void explosionLaunch(Vec3 origin, double pushForceMultiplier, double maxSize, boolean rocketExplosion, boolean boosted, boolean harmful) {
+	public void explosionLaunch(Vec3 origin, double pushForceMultiplier, double maxSize, boolean rocketExplosion, boolean boosted, boolean fup, boolean harmful) {
 		if (this.explodedTime > 0 || (this.safeExplosionLaunchCooldown > 0 && !harmful)) {
 			return;
 		}
@@ -883,7 +884,12 @@ public final class UltraMovement {
 		Vec3 from = (offset.x * offset.x + offset.z * offset.z) / (S * S) < 0.0625 ? root : origin;
 		if (boosted) {
 			launchFromPointAtSpeed(from, Math.max(60, this.body.velocity.length()) * pushForceMultiplier);
+		} else if (fup) {
+			launchFromPointAtSpeed(from, 60 * pushForceMultiplier);
 		} else {
+			if (rocketExplosion && !harmful) {
+				this.windState = 0.75;
+			}
 			launchFromPoint(from, strength * pushForceMultiplier, maxSize);
 		}
 		if (!harmful) {
@@ -1409,6 +1415,11 @@ public final class UltraMovement {
 	/** HookArm.beingPulled: while the Whiplash pulls the player, slides end and can't start, and slams keep the pull. */
 	public void setBeingPulled(boolean pulled) {
 		this.beingPulled = pulled;
+	}
+
+	/** GroundCheck.onGround: standing on the ground, unless the ground check is forced off. */
+	public boolean onGround() {
+		return this.onGround;
 	}
 
 	/** GroundCheck.touchingGround: the ground check touches the ground, forced off or not. */

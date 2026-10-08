@@ -64,10 +64,7 @@ final class ModelOverlays {
 			};
 			case SIMPLE, TILED -> List.of(rectangle(r));
 		};
-		Vector3f normal = canvas.transformDirection(new Vector3f(0, 0, 1));
-		Vector3f center = canvas.transformPosition(new Vector3f());
-		float towardCamera = normal.dot(center) > 0 ? -1 : 1;
-		Matrix4f layered = new Matrix4f(canvas).translate(0, 0, towardCamera * layer * LAYER_DEPTH);
+		Matrix4f layered = new Matrix4f(UltraModel.placed(canvas, image.transform())).translate(0, 0, layerOffset(canvas, layer));
 		submit(poseStack, collector, type, layered, color, polygons);
 	}
 
@@ -75,7 +72,8 @@ final class ModelOverlays {
 	 * A UI Text showing {@code content}, aligned in its rect as its alignment says, in its color and at its font size,
 	 * over the canvas's images ({@code layer}). Seen from behind its canvas it still reads the right way round.
 	 */
-	static void text(PoseStack poseStack, SubmitNodeCollector collector, Matrix4f canvas, UltraModel.Text text, String content, int layer) {
+	static void text(PoseStack poseStack, SubmitNodeCollector collector, Matrix4f canvasMatrix, UltraModel.Text text, String content, int layer) {
+		Matrix4f canvas = UltraModel.placed(canvasMatrix, text.transform());
 		Font font = Minecraft.getInstance().font;
 		FormattedCharSequence line = Component.literal(content).withStyle(style -> style.withFont(new FontDescription.Resource(text.font()))).getVisualOrderText();
 		float[] r = text.rect();
@@ -97,16 +95,27 @@ final class ModelOverlays {
 		float textY = row == 0 ? 0 : row == 2 ? -font.lineHeight : -font.lineHeight / 2F;
 
 		Vector3f center = canvas.transformPosition(new Vector3f());
-		float towardCamera = canvas.transformDirection(new Vector3f(0, 0, 1)).dot(center) > 0 ? -1 : 1;
 		// Its face (right cross up) turned away from the camera: drawn mirrored, so it reads from this side.
 		boolean behind = canvas.transformDirection(new Vector3f(1, 0, 0)).cross(canvas.transformDirection(new Vector3f(0, 1, 0))).dot(center) > 0;
-		Matrix4f placed = new Matrix4f(canvas).translate(x, y, towardCamera * layer * LAYER_DEPTH).scale(behind ? -units : units, -units, units);
+		Matrix4f placed = new Matrix4f(canvas).translate(x, y, layerOffset(canvas, layer)).scale(behind ? -units : units, -units, units);
 		float[] color = text.color();
 		int argb = Math.round(color[3] * 255) << 24 | Math.round(color[0] * 255) << 16 | Math.round(color[1] * 255) << 8 | Math.round(color[2] * 255);
 		poseStack.pushPose();
 		poseStack.mulPose(placed);
 		collector.submitText(poseStack, textX, textY, line, false, Font.DisplayMode.NORMAL, LightCoordsUtil.FULL_BRIGHT, argb, 0, 0);
 		poseStack.popPose();
+	}
+
+	/**
+	 * How far along the canvas's z the {@code layer}th element sits toward the camera: {@link #LAYER_DEPTH} canvas
+	 * units a layer, measured across the canvas, whatever the canvas's own scale along its z.
+	 */
+	private static float layerOffset(Matrix4f canvas, int layer) {
+		Vector3f center = canvas.transformPosition(new Vector3f());
+		float towardCamera = canvas.transformDirection(new Vector3f(0, 0, 1)).dot(center) > 0 ? -1 : 1;
+		float across = canvas.getColumn(0, new Vector3f()).length();
+		float along = canvas.getColumn(2, new Vector3f()).length();
+		return towardCamera * layer * LAYER_DEPTH * across / along;
 	}
 
 	private static List<Corner> rectangle(float[] r) {

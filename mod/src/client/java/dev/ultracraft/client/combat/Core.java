@@ -22,7 +22,7 @@ import java.util.Optional;
  * A core the Core Eject throws (Grenade, not a rocket): it tumbles along under gravity and explodes on the first
  * wall or enemy it touches. Shot with a revolver (or reached by a coin's shot), it makes a super explosion.
  */
-final class Core {
+final class Core extends Grenade {
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	/** Physics.gravity, units per second squared. */
 	private static final double GRAVITY = 40;
@@ -31,7 +31,7 @@ final class Core {
 	/** Its capsule's radius: 0.4 at the core's 0.5 scale. */
 	static final double RADIUS = 0.2;
 	/** The trigger sphere that shots, coins and explosions find it by: radius 0.5, at 5 and then 0.5 scale. */
-	static final double HIT_RADIUS = 1.25 * S;
+	private static final double HIT_RADIUS = 1.25 * S;
 	/** The Rigidbody's angular drag, and the physics settings' cap on how fast anything spins (radians a second). */
 	private static final double ANGULAR_DRAG = 0.05;
 	private static final float MAX_SPIN = 7;
@@ -45,7 +45,6 @@ final class Core {
 		void coreLanded(Core core, boolean enemy);
 	}
 
-	Vec3 position;
 	/** Units per second. */
 	private Vec3 velocity;
 	/** Its rotation in the world, as Minecraft draws it. */
@@ -53,14 +52,11 @@ final class Core {
 	/** Radians per second, in the world. */
 	private final Vector3f spin;
 	private double age;
-	boolean removed;
-	/** On the Whiplash's hook, which carries it: it doesn't fall or touch anything by itself. */
-	boolean hooked;
 	/** Trail points, newest first. */
 	final Deque<Pellet.TrailPoint> trail = new ArrayDeque<>();
 
 	Core(Vec3 position, Vec3 velocity, Quaternionf rotation, Vector3f spin) {
-		this.position = position;
+		super(position);
 		this.velocity = velocity;
 		this.rotation = rotation;
 		this.spin = spin.length() > MAX_SPIN ? spin.normalize(MAX_SPIN) : spin;
@@ -71,7 +67,18 @@ final class Core {
 		return this.age;
 	}
 
-	/** A Knuckleblaster's blast or the like sets its velocity, in units per second. */
+	@Override
+	Vec3 hitCenter() {
+		return this.position;
+	}
+
+	@Override
+	double hitRadius() {
+		return HIT_RADIUS;
+	}
+
+	/** A Knuckleblaster's blast or the like sets its velocity. */
+	@Override
 	void launch(Vec3 velocity) {
 		this.velocity = velocity;
 	}

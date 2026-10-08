@@ -30,7 +30,7 @@ import java.util.Set;
 import java.util.function.IntPredicate;
 
 /**
- * The first-person viewmodels: the held revolver, shotgun, nailgun or railcannon, the current arm (the Feedbacker or the
+ * The first-person viewmodels: the held revolver, shotgun, nailgun, railcannon or rocket launcher, the current arm (the Feedbacker or the
  * Knuckleblaster) and the Whiplash's arm, each played by its own Animator. The arm is always there; its idle pose
  * keeps it below the screen until it punches or flips a coin. The Whiplash's arm shows from a throw until it has
  * caught its hook again.
@@ -72,7 +72,8 @@ public final class FirstPersonWeapons {
 		NAILGUN_JUMPSTART("nailgun_jumpstart"),
 		RAILCANNON_ELECTRIC("railcannon_electric"),
 		RAILCANNON_SCREWDRIVER("railcannon_screwdriver"),
-		RAILCANNON_MALICIOUS("railcannon_malicious");
+		RAILCANNON_MALICIOUS("railcannon_malicious"),
+		ROCKET_LAUNCHER_FREEZEFRAME("rocket_launcher_freezeframe");
 
 		final String model;
 
@@ -90,6 +91,10 @@ public final class FirstPersonWeapons {
 
 		boolean nailgun() {
 			return this.model.startsWith("nailgun_");
+		}
+
+		boolean rocketLauncher() {
+			return this.model.startsWith("rocket_launcher_");
 		}
 	}
 
@@ -187,7 +192,7 @@ public final class FirstPersonWeapons {
 
 	/** Clip events from the held weapon and from the arm, and the held revolver's cylinder clicking into place. */
 	public interface Events {
-		void weaponEvent(Weapon weapon, String function);
+		void weaponEvent(Weapon weapon, String function, float floatParameter);
 
 		void armEvent(String function);
 
@@ -321,6 +326,8 @@ public final class FirstPersonWeapons {
 	private final Vector3f sawShakeTarget = new Vector3f();
 	/** The railcannons' charge, 0 to 5 (WeaponCharges.raicharge). */
 	private double railcannonCharge = 5;
+	/** How full the rocket launcher's dial shows, 0 to 1: the Freezeframe's freeze. */
+	private double rocketTimer = 1;
 	/** The HUD camera's field of view (degrees), and whether a zoom narrows it (CameraController.Zoom). */
 	private double weaponFov = WEAPON_FOV;
 	private boolean zooming;
@@ -596,13 +603,17 @@ public final class FirstPersonWeapons {
 	 * Runs the held weapon's and the arm's Animators, and the scripts that move them after.
 	 *
 	 * @param railcannonCharge the railcannons' charge, 0 to 5
+	 * @param rocketTimer how full the rocket launcher's dial shows, 0 to 1
 	 */
-	public void update(double dt, @Nullable Weapon held, RevolverState state, ShotgunState shotgun, NailgunState nailgun, double railcannonCharge, Events events) {
+	public void update(
+		double dt, @Nullable Weapon held, RevolverState state, ShotgunState shotgun, NailgunState nailgun, double railcannonCharge, double rocketTimer, Events events
+	) {
 		this.held = held;
 		this.state = state;
 		this.shotgun = shotgun;
 		this.nailgun = nailgun;
 		this.railcannonCharge = railcannonCharge;
+		this.rocketTimer = rocketTimer;
 		double fovTarget = this.zooming ? Minecraft.getInstance().options.fov().get() / 2.0 : WEAPON_FOV;
 		double fovStep = 300 * dt;
 		this.weaponFov = Math.abs(fovTarget - this.weaponFov) <= fovStep ? fovTarget : this.weaponFov + Math.signum(fovTarget - this.weaponFov) * fovStep;
@@ -614,10 +625,10 @@ public final class FirstPersonWeapons {
 					weapon.animator.setFloat("TwirlSpeed", (float)state.twirlSpeed());
 				} else if (held.nailgun()) {
 					weapon.animator.setLayerWeight(1, nailgun.layerWeight());
-				} else if (!held.railcannon()) {
+				} else if (!held.railcannon() && !held.rocketLauncher()) {
 					weapon.animator.setBool("Sawing", shotgun.saw().sawing());
 				}
-				weapon.update(dt, function -> events.weaponEvent(held, function));
+				weapon.update(dt, (function, floatParameter) -> events.weaponEvent(held, function, floatParameter));
 				twirl(weapon, state.twirlAngle());
 				if (held.nailgun()) {
 					spinBarrels(weapon, nailgun.barrelAngle());
@@ -643,14 +654,14 @@ public final class FirstPersonWeapons {
 		}
 		Viewmodel arm = arm();
 		if (arm != null) {
-			arm.update(dt, function -> {
+			arm.update(dt, (function, floatParameter) -> {
 				armEvent(function);
 				events.armEvent(function);
 			});
 		}
 		Viewmodel whiplash = whiplash();
 		if (whiplash != null) {
-			whiplash.update(dt, events::whiplashEvent);
+			whiplash.update(dt, (function, floatParameter) -> events.whiplashEvent(function));
 			int hand = whiplash.model.script("hookArm").get("hand").getAsInt();
 			whiplash.pose.setPosition(hand, this.wireStart.x, this.wireStart.y, this.wireStart.z);
 		}
@@ -751,6 +762,8 @@ public final class FirstPersonWeapons {
 			submitRailcannon(poseStack, collector, light, weapon);
 		} else if (weapon != null && this.held.nailgun()) {
 			submitNailgun(poseStack, collector, light, weapon);
+		} else if (weapon != null && this.held.rocketLauncher()) {
+			submitRocketLauncher(poseStack, collector, light, weapon);
 		} else if (weapon != null) {
 			submitShotgun(poseStack, collector, light, weapon);
 		}
@@ -953,6 +966,40 @@ public final class FirstPersonWeapons {
 		}
 	}
 
+	/**
+	 * The rocket launcher, and its dial (RocketLauncher.Update): its rings and quarter marks in the variant's color,
+	 * its inner ring filled as far as the dial shows, and its clock hand turned to match, a full turn back from
+	 * upright when it's empty.
+	 */
+	private void submitRocketLauncher(PoseStack poseStack, SubmitNodeCollector collector, int light, Viewmodel weapon) {
+		Matrix4f[] world = weapon.model.boneMatrices(weapon.pose, new Quaternionf());
+		weapon.model.submit(poseStack, collector, light, world);
+		JsonObject script = weapon.model.script("rocketLauncher");
+		if (script == null) {
+			return;
+		}
+		float[] variation = variationColor(script);
+		float timer = (float)Math.clamp(this.rocketTimer, 0, 1);
+		JsonObject arm = script.getAsJsonObject("timerArm");
+		float[] pivot = floats(arm.getAsJsonArray("pivot"));
+		for (int c = 0; c < weapon.model.canvases().size(); c++) {
+			UltraModel.Canvas canvas = weapon.model.canvases().get(c);
+			Matrix4f matrix = world[canvas.bone()];
+			Matrix4f turned = new Matrix4f(matrix).translate(pivot[0], pivot[1], 0)
+				.rotateZ((float)Math.toRadians(360 * (1 - timer))).translate(-pivot[0], -pivot[1], 0);
+			for (int i = 0; i < canvas.images().size(); i++) {
+				UltraModel.Image image = canvas.images().get(i);
+				float[] color = image.color();
+				if (within(script.getAsJsonArray("variationColorables"), c, i)) {
+					color = new float[]{variation[0], variation[1], variation[2], image.color()[3]};
+				}
+				float fill = at(script.get("timerMeter"), c, i) ? timer : image.fillAmount();
+				Matrix4f placed = within(arm.getAsJsonArray("images"), c, i) ? turned : matrix;
+				ModelOverlays.image(poseStack, collector, RenderTypes.text(image.texture()), placed, image, color, fill, i);
+			}
+		}
+	}
+
 	/** Whether {@code place} is {@code canvas}'s {@code index}th. */
 	private static boolean at(JsonElement place, JsonArray other) {
 		return at(place, other.get(0).getAsInt(), other.get(1).getAsInt());
@@ -1040,11 +1087,32 @@ public final class FirstPersonWeapons {
 		}
 		JsonArray points = script.getAsJsonArray("shootPoints");
 		Matrix4f matrix = viewmodel.model.boneMatrices(viewmodel.pose, new Quaternionf())[points.get(point % points.size()).getAsInt()];
-		Quaternionf facing = new Matrix3f(
+		Quaternionf camera = new Quaternionf(Minecraft.getInstance().gameRenderer.mainCamera().rotation());
+		return new Placement(drawnAt(matrix.getTranslation(new Vector3f())), camera.mul(facing(matrix)), drawnSpread());
+	}
+
+	/**
+	 * Where the rocket launcher's Shootpoint is in the world, the gun hanging off the camera at its own size, and
+	 * which way it faces there.
+	 */
+	public @Nullable Placement rocketLauncherShootPoint(Weapon weapon) {
+		Viewmodel viewmodel = weapon(weapon);
+		JsonObject script = viewmodel == null ? null : viewmodel.model.script("rocketLauncher");
+		if (script == null) {
+			return null;
+		}
+		Matrix4f matrix = viewmodel.model.boneMatrices(viewmodel.pose, new Quaternionf())[script.get("shootPoint").getAsInt()];
+		Camera camera = Minecraft.getInstance().gameRenderer.mainCamera();
+		Quaternionf rotation = new Quaternionf(camera.rotation());
+		Vector3f offset = rotation.transform(matrix.getTranslation(new Vector3f()).mul((float)PlayerShape.BLOCKS_PER_UNIT));
+		return new Placement(camera.position().add(offset.x, offset.y, offset.z), rotation.mul(facing(matrix)), 1);
+	}
+
+	/** The rotation a prefab put on a bone of this matrix takes, mirrored into Minecraft's axes as the prefabs are drawn. */
+	private static Quaternionf facing(Matrix4f matrix) {
+		return new Matrix3f(
 			matrix.getColumn(0, new Vector3f()).normalize(), matrix.getColumn(1, new Vector3f()).normalize(), matrix.getColumn(2, new Vector3f()).normalize()
 		).mul(new Matrix3f().scaling(1, 1, -1)).getNormalizedRotation(new Quaternionf());
-		Quaternionf camera = new Quaternionf(Minecraft.getInstance().gameRenderer.mainCamera().rotation());
-		return new Placement(drawnAt(matrix.getTranslation(new Vector3f())), camera.mul(facing), drawnSpread());
 	}
 
 	/** Whether {@code bone} is {@code ancestor} or under it. */

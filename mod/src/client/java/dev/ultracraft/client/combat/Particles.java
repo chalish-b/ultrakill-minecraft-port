@@ -121,6 +121,21 @@ final class Particles {
 	 */
 	static Particles looping(UltraModel model, JsonObject settings, Vec3 origin, Quaternionf worldRotation) {
 		int bone = settings.get("bone").getAsInt();
+		return new Particles(settings, origin, worldRotation, ExplosionLook.unityRotation(model, bone), modeScale(model, settings), true);
+	}
+
+	/**
+	 * A system out of {@code model} played once, on an object that moves and turns, scaled as its scaling mode
+	 * says.
+	 */
+	static Particles once(UltraModel model, JsonObject settings, Vec3 origin, Quaternionf worldRotation) {
+		int bone = settings.get("bone").getAsInt();
+		return new Particles(settings, origin, worldRotation, ExplosionLook.unityRotation(model, bone), modeScale(model, settings), false);
+	}
+
+	/** The system's scale by its scaling mode: its own (Local), or its and its parents' (Hierarchy). */
+	private static Vector3f modeScale(UltraModel model, JsonObject settings) {
+		int bone = settings.get("bone").getAsInt();
 		Pose rest = model.rest();
 		Vector3f scale = new Vector3f(1);
 		int mode = settings.get("scalingMode").getAsInt();
@@ -131,7 +146,7 @@ final class Particles {
 				scale.mul(rest.sx(b), rest.sy(b), rest.sz(b));
 			}
 		}
-		return new Particles(settings, origin, worldRotation, ExplosionLook.unityRotation(model, bone), scale, true);
+		return scale;
 	}
 
 	private Particles(JsonObject settings, Vec3 origin, Quaternionf worldRotation, Quaternionf unityRotation, Vector3f scale, boolean looping) {

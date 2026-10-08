@@ -79,13 +79,13 @@ import java.util.function.UnaryOperator;
 
 /**
  * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the shotgun's pellets, the
- * nailgun's nails, magnets and zapper and the electricity between enemies, the railcannon's beams, the arms' punches (and boosting pellets with them) and the
+ * nailgun's nails, magnets and zapper and the electricity between enemies, the railcannon's beams, the rocket launcher's rockets, the arms' punches (and boosting pellets with them) and the
  * Knuckleblaster's blast, the Whiplash, explosions, weapon charges (WeaponCharges) and the hitstops after a parry
  * or a punch. Hits go to the server, which applies them.
  */
-public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Nailgun.Actions, Railcannon.Actions, Pellet.Hits, Core.Hits, FirstPersonWeapons.Events,
-	Explosion.Hits, SawZone.Hits, ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits, Drill.Hits, Nail.Hits, Magnet.Hits, Zapper.Hits,
-	Conductor.Hits {
+public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Nailgun.Actions, Railcannon.Actions, RocketLauncher.Actions, Pellet.Hits, Core.Hits,
+	Rocket.Hits, FirstPersonWeapons.Events, Explosion.Hits, SawZone.Hits, ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits, Drill.Hits, Nail.Hits,
+	Magnet.Hits, Zapper.Hits, Conductor.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	private static final double RANGE = 256;
@@ -102,10 +102,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private static final double PUNCH_ACTIVE_TIME = 6 * 0.008;
 	/** The Knuckleblaster's blast goes off this far ahead of the camera, or just short of a wall (Punch.BlastCheck). */
 	private static final double BLAST_DISTANCE = 2 * S;
-	/** Coins look for cores this close to the player. */
-	private static final double CORE_TARGET_RANGE = 100 * S;
-	/** TimeController.HitStop when a core hits an enemy. */
-	private static final double CORE_HITSTOP = 0.05;
+	/** Coins look for cores and rockets this close to the player. */
+	private static final double GRENADE_TARGET_RANGE = 100 * S;
+	/** TimeController.HitStop when a core or a rocket hits an enemy. */
+	private static final double GRENADE_HITSTOP = 0.05;
 	/** The Whiplash's hit on the enemy it catches. */
 	private static final float WHIPLASH_DAMAGE = 0.2F;
 	/** Landed shells stay until there are more than this many (GoreZone's maxGibs at the default maxGore). */
@@ -212,6 +212,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private final List<Shell> shells = new ArrayList<>();
 	private final List<Pellet> pellets = new ArrayList<>();
 	private final List<Core> cores = new ArrayList<>();
+	private final List<Rocket> rockets = new ArrayList<>();
 	private final Revolver.Input input = new Revolver.Input();
 	private final RandomSource random = RandomSource.create();
 	private final Map<Shotgun.Variant, Shotgun> shotguns = new EnumMap<>(Shotgun.Variant.class);
@@ -223,6 +224,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private final List<Sawblade> sawblades = new ArrayList<>();
 	private final Whiplash whiplash = new Whiplash(this.sounds, this);
 	private final Railcannon railcannon = new Railcannon(this.sounds);
+	private final RocketLauncher rocketLauncher = new RocketLauncher(this.sounds);
 	/** Railcannon beams still working their way through what they hit. */
 	private final List<RailShot> railShots = new ArrayList<>();
 	/** The Screwdriver's drills. */
@@ -324,6 +326,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			this.shells.clear();
 			this.pellets.clear();
 			this.cores.clear();
+			this.rockets.forEach(Rocket::discard);
+			this.rockets.clear();
 			this.saws.forEach(saw -> saw.spin.stop());
 			this.saws.clear();
 			this.sawblades.forEach(sawblade -> sawblade.spin.stop());
@@ -376,6 +380,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 		this.readyShots = shots;
 		this.railcannon.recharge(dt);
+		this.rocketLauncher.recharge(dt, this.rockets.size());
 		this.nailgunCharges.recharge(dt, this.magnets.size());
 		updateRicochets(dt, minecraft.level, player);
 		updateRailShots(dt, minecraft.level, player);
@@ -410,6 +415,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			}
 		}
 		this.cores.removeIf(core -> core.removed);
+		for (Rocket rocket : List.copyOf(this.rockets)) {
+			if (!rocket.removed) {
+				rocket.update(dt, minecraft.level, player, this.rocketLauncher.frozen(), this);
+			}
+		}
+		this.rockets.removeIf(this::rocketGone);
 		updateSaws(dt, minecraft.level, player);
 		float partialTick = minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false);
 		for (Drill drill : List.copyOf(this.drills)) {
@@ -470,6 +481,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			if (railcannonVariant(this.held) != null) {
 				this.railcannon.update(dt, this.input, this);
 			}
+			if (rocketLauncherVariant(this.held) != null) {
+				this.rocketLauncher.update(dt, this.input, this);
+			}
 			saw(dt, minecraft.level, player, shotgun);
 			slam(minecraft.level, player);
 			this.slideEffects.update(UltraController.INSTANCE.movement());
@@ -503,7 +517,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			));
 		Nailgun nailgun = nailgun(this.held);
 		FirstPersonWeapons.NailgunState nailgunDisplay = nailgun == null ? FirstPersonWeapons.NailgunState.NONE : nailgun.display();
-		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, nailgunDisplay, this.railcannon.charge(), this);
+		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, nailgunDisplay, this.railcannon.charge(), this.rocketLauncher.freezeShare(), this);
 	}
 
 	private void updateHeld(FirstPersonWeapons.@Nullable Weapon weapon) {
@@ -525,6 +539,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		if (railcannonVariant(this.held) != null) {
 			this.railcannon.holster(this);
 		}
+		if (rocketLauncherVariant(this.held) != null) {
+			this.rocketLauncher.holster();
+		}
 		this.held = weapon;
 		this.wasFire1 = true;
 		this.wasFire2 = false;
@@ -545,12 +562,16 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			if (variant != null) {
 				this.railcannon.equip(variant);
 			}
+			RocketLauncher.Variant launcher = rocketLauncherVariant(weapon);
+			if (launcher != null) {
+				this.rocketLauncher.equip(launcher);
+			}
 			FirstPersonWeapons.INSTANCE.equip(weapon);
 		}
 	}
 
 	@Override
-	public void weaponEvent(FirstPersonWeapons.Weapon weapon, String function) {
+	public void weaponEvent(FirstPersonWeapons.Weapon weapon, String function, float floatParameter) {
 		Revolver revolver = revolver(weapon);
 		Shotgun shotgun = shotgun(weapon);
 		switch (function) {
@@ -588,6 +609,14 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 				this.sounds.play("shotgun_pump_charge", 1, 1 + (shotgun == null ? 0 : shotgun.pumps()) / 5F);
 			}
 			case "Pump2Sound" -> this.sounds.play("shotgun_pump2", 1, this.sounds.randomPitch(0.95F, 1.05F));
+			// RocketLauncher.Clunk: a clunk around the event's pitch, and a small shake.
+			case "Clunk" -> {
+				this.sounds.play("rocket_launcher_clunk", 1, this.sounds.randomPitch(floatParameter - 0.1F, floatParameter + 0.1F));
+				UltraMovement movement = UltraController.INSTANCE.movement();
+				if (movement != null) {
+					movement.shake(0.25);
+				}
+			}
 			default -> {
 			}
 		}
@@ -719,6 +748,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		if (stack.is(UltraItems.RAILCANNON_MALICIOUS)) {
 			return FirstPersonWeapons.Weapon.RAILCANNON_MALICIOUS;
 		}
+		if (stack.is(UltraItems.ROCKET_LAUNCHER_FREEZEFRAME)) {
+			return FirstPersonWeapons.Weapon.ROCKET_LAUNCHER_FREEZEFRAME;
+		}
 		return stack.is(UltraItems.SHOTGUN_SAWED_ON) ? FirstPersonWeapons.Weapon.SHOTGUN_SAWED_ON : null;
 	}
 
@@ -739,6 +771,16 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			case ELECTRIC -> FirstPersonWeapons.Weapon.RAILCANNON_ELECTRIC;
 			case SCREWDRIVER -> FirstPersonWeapons.Weapon.RAILCANNON_SCREWDRIVER;
 			case MALICIOUS -> FirstPersonWeapons.Weapon.RAILCANNON_MALICIOUS;
+		};
+	}
+
+	private static RocketLauncher.@Nullable Variant rocketLauncherVariant(FirstPersonWeapons.@Nullable Weapon weapon) {
+		return weapon == FirstPersonWeapons.Weapon.ROCKET_LAUNCHER_FREEZEFRAME ? RocketLauncher.Variant.FREEZEFRAME : null;
+	}
+
+	private static FirstPersonWeapons.Weapon weapon(RocketLauncher.Variant variant) {
+		return switch (variant) {
+			case FREEZEFRAME -> FirstPersonWeapons.Weapon.ROCKET_LAUNCHER_FREEZEFRAME;
 		};
 	}
 
@@ -828,7 +870,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		Vec3 end = eye;
 		shot:
 		while (true) {
-			for (Hitscan.Hit hit : Hitscan.cast(minecraft.level, player, eye, look, RANGE, this.coins, this.cores, broken)) {
+			for (Hitscan.Hit hit : Hitscan.cast(minecraft.level, player, eye, look, RANGE, this.coins, grenades(), broken)) {
 				boolean wall = hit.kind() == Hitscan.Kind.BLOCK || hit.kind() == Hitscan.Kind.END;
 				if (!wall && hit.distance() <= passed) {
 					continue;
@@ -850,8 +892,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 					hit.coin().hit(hit.coin().power, new HashSet<>(), charged ? Effects.BeamStyle.SUPER : Effects.BeamStyle.COIN);
 					end = hit.position();
 					break shot;
-				} else if (hit.kind() == Hitscan.Kind.CORE) {
-					coreShot(hit.core());
+				} else if (hit.kind() == Hitscan.Kind.GRENADE) {
+					grenadeShot(hit.grenade());
 					if (!charged) {
 						end = hit.position();
 						break shot;
@@ -893,11 +935,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	 * ricochets left, a wall sends it on 0.1 s later, reflected and aimed at the nearest enemy near its path.
 	 */
 	private void sharpshooterBeam(Level level, LocalPlayer player, Vec3 from, Vec3 direction, Vec3 drawFrom, int ricochets) {
-		List<Hitscan.Hit> hits = Hitscan.cast(level, player, from, direction, RANGE, this.coins, this.cores);
+		List<Hitscan.Hit> hits = Hitscan.cast(level, player, from, direction, RANGE, this.coins, grenades());
 		Vec3 end = hits.getLast().position();
 		for (Hitscan.Hit hit : hits) {
-			if (hit.kind() == Hitscan.Kind.CORE) {
-				coreShot(hit.core());
+			if (hit.kind() == Hitscan.Kind.GRENADE) {
+				grenadeShot(hit.grenade());
 			} else if (hit.kind() == Hitscan.Kind.ENTITY) {
 				damage(level, hit.entity(), hit.head() ? 2 : 1, hit.head(), hit.position());
 				UltraMovement movement = UltraController.INSTANCE.movement();
@@ -1094,19 +1136,16 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			return;
 		}
 
-		// After coins, a core the coin can see within 100 units of the player: it makes a super explosion. The
-		// coin's own beam is only drawn, so the core just goes off; a piercing shot the coin passes on is a real
-		// shot at the core, with the parry flash a revolver shot on a core brings.
-		Core core = this.cores.stream()
-			.filter(c -> !c.removed && c.position.distanceTo(player.position()) < CORE_TARGET_RANGE && Hitscan.clear(level, player, coin.position, c.position))
-			.min(Comparator.comparingDouble(c -> c.position.distanceToSqr(coin.position)))
-			.orElse(null);
-		if (core != null) {
-			beam(coin.position, core.position, coin.beam);
+		// After coins, a core or rocket the coin can see within 100 units of the player: it goes off. The coin's own
+		// beam is only drawn, so the grenade just goes off; a piercing shot the coin passes on is a real shot at
+		// it, with the parry flash a revolver shot on a grenade brings.
+		Grenade grenade = grenadeTarget(coin, level, player);
+		if (grenade != null) {
+			beam(coin.position, grenade.position, coin.beam);
 			if (coin.beam == Effects.BeamStyle.COIN) {
-				superExplode(core);
+				shotExplode(grenade);
 			} else {
-				coreShot(core);
+				grenadeShot(grenade);
 			}
 			return;
 		}
@@ -1206,6 +1245,14 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		if (landing != null) {
 			this.respawned.add(coin.respawn(landing, power));
 		}
+	}
+
+	/** Coin.ExplosiveReflectCheck: the nearest core or rocket to the coin that it can see, within reach of the player. */
+	private @Nullable Grenade grenadeTarget(Coin coin, Level level, LocalPlayer player) {
+		return grenades().stream()
+			.filter(g -> !g.removed && g.position.distanceTo(player.position()) < GRENADE_TARGET_RANGE && Hitscan.clear(level, player, coin.position, g.position))
+			.min(Comparator.comparingDouble(g -> g.position.distanceToSqr(coin.position)))
+			.orElse(null);
 	}
 
 	/** The nearest enemy the coin can see the head of, hostile mobs before anything else. */
@@ -1676,7 +1723,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private void electricBeam(Level level, LocalPlayer player, Vec3 from, Vec3 direction, Vec3 drawFrom, float damage, float coinPower, Set<Integer> chainHits) {
 		Tunnel tunnel = tunnel(level, player, from, direction, damage * RAIL_HITS);
 		List<Hitscan.Hit> hits = new ArrayList<>(tunnel.blocks());
-		for (Hitscan.Hit hit : Hitscan.sweep(level, player, from, tunnel.end(), RAIL_RADIUS, this.coins, this.cores)) {
+		for (Hitscan.Hit hit : Hitscan.sweep(level, player, from, tunnel.end(), RAIL_RADIUS, this.coins, grenades())) {
 			for (int i = 0; i < (hit.kind() == Hitscan.Kind.ENTITY ? RAIL_HITS : 1); i++) {
 				hits.add(hit);
 			}
@@ -1824,7 +1871,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 				return RAIL_STEP;
 			}
 			case COIN -> hit.coin().hit(Float.isNaN(shot.coinPower) ? hit.coin().power : shot.coinPower, shot.chainHits, Effects.BeamStyle.RAILCANNON);
-			case CORE -> coreShot(hit.core());
+			case GRENADE -> grenadeShot(hit.grenade());
 			case BLOCK -> {
 				if (hit.face() != null) {
 					this.effects.impact(level, hit.position());
@@ -1839,15 +1886,15 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	/**
 	 * The Malicious railcannon's beam ("Railcannon Beam Malicious", a RevolverBeam with one hit): a 0.4 unit sphere
-	 * along the aim stops at the first enemy, coin or core in its way, else at the wall, and its hit particle, an
-	 * explosion, goes off there. A coin fires it on instead. A core goes off as a super explosion twice as big that
-	 * ultraboosts the player, and the beam's own explosion then spares the player.
+	 * along the aim stops at the first enemy, coin, core or rocket in its way, else at the wall, and its hit
+	 * particle, an explosion, goes off there. A coin fires it on instead. A core or rocket goes off twice as big,
+	 * ultraboosting the player, and the beam's own explosion then spares the player.
 	 *
 	 * @param added damage coins have added to the beam, which its explosion gets 20 times over
 	 */
 	private void maliciousBeam(Level level, LocalPlayer player, Vec3 from, Vec3 direction, Vec3 drawFrom, float added, float coinPower, Set<Integer> chainHits) {
 		Hitscan.Hit wall = Hitscan.cast(level, player, from, direction, RANGE, List.of()).getLast();
-		List<Hitscan.Hit> hits = Hitscan.sweep(level, player, from, wall.position(), MALICIOUS_RADIUS, this.coins, this.cores);
+		List<Hitscan.Hit> hits = Hitscan.sweep(level, player, from, wall.position(), MALICIOUS_RADIUS, this.coins, grenades());
 		UltraMovement movement = UltraController.INSTANCE.movement();
 		if (movement != null) {
 			movement.shake(2);
@@ -1864,8 +1911,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 				}
 				maliciousExplosion(hit.position(), back, added, false);
 			}
-			case CORE -> {
-				coreNuke(hit.core());
+			case GRENADE -> {
+				grenadeNuke(hit.grenade());
 				maliciousExplosion(hit.position(), back, added, true);
 			}
 			case BLOCK -> {
@@ -1885,15 +1932,22 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}, MALICIOUS_PITCH);
 	}
 
-	/** RevolverBeam's Malicious railcannon beam on a core: the parry flash, and a super explosion twice as big that ultraboosts. */
-	private void coreNuke(Core core) {
-		if (core.removed) {
+	/**
+	 * RevolverBeam's Malicious railcannon beam on a grenade: the parry flash, and it goes off twice as big,
+	 * ultraboosting: a core as a super explosion, a rocket as a big explosion.
+	 */
+	private void grenadeNuke(Grenade grenade) {
+		if (grenade.removed) {
 			return;
 		}
 		parryFlash();
 		ClientPlayNetworking.send(new HitstopPayload((int)(PARRY_HITSTOP * 1000)));
-		core.removed = true;
-		explode(EXPLOSION_SUPER, core.position, null, false, SUPER_BLOCK_POWER, settings -> settings.ultraboosted(CORE_NUKE_SIZE));
+		if (grenade instanceof Rocket rocket) {
+			explodeRocket(rocket, true, false, false, NUKE_SIZE, true, false);
+			return;
+		}
+		grenade.removed = true;
+		explode(EXPLOSION_SUPER, grenade.position, null, false, SUPER_BLOCK_POWER, settings -> settings.ultraboosted(NUKE_SIZE));
 	}
 
 	@Override
@@ -1972,7 +2026,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	/**
 	 * Coin.ReflectRevolver with a railcannon's beam: the coin fires the beam again, at the nearest coin it can see,
-	 * else a core, else the nearest enemy's head, else anywhere. Going on to anything but a coin, it hits harder by a
+	 * else a core or rocket, else the nearest enemy's head, else anywhere. Going on to anything but a coin, it hits harder by a
 	 * quarter of the coin's power.
 	 */
 	private void railPassOn(Coin coin, Level level, LocalPlayer player) {
@@ -1986,12 +2040,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			target = next.position;
 			added = 0;
 		} else {
-			Core core = this.cores.stream()
-				.filter(c -> !c.removed && c.position.distanceTo(player.position()) < CORE_TARGET_RANGE && Hitscan.clear(level, player, coin.position, c.position))
-				.min(Comparator.comparingDouble(c -> c.position.distanceToSqr(coin.position)))
-				.orElse(null);
-			if (core != null) {
-				target = core.position;
+			Grenade grenade = grenadeTarget(coin, level, player);
+			if (grenade != null) {
+				target = grenade.hitCenter();
 			} else {
 				LivingEntity enemy = coinTarget(coin, level, player);
 				if (enemy != null) {
@@ -2153,9 +2204,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 		Explosion.Settings settings = explosion.settings;
 		double distance = movement.rootPosition().distanceTo(explosion.origin) / S;
-		movement.explosionLaunch(explosion.origin, settings.pushForceMultiplier(), settings.maxSize(), settings.rocketExplosion(), explosion.boosted, explosion.harmful());
+		movement.explosionLaunch(explosion.origin, settings.pushForceMultiplier(), settings.maxSize(), settings.rocketExplosion(), explosion.boosted, settings.fup(), explosion.harmful());
 		if (settings.ultrabooster() && distance < 12 && !explosion.boosted) {
-			movement.explosionLaunch(explosion.origin, settings.pushForceMultiplier(), settings.maxSize(), settings.rocketExplosion(), false, explosion.harmful());
+			movement.explosionLaunch(explosion.origin, settings.pushForceMultiplier(), settings.maxSize(), settings.rocketExplosion(), false, settings.fup(), explosion.harmful());
 		}
 		if (explosion.harmful() && !movement.invincible()) {
 			int damage = explosion.playerDamage(distance);
@@ -2967,8 +3018,14 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	static final String EXPLOSION_MALICIOUS = "explosion_malicious_railcannon";
 	/** Its RandomPitch: half pitch (baked into its sound), a fifth of that either way. */
 	private static final float[] MALICIOUS_PITCH = {0.8F, 1.2F};
-	/** A core the Malicious railcannon shoots goes off this many times as big. */
-	private static final double CORE_NUKE_SIZE = 2;
+	/** The rocket launcher's rocket. */
+	private static final String ROCKET = "rocket";
+	/** "Explosion Rocket Harmless": where a rocket hit a wall. */
+	private static final String EXPLOSION_ROCKET_HARMLESS = "explosion_rocket_harmless";
+	/** The rocket launcher's muzzle flash ("RocketLauncherFire"). */
+	private static final String ROCKET_LAUNCHER_MUZZLE_FLASH = "rocket_launcher_muzzle_flash";
+	/** A core or rocket the Malicious railcannon shoots goes off this many times as big. */
+	private static final double NUKE_SIZE = 2;
 	/** RevolverBeam sweeps a single-target beam, as the Malicious railcannon's is, with a sphere this big. */
 	private static final double MALICIOUS_RADIUS = 0.4 * S;
 	/**
@@ -3003,7 +3060,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		if (model == null) {
 			return;
 		}
-		ClientPlayNetworking.send(new ExplosionBlocksPayload(at, blockPower));
+		if (blockPower > 0) {
+			ClientPlayNetworking.send(new ExplosionBlocksPayload(at, blockPower));
+		}
 		Quaternionf rotation = facing == null ? new Quaternionf()
 			: new Quaternionf().lookAlong((float)facing.x, (float)facing.y, (float)facing.z, 0, 1, 0).conjugate();
 		List<Explosion> parts = new ArrayList<>();
@@ -3072,34 +3131,46 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	@Override
 	public void coreLanded(Core core, boolean enemy) {
 		if (enemy) {
-			this.hitstopLeft = Math.max(this.hitstopLeft, CORE_HITSTOP);
-			ClientPlayNetworking.send(new HitstopPayload((int)(CORE_HITSTOP * 1000)));
+			this.hitstopLeft = Math.max(this.hitstopLeft, GRENADE_HITSTOP);
+			ClientPlayNetworking.send(new HitstopPayload((int)(GRENADE_HITSTOP * 1000)));
 		}
 		explode(EXPLOSION, core.position, null, false, CORE_BLOCK_POWER);
 	}
 
-	/** RevolverBeam on a core: the parry flash, and a super explosion. */
-	private void coreShot(Core core) {
-		if (core.removed) {
+	/** RevolverBeam on a core or rocket: the parry flash, and it goes off. */
+	private void grenadeShot(Grenade grenade) {
+		if (grenade.removed) {
 			return;
 		}
 		parryFlash();
 		ClientPlayNetworking.send(new HitstopPayload((int)(PARRY_HITSTOP * 1000)));
-		superExplode(core);
+		shotExplode(grenade);
 	}
 
-	/** A revolver shot (or a coin's) on a core: it makes a super explosion. */
-	private void superExplode(Core core) {
-		if (core.removed) {
+	/** A revolver shot (or a coin's) on a core or rocket: a core makes a super explosion, a rocket a big explosion. */
+	private void shotExplode(Grenade grenade) {
+		if (grenade.removed) {
 			return;
 		}
-		core.removed = true;
-		explode(EXPLOSION_SUPER, core.position, null, false, SUPER_BLOCK_POWER);
+		if (grenade instanceof Rocket rocket) {
+			explodeRocket(rocket, true, false, false, 1, false, false);
+			return;
+		}
+		grenade.removed = true;
+		explode(EXPLOSION_SUPER, grenade.position, null, false, SUPER_BLOCK_POWER);
 	}
 
 	@Override
 	public List<Core> cores() {
 		return this.cores;
+	}
+
+	/** The player's cores and rockets. */
+	@Override
+	public List<Grenade> grenades() {
+		List<Grenade> grenades = new ArrayList<>(this.cores);
+		grenades.addAll(this.rockets);
+		return grenades;
 	}
 
 		@Override
@@ -3108,6 +3179,112 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		if (movement != null && explosion.settings.touchShake() > 0) {
 			movement.shake(explosion.settings.touchShake());
 		}
+	}
+
+	// ---- rocket launcher -------------------------------------------------------------------------
+
+	/**
+	 * RocketLauncher.Shoot: the shot (its pitch a tenth either way), the muzzle flash at the barrel, the Fire
+	 * animation, a rocket out of the camera along the aim, and a camera shake.
+	 */
+	@Override
+	public void shootRocket(RocketLauncher.Variant variant) {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (player == null || movement == null) {
+			return;
+		}
+		this.sounds.play("rocket_launcher_shoot", 1, this.sounds.randomPitch(0.9F, 1.1F));
+		FirstPersonWeapons.Weapon weapon = weapon(variant);
+		FirstPersonWeapons.Placement point = FirstPersonWeapons.INSTANCE.rocketLauncherShootPoint(weapon);
+		UltraModel flash = UltraModel.get(ROCKET_LAUNCHER_MUZZLE_FLASH);
+		if (point != null && flash != null) {
+			this.effects.explosion(new ExplosionLook(flash, List.of(), point.position(), point.rotation()));
+		}
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon);
+		if (animator != null) {
+			animator.setTrigger("Fire");
+		}
+		this.rockets.add(new Rocket(movement.eyePosition(), player.getLookAngle(), this.sounds));
+		movement.shake(0.75);
+	}
+
+	/**
+	 * Grenade.Collision for a rocket: on an enemy, a moment's hitstop, the magnets stuck in the enemy take a hit
+	 * (two with a super explosion), and it explodes; against a wall, it makes a harmless explosion.
+	 */
+	@Override
+	public void rocketHit(Rocket rocket, @Nullable LivingEntity enemy, boolean superExplosion) {
+		Minecraft minecraft = Minecraft.getInstance();
+		if (enemy == null) {
+			explodeRocket(rocket, false, true, false, 1, false, false);
+			return;
+		}
+		if (minecraft.level != null && minecraft.player != null) {
+			for (Magnet magnet : List.copyOf(this.magnets)) {
+				for (int i = 0; i < (superExplosion ? 2 : 1) && !magnet.removed && magnet.onEnemy() == enemy; i++) {
+					magnet.damage(minecraft.level, minecraft.player, this);
+				}
+			}
+		}
+		this.hitstopLeft = Math.max(this.hitstopLeft, GRENADE_HITSTOP);
+		ClientPlayNetworking.send(new HitstopPayload((int)(GRENADE_HITSTOP * 1000)));
+		explodeRocket(rocket, false, false, superExplosion, 1, false, false);
+	}
+
+	/**
+	 * Grenade.Explode for a rocket, where it is: a harmless explosion, a super explosion or an explosion. A big super
+	 * explosion is two and a half times the size; otherwise a big or frozen rocket's is half again as big. It's then
+	 * {@code sizeMultiplier} times bigger again, ultraboosting the player if {@code ultrabooster}; {@code fup}
+	 * launches the player at a set speed, as a rocket the Whiplash brought to them does.
+	 */
+	private void explodeRocket(Rocket rocket, boolean big, boolean harmless, boolean superExplosion, double sizeMultiplier, boolean ultrabooster, boolean fup) {
+		rocket.removed = true;
+		String prefab = harmless ? EXPLOSION_ROCKET_HARMLESS : superExplosion ? EXPLOSION_SUPER : EXPLOSION;
+		double size = superExplosion && big ? 2.5 : big || rocket.frozen ? 1.5 : 1;
+		float blockPower = harmless ? 0 : superExplosion ? SUPER_BLOCK_POWER : CORE_BLOCK_POWER;
+		explode(prefab, rocket.position, null, false, blockPower, settings -> {
+			Explosion.Settings set = settings.scaled(size);
+			set = ultrabooster ? set.ultraboosted(sizeMultiplier) : set.scaled(sizeMultiplier);
+			return fup ? set.fupped() : set;
+		});
+	}
+
+	/** The rocket's LevelUpEffect: its particles burst from it, and its level-up sound plays from there. */
+	@Override
+	public void rocketLevelledUp(Rocket rocket) {
+		UltraModel model = UltraModel.get(ROCKET);
+		if (model == null) {
+			return;
+		}
+		int bone = model.script("grenade").get("levelUpEffect").getAsInt();
+		// The model's matrices are in Minecraft's axes, its forward along -z.
+		double ahead = -model.boneMatrices(model.rest(), new Quaternionf())[bone].getTranslation(new Vector3f()).z * S;
+		Vec3 origin = rocket.position.add(rocket.forward.scale(ahead));
+		List<Particles> systems = new ArrayList<>();
+		for (JsonElement element : model.particles()) {
+			Particles system = Particles.once(model, element.getAsJsonObject(), origin, Effects.facing(rocket.forward));
+			systems.add(system);
+			this.effects.play(system);
+		}
+		rocket.attachLevelUp(systems, ahead);
+		this.sounds.once().update("rocket_level_up", 1, 1, origin);
+	}
+
+	@Override
+	public List<Magnet> magnets() {
+		return this.magnets;
+	}
+
+	/** Whether the rocket is gone: then its sounds stop, and the freeze's idle time starts over (Grenade.OnDestroy). */
+	private boolean rocketGone(Rocket rocket) {
+		if (!rocket.removed) {
+			return false;
+		}
+		rocket.discard();
+		this.rocketLauncher.rocketGone();
+		return true;
 	}
 
 	// ---- whiplash -------------------------------------------------------------------------------
@@ -3143,14 +3320,32 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
 	}
 
-	/** Grenade.Explode on the core the hook took along. */
+	/** Grenade.Explode on the core or rocket the hook took along. */
 	@Override
-	public void coreExploded(Core core) {
-		if (core.removed) {
+	public void grenadeExploded(Grenade grenade) {
+		if (grenade.removed) {
 			return;
 		}
-		core.removed = true;
-		explode(EXPLOSION, core.position, null, false, CORE_BLOCK_POWER);
+		if (grenade instanceof Rocket rocket) {
+			explodeRocket(rocket, false, false, false, 1, false, false);
+			return;
+		}
+		grenade.removed = true;
+		explode(EXPLOSION, grenade.position, null, false, CORE_BLOCK_POWER);
+	}
+
+	/**
+	 * HookArm's catch, with a rocket on the hook: it's brought to the player and goes off there, launching them, as
+	 * a super explosion if they're in the air.
+	 */
+	@Override
+	public void rocketCaught(Rocket rocket) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (rocket.removed || movement == null) {
+			return;
+		}
+		rocket.position = movement.rootPosition();
+		explodeRocket(rocket, false, false, !movement.onGround(), 1, false, true);
 	}
 
 	/** HookArm's clinkSparks and clinkObjectSparks: sparks out of {@code facing}, with their clink. */
@@ -3186,6 +3381,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	public void render(LevelRenderContext context) {
 		this.effects.render(context, this.coins, this.shells, this.pellets, this.cores);
+		this.effects.renderRockets(context, this.rockets);
 		this.effects.renderSaws(context, this.saws, this.sawblades, chainStart());
 		this.effects.renderDrills(context, this.drills);
 		this.effects.renderNails(context, this.nails);

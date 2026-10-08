@@ -32,9 +32,9 @@ public final class Animator {
 		}
 	}
 
-	/** Receives the clip events (Unity's AnimationEvent function names) as they pass. */
+	/** Receives the clip events (Unity's AnimationEvent function names, and their float argument) as they pass. */
 	public interface Events {
-		void event(String function);
+		void event(String function, float floatParameter);
 	}
 
 	/** A state playing: its normalized time now, and where it was before the last update. */
@@ -243,7 +243,7 @@ public final class Animator {
 		if (!clip.loop) {
 			for (AnimationClip.Event event : clip.events) {
 				if (event.time() >= from && event.time() < to) {
-					events.event(event.function());
+					events.event(event.function(), event.floatParameter());
 				}
 			}
 			return;
@@ -252,7 +252,7 @@ public final class Animator {
 			for (AnimationClip.Event event : clip.events) {
 				double at = cycle * length + event.time();
 				if (at >= from && at < to) {
-					events.event(event.function());
+					events.event(event.function(), event.floatParameter());
 				}
 			}
 		}

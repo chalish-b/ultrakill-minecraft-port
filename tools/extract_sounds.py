@@ -291,6 +291,7 @@ def combat(env, x):
     railcannon(env, x)
     nailgun(env, x)
     jumpstart(env, x)
+    rocket_launcher(env, x)
 
     ground = next(g for g in (o.read() for o in env.objects if o.type.name == "MonoBehaviour" and script_class(o) == "GroundCheck") if g.shockwave.path_id)
     shockwave = next(m for m in components(ground.shockwave.deref().read(), "MonoBehaviour") if hasattr(m, "soundEffect"))
@@ -407,6 +408,33 @@ def nailgun(env, x):
     x.events["magnet_break"]["sounds"][0]["attenuation_distance"] = round(next(audio_sources_tree(break_go))["MaxDistance"] * BLOCKS_PER_UNIT)
     pitch = next(s for s in components(break_go, "MonoBehaviour") if hasattr(s, "pitchVariation"))
     print("magnet_break pitch", debris.m_Pitch, "RandomPitch", pitch.defaultPitch, pitch.pitchVariation)
+
+
+def rocket_launcher(env, x):
+    """The rocket launcher's shot and its clunks (their pitch is set by the code); the Freezeframe's clock starting
+    and stopping, its ticking while rockets are frozen and its windup as the freeze recharges (their pitch is set by
+    the code); the rocket's hum in flight and its level-up, from where the rocket is (the hum's pitch is set by the
+    code); and the harmless explosion where a rocket hits a wall."""
+    launcher = find_class(env, "RocketLauncher", "Rocket Launcher Freeze", variation=0)
+    shot = next(components(launcher.m_GameObject.read(), "AudioSource"))
+    x.add_clip("rocket_launcher_shoot", shot.m_audioClip, shot.m_Volume)
+    clunk = source_ref(launcher.clunkSound)
+    x.add_clip("rocket_launcher_clunk", clunk.m_audioClip, clunk.m_Volume)
+    x.add_source("rocket_freeze", source_ref(launcher.timerFreezeSound))
+    x.add_source("rocket_unfreeze", source_ref(launcher.timerUnfreezeSound))
+    x.add_source("rocket_freeze_tick", source_ref(launcher.timerTickSound))
+    windup = source_ref(launcher.timerWindupSound)
+    x.add_clip("rocket_freeze_windup", windup.m_audioClip, windup.m_Volume)
+    rocket_go = launcher.rocket.deref().read()
+    rocket = next(s for s in components(rocket_go, "MonoBehaviour") if hasattr(s, "rocketSpeed"))
+    hum = next(components(rocket_go, "AudioSource"))
+    x.add_clip("rocket_fly", hum.m_audioClip, hum.m_Volume, mono=True)
+    x.events["rocket_fly"]["sounds"][0]["attenuation_distance"] = round(next(audio_sources_tree(rocket_go))["MaxDistance"] * BLOCKS_PER_UNIT)
+    level_up_go = rocket.levelUpEffect.deref().read()
+    level_up = next(audio_sources(level_up_go))
+    x.event("rocket_level_up", [sound(x.clip(level_up.m_audioClip, mono=True, speed=level_up.m_Pitch), level_up.m_Volume)])
+    x.events["rocket_level_up"]["sounds"][0]["attenuation_distance"] = round(next(audio_sources_tree(level_up_go))["MaxDistance"] * BLOCKS_PER_UNIT)
+    x.add_source("explosion_rocket_harmless", next(audio_sources(rocket.harmlessExplosion.deref().read())))
 
 
 def jumpstart(env, x):

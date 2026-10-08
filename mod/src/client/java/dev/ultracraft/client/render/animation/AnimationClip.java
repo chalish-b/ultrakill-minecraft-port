@@ -12,7 +12,8 @@ import java.util.List;
  * events that call into gameplay code (Punch.ActiveStart, Revolver.ReadyGun, ...).
  */
 public final class AnimationClip {
-	public record Event(double time, String function) {
+	/** @param floatParameter the float argument the event passes its function */
+	public record Event(double time, String function, float floatParameter) {
 	}
 
 	private enum Property {
@@ -75,7 +76,7 @@ public final class AnimationClip {
 		List<Event> events = new ArrayList<>();
 		for (JsonElement element : json.getAsJsonArray("events")) {
 			JsonObject event = element.getAsJsonObject();
-			events.add(new Event(event.get("time").getAsDouble(), event.get("function").getAsString()));
+			events.add(new Event(event.get("time").getAsDouble(), event.get("function").getAsString(), event.has("floatParameter") ? event.get("floatParameter").getAsFloat() : 0));
 		}
 		List<Channel> channels = new ArrayList<>();
 		for (JsonElement element : json.getAsJsonArray("curves")) {

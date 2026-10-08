@@ -14,6 +14,7 @@ weapon's HUD icon, tinted with its variant's color, as textures/item/<name>.png.
 """
 import argparse
 import json
+import math
 import re
 import shutil
 import struct
@@ -46,6 +47,7 @@ MODELS = {
     "railcannon_electric": ("Railcannon Electric", "Railcannon", (0, 0, 0)),
     "railcannon_screwdriver": ("Railcannon Harpoon", "Railcannon", (0, 0, 0)),
     "railcannon_malicious": ("Railcannon Malicious", "Railcannon", (0, 0, 0)),
+    "rocket_launcher_freezeframe": ("Rocket Launcher Freeze", "RocketLauncher", (0, 0, 0)),
     "nailgun_attractor": ("Nailgun Magnet", "Nailgun", (0, 0, 0)),
     "nailgun_overheat": ("Nailgun Overheat", "Nailgun", (0, 0, 0)),
     "nailgun_jumpstart": ("Nailgun Zapper", "Nailgun", (0, 0, 0)),
@@ -84,6 +86,8 @@ REFERENCED = {
     "zap_sparks": ("Zapper", "Zapper", "zapParticle"),
     "electric_line": ("DefaultReferenceManager", "DefaultReferenceManager", "electricLine"),
     "slide_particle": ("NewMovement", "Player", "slideParticle"),
+    "rocket": ("RocketLauncher", "Rocket Launcher Freeze", "rocket"),
+    "rocket_launcher_muzzle_flash": ("RocketLauncher", "Rocket Launcher Freeze", "muzzleFlash"),
 }
 # FootstepSet's per-surface prefabs: model name prefix -> the list field. Each surface it lists is written as
 # <prefix>_<surface>.
@@ -97,6 +101,7 @@ NESTED = {
     "drill_break": ("drill", "TimeBomb", "explosion"),
     "magnet_beeper": ("magnet", "TimeBomb", "beepLight"),
     "magnet_break": ("magnet", "TimeBomb", "explosion"),
+    "explosion_rocket_harmless": ("rocket", "Grenade", "harmlessExplosion"),
 }
 
 # AnimatorControllerParameterType and AnimatorConditionMode values.
@@ -159,8 +164,9 @@ def activate_controlled(rig, root_go):
 
 
 def activate_scripted(rig, root_go):
-    """Objects the zapper and the JumpStart show and hide themselves, which their prefabs store hidden: the zapper's
-    closed prongs and its pulse orb, and the JumpStart's recharge overlay."""
+    """Objects the zapper, the JumpStart and the rocket show and hide themselves, which their prefabs store hidden: the
+    zapper's closed prongs and its pulse orb, the JumpStart's recharge overlay, and the rocket's freeze and level-up
+    effects."""
     def walk(t):
         rig.active[t.m_GameObject.path_id] = True
         for child in t.m_Children:
@@ -180,6 +186,9 @@ def activate_scripted(rig, root_go):
                 walk(zapper.lightningPulseOrb.deref().read())
             elif kind == "Nailgun" and obj.read().rechargingOverlay.path_id:
                 walk(transform_of(obj.read().rechargingOverlay.deref().read()))
+            elif kind == "Grenade" and obj.read_typetree()["rocket"]:
+                for pptr in (obj.read().freezeEffect, obj.read().levelUpEffect):
+                    walk(transform_of(pptr.deref().read()))
 
 
 def code_shown_images(rig):
@@ -698,14 +707,17 @@ TMP_ROWS = {256: 0, 512: 1, 1024: 2, 2048: 2, 4096: 1, 8192: 0}
 
 def export_canvases(exporter, rig, shown_by_code):
     """World-space canvases: each Image's rect in its canvas's units, laid out by RectTransform anchors. Images
-    that are off are left out, unless a script turns them on (`shown_by_code`); those say they start off.
+    that are off are left out, unless a script turns them on (`shown_by_code`); those say they start off. An
+    element turned about its pivot (or under one that is) carries the turn as a 2D transform from its rect into the
+    canvas: [a, b, c, d, e, f], taking (x, y) to (a x + c y + e, b x + d y + f).
 
-    Returns the canvases; by Image and Text component path id, where each landed (canvas, index); and by
-    transform path id, each laid out rect.
+    Returns the canvases; by Image and Text component path id, where each landed (canvas, index); by transform
+    path id, each laid out rect; and by transform path id, its pivot in the canvas.
     """
     canvases = []
     placed = {}
     rects = {}
+    pivots = {}
     for go_id, active in rig.active.items():
         if not active:
             continue
@@ -732,11 +744,16 @@ def export_canvases(exporter, rig, shown_by_code):
             py = y0 + (amin.y + (amax.y - amin.y) * piv.y) * h + pos.y
             return (px - piv.x * width, py - piv.y * height, px + (1 - piv.x) * width, py + (1 - piv.y) * height)
 
-        def walk(transform, own_rect):
+        def walk(transform, own_rect, frame):
             child_go = transform.m_GameObject.read()
             if not rig.active.get(child_go.object_reader.path_id):
                 return
             rects[transform.object_reader.path_id] = own_rect
+            pivot = (own_rect[0] + (own_rect[2] - own_rect[0]) * transform.m_Pivot.x, own_rect[1] + (own_rect[3] - own_rect[1]) * transform.m_Pivot.y)
+            if transform is not root:
+                frame = turned(frame, pivot, transform.m_LocalRotation)
+            pivots[transform.object_reader.path_id] = apply(frame, pivot)
+            turn = None if is_identity(frame) else [round(v, 6) for v in frame]
             for c in child_go.m_Component:
                 obj = c.component.deref()
                 if obj.type.name == "MonoBehaviour" and script_name(obj) == "TextMeshProUGUI":
@@ -755,6 +772,8 @@ def export_canvases(exporter, rig, shown_by_code):
                             "alignment": TMP_ROWS[tree["m_VerticalAlignment"]] * 3 + TMP_COLUMNS[tree["m_HorizontalAlignment"]],
                             "text": tree["m_text"],
                         })
+                        if turn:
+                            texts[-1]["transform"] = turn
                     continue
                 if obj.type.name == "MonoBehaviour" and script_name(obj) == "Text":
                     tree = obj.read_typetree()
@@ -773,6 +792,8 @@ def export_canvases(exporter, rig, shown_by_code):
                             "alignment": font["m_Alignment"],
                             "text": tree["m_Text"],
                         })
+                        if turn:
+                            texts[-1]["transform"] = turn
                     continue
                 if obj.type.name != "MonoBehaviour" or script_name(obj) != "Image":
                     continue
@@ -811,13 +832,42 @@ def export_canvases(exporter, rig, shown_by_code):
                 })
                 if not tree["m_Enabled"]:
                     images[-1]["enabled"] = False
+                if turn:
+                    images[-1]["transform"] = turn
             for child in transform.m_Children:
                 t = child.deref().read()
-                walk(t, layout(t, own_rect))
+                walk(t, layout(t, own_rect), frame)
 
-        walk(root, rect)
+        walk(root, rect, IDENTITY_2D)
         canvases.append({"bone": rig.index[root.object_reader.path_id], "images": images, "texts": texts})
-    return canvases, placed, rects
+    return canvases, placed, rects, pivots
+
+
+# A 2D transform [a, b, c, d, e, f] that leaves points where they are.
+IDENTITY_2D = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def apply(frame, point):
+    a, b, c, d, e, f = frame
+    return (a * point[0] + c * point[1] + e, b * point[0] + d * point[1] + f)
+
+
+def turned(frame, pivot, rotation):
+    """`frame`, then a turn by the rotation's angle about z, around `pivot`."""
+    angle = 2 * math.atan2(rotation.z, rotation.w)
+    if abs(angle) < 1e-6:
+        return frame
+    cos, sin = math.cos(angle), math.sin(angle)
+    px, py = pivot
+    # Around the pivot: (x, y) -> R (x - p) + p.
+    local = (cos, sin, -sin, cos, px - cos * px + sin * py, py - sin * px - cos * py)
+    a, b, c, d, e, f = frame
+    la, lb, lc, ld, le, lf = local
+    return (a * la + c * lb, b * la + d * lb, a * lc + c * ld, b * lc + d * ld, a * le + c * lf + e, b * le + d * lf + f)
+
+
+def is_identity(frame):
+    return all(abs(v - i) < 1e-6 for v, i in zip(frame, IDENTITY_2D))
 
 
 def coin_flash(exporter, flash_go):
@@ -950,6 +1000,30 @@ def beam_lines(exporter, go):
     return lines
 
 
+def level_up_materials(exporter, effect_go):
+    """The materials the level-up effect's ObjectActivator swaps onto the rocket's model (ChangeMaterials): for
+    each material it replaces, by name, the texture and values it shows instead."""
+    for c in effect_go.m_Component:
+        obj = c.component.deref()
+        if obj.type.name != "MonoBehaviour" or script_name(obj) != "ObjectActivator":
+            continue
+        for call in obj.read().events.onActivate.m_PersistentCalls.m_Calls:
+            target = call.m_Target.deref()
+            if call.m_MethodName != "Activate" or script_name(target) != "ChangeMaterials":
+                continue
+            change = target.read()
+            renderer = next(x.component.deref().read() for x in change.m_GameObject.read().m_Component if x.component.deref().type.name == "MeshRenderer")
+            swaps = {}
+            for old, new in zip(renderer.m_Materials, change.materials):
+                if old.path_id == new.path_id:
+                    continue
+                tex_pptr = texture_name(new.deref().read())[0]
+                texture, tex_file = exporter.texture(tex_pptr)
+                swaps[old.deref().read().m_Name] = {"texture": texture, "materialValues": material_values(new, exporter.textures[tex_file])}
+            return {"levelUpMaterials": swaps}
+    return {}
+
+
 def go_name_of(component_pptr):
     """The name of the GameObject a referenced component sits on, or None."""
     return component_pptr.deref().read().m_GameObject.read().m_Name if component_pptr.path_id else None
@@ -975,7 +1049,7 @@ def placed_under(transform, placed):
     return {"images": images, "texts": texts}
 
 
-def export_scripts(exporter, rig, colors, placed, rects):
+def export_scripts(exporter, rig, colors, placed, rects, pivots):
     """Values from ULTRAKILL scripts on the model that the mod's ports of them need."""
     scripts = {}
     for go_id, active in rig.active.items():
@@ -1082,11 +1156,43 @@ def export_scripts(exporter, rig, colors, placed, rects):
                         "rechargingOverlay": placed_under(transform_of(nailgun.rechargingOverlay.deref().read()), placed),
                         "rechargingMeter": list(placed[nailgun.rechargingMeter.path_id]),
                     })
+            elif kind == "RocketLauncher":
+                launcher = obj.read()
+                tree = obj.read_typetree()
+                arm = launcher.timerArm.deref().read()
+                scripts["rocketLauncher"] = {
+                    "variation": tree["variation"],
+                    "variationColor": list(colors[tree["variation"]]),
+                    "rateOfFire": tree["rateOfFire"],
+                    "shootPoint": rig.index[launcher.shootPoint.path_id],
+                    "timerMeter": list(placed[launcher.timerMeter.path_id]),
+                    "variationColorables": [list(placed[i.path_id]) for i in launcher.variationColorables],
+                    "timerArm": {**placed_under(arm, placed), "pivot": list(pivots[arm.object_reader.path_id])},
+                }
+            elif kind == "Grenade" and obj.read_typetree()["rocket"]:
+                grenade = obj.read()
+                tree = obj.read_typetree()
+                capsule = next(x.component.deref().read() for x in go.m_Component if x.component.deref().type.name == "CapsuleCollider")
+                trigger = next(x.component.deref().read() for x in go.m_Component if x.component.deref().type.name == "SphereCollider")
+                scripts["grenade"] = {
+                    "rocketSpeed": tree["rocketSpeed"],
+                    "capsule": {"radius": capsule.m_Radius, "height": capsule.m_Height, "direction": capsule.m_Direction,
+                                "center": [capsule.m_Center.x, capsule.m_Center.y, capsule.m_Center.z]},
+                    "trigger": {"radius": trigger.m_Radius, "center": [trigger.m_Center.x, trigger.m_Center.y, trigger.m_Center.z]},
+                    "freezeEffect": rig.index[transform_of(grenade.freezeEffect.deref().read()).object_reader.path_id],
+                    "levelUpEffect": rig.index[transform_of(grenade.levelUpEffect.deref().read()).object_reader.path_id],
+                    "trail": trail_values(exporter, go),
+                    **level_up_materials(exporter, grenade.levelUpEffect.deref().read()),
+                }
+            elif kind == "SpriteGetVariationColor" and active:
+                tree = obj.read_typetree()
+                scripts.setdefault("spriteVariationColors", []).append({
+                    "bone": rig.index[transform_of(go).object_reader.path_id], "variationColor": list(colors[tree["variation"]])})
             elif kind == "Spin" and active:
                 tree = obj.read_typetree()
                 axis = tree["spinDirection"]
                 scripts.setdefault("spins", []).append({"bone": rig.index[transform_of(go).object_reader.path_id],
-                                                       "axis": [axis["x"], axis["y"], axis["z"]]})
+                                                       "axis": [axis["x"], axis["y"], axis["z"]], "speed": tree["speed"]})
             elif kind == "Slider" and active:
                 slider = obj.read()
                 fill = slider.m_FillRect.deref().read()
@@ -1198,7 +1304,7 @@ def export_scripts(exporter, rig, colors, placed, rects):
                     "colliderRadius": collider.m_Radius if collider else 0,
                     "chunks": bool(obj.read().explosionChunk.path_id) and not tree["lowQuality"],
                     **{k: tree[k] for k in ("speed", "maxSize", "damage", "enemyDamageMultiplier", "pushForceMultiplier",
-                                            "halved", "canHit", "lowQuality", "unblockable", "ignite")},
+                                            "halved", "canHit", "lowQuality", "unblockable", "ignite", "rocketExplosion")},
                 })
             elif kind in ("ScaleNFade", "SpriteController", "Screenshaker", "AlwaysLookAtCamera") and active:
                 tree = obj.read_typetree()
@@ -1298,7 +1404,7 @@ def export_clip(clip_pptr, paths):
         "name": clip.m_Name,
         "length": muscle.m_StopTime - muscle.m_StartTime,
         "loop": bool(muscle.m_LoopTime),
-        "events": [{"time": e["time"], "function": e["functionName"]} for e in tree.get("m_Events", [])],
+        "events": [{"time": e["time"], "function": e["functionName"], "floatParameter": e["floatParameter"]} for e in tree.get("m_Events", [])],
         "curves": channels,
     }
 
@@ -1438,9 +1544,9 @@ def export_model(exporter, root_go, offset, colors):
     activate_controlled(rig, root_go)
     activate_scripted(rig, root_go)
     parts, quads, sprites, particles = export_parts(exporter, rig, variation_glow(root_go, colors))
-    canvases, placed, rects = export_canvases(exporter, rig, code_shown_images(rig))
+    canvases, placed, rects, pivots = export_canvases(exporter, rig, code_shown_images(rig))
     model = {"origin": list(offset or (0, 0, 0)), "bones": rig.bones, "parts": parts, "quads": quads, "sprites": sprites, "particles": particles,
-             "canvases": canvases, "scripts": export_scripts(exporter, rig, colors, placed, rects)}
+             "canvases": canvases, "scripts": export_scripts(exporter, rig, colors, placed, rects, pivots)}
     animator = find_animator(rig)
     if animator is not None and animator.m_Controller.path_id:
         model["animator"] = export_animator(animator, rig)

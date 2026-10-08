@@ -152,7 +152,7 @@ final class Magnet implements Conductor.Zappable {
 	}
 
 	/** The field's reach in the world (its sphere's radius, scaled with its bones), in blocks. */
-	private double reach() {
+	double reach() {
 		double scale = 1;
 		for (int bone = this.magnet.get("bone").getAsInt(); bone >= 0; bone = this.model.parent(bone)) {
 			scale *= this.model.rest().sx(bone);

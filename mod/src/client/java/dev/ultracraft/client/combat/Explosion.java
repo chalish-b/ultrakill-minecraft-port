@@ -62,11 +62,12 @@ final class Explosion {
 	 * @param touchShake how much a Screenshaker on the sphere shakes the camera when the sphere reaches the
 	 *     player, or 0
 	 * @param ultrabooster whether it launches a nearby player twice as hard, and hurts them a set amount
+	 * @param fup whether it's a rocket the Whiplash brought to the player (isFup): it launches them at a set speed
 	 */
 	record Settings(
 		double scale, double startScale, double colliderRadius, double speed, double maxSize, int damage,
 		double enemyDamageMultiplier, double pushForceMultiplier, boolean halved, Subjects canHit,
-		boolean rocketExplosion, int playerDamageOverride, double touchShake, boolean ultrabooster
+		boolean rocketExplosion, int playerDamageOverride, double touchShake, boolean ultrabooster, boolean fup
 	) {
 		/** An Explosion on an extracted prefab, scaled by the bones above it. */
 		static Settings of(UltraModel model, JsonObject explosion) {
@@ -85,7 +86,8 @@ final class Explosion {
 				scale, model.rest().sx(bone), explosion.get("colliderRadius").getAsDouble(), explosion.get("speed").getAsDouble(),
 				explosion.get("maxSize").getAsDouble(), explosion.get("damage").getAsInt(), explosion.get("enemyDamageMultiplier").getAsDouble(),
 				explosion.get("pushForceMultiplier").getAsDouble(), explosion.get("halved").getAsInt() != 0,
-				Subjects.values()[explosion.get("canHit").getAsInt()], false, -1, touchShake, false
+				Subjects.values()[explosion.get("canHit").getAsInt()], explosion.has("rocketExplosion") && explosion.get("rocketExplosion").getAsInt() != 0,
+				-1, touchShake, false, false
 			);
 		}
 
@@ -93,7 +95,7 @@ final class Explosion {
 		Settings overridden(double sizeMultiplier, int damage, double enemyDamageMultiplier) {
 			return new Settings(
 				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize * sizeMultiplier, damage, enemyDamageMultiplier,
-				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster, this.fup
 			);
 		}
 
@@ -101,7 +103,7 @@ final class Explosion {
 		Settings ultraboosted(double sizeMultiplier) {
 			return new Settings(
 				this.scale, this.startScale, this.colliderRadius, this.speed * sizeMultiplier, this.maxSize * sizeMultiplier, this.damage, this.enemyDamageMultiplier,
-				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, true
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, true, this.fup
 			);
 		}
 
@@ -115,14 +117,30 @@ final class Explosion {
 			}
 			return new Settings(
 				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize, this.damage + Math.round(added * 20), this.enemyDamageMultiplier,
-				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.damage, this.touchShake, this.ultrabooster
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.damage, this.touchShake, this.ultrabooster, this.fup
+			);
+		}
+
+		/** Grenade.Explode's big: {@code multiplier} times as big, growing that much faster. */
+		Settings scaled(double multiplier) {
+			return new Settings(
+				this.scale, this.startScale, this.colliderRadius, this.speed * multiplier, this.maxSize * multiplier, this.damage, this.enemyDamageMultiplier,
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster, this.fup
+			);
+		}
+
+		/** Grenade.Explode's fup. */
+		Settings fupped() {
+			return new Settings(
+				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize, this.damage, this.enemyDamageMultiplier,
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster, true
 			);
 		}
 
 		Settings enemiesOnly() {
 			return new Settings(
 				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize, this.damage, this.enemyDamageMultiplier,
-				this.pushForceMultiplier, this.halved, Subjects.ENEMIES_ONLY, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster
+				this.pushForceMultiplier, this.halved, Subjects.ENEMIES_ONLY, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster, this.fup
 			);
 		}
 	}

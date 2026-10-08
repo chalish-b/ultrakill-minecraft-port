@@ -28,7 +28,7 @@ import java.util.OptionalDouble;
 
 /**
  * The Whiplash (HookArm): a hook on a wire, thrown along the aim for as long as its key is held. It catches the first
- * enemy it reaches, takes a core along, bounces the coins it passes and brings back an item; a wall stops it. Let go
+ * enemy it reaches, takes a core or a rocket along, bounces the coins it passes and brings back an item; a wall stops it. Let go
  * of on an enemy, it pulls: a light enemy comes to the player, the player goes to a heavy one. Then it reels back to
  * the hand.
  *
@@ -85,7 +85,8 @@ final class Whiplash {
 	interface Hits {
 		List<Coin> coins();
 
-		List<Core> cores();
+		/** The player's cores and rockets. */
+		List<Grenade> grenades();
 
 		/** Coin.Bounce: the coin pops up again as {@code bounced}. */
 		void coinBounced(Coin bounced);
@@ -93,8 +94,11 @@ final class Whiplash {
 		/** The hook caught an enemy here: its hit. */
 		void hooked(LivingEntity enemy, Vec3 at);
 
-		/** The core on the hook reached what stopped the hook. */
-		void coreExploded(Core core);
+		/** The core or rocket on the hook reached what stopped the hook, and goes off. */
+		void grenadeExploded(Grenade grenade);
+
+		/** The rocket on the hook was reeled in to the player. */
+		void rocketCaught(Rocket rocket);
 
 		/** HookArm's clinkSparks (or, for something it caught, clinkObjectSparks) here, facing {@code facing}. */
 		void clink(Vec3 at, Vec3 facing, boolean object);
@@ -126,7 +130,7 @@ final class Whiplash {
 	/** Where on the enemy the hook is, from its position. */
 	private Vec3 caughtOffset = Vec3.ZERO;
 	private boolean lightTarget;
-	private @Nullable Core caughtCore;
+	private @Nullable Grenade caughtGrenade;
 	private boolean forcingGroundCheck;
 	/** The Whiplash has the arm, from a throw until it's caught again. */
 	private boolean forcingFistControl;
@@ -178,14 +182,14 @@ final class Whiplash {
 	/** HookArm.FixedUpdate. */
 	void fixedUpdate(Level level, LocalPlayer player, UltraMovement movement) {
 		this.movement = movement;
-		if (this.caughtCore != null && this.caughtCore.removed) {
-			this.caughtCore = null;
+		if (this.caughtGrenade != null && this.caughtGrenade.removed) {
+			this.caughtGrenade = null;
 		}
 		if (this.state == State.READY && this.returning) {
 			reelIn(player, movement);
 		}
 		if (this.state == State.THROWING) {
-			if (!this.held && (this.cooldown <= LET_GO_COOLDOWN || this.caughtCore != null)) {
+			if (!this.held && (this.cooldown <= LET_GO_COOLDOWN || this.caughtGrenade != null)) {
 				stopThrow(level, player, 0, false);
 			} else {
 				fly(level, player, movement);
@@ -204,7 +208,7 @@ final class Whiplash {
 		movement.setBeingPulled(this.beingPulled);
 	}
 
-	/** A throw: out of the arm along the aim, the arm's hand set for it, a core still on the hook sent to the player. */
+	/** A throw: out of the arm along the aim, the arm's hand set for it, a grenade still on the hook sent to the player. */
 	private void throwHook(UltraMovement movement, LocalPlayer player) {
 		this.cooldown = COOLDOWN;
 		FirstPersonWeapons.INSTANCE.showWhiplash(true);
@@ -217,7 +221,7 @@ final class Whiplash {
 		this.hookPoint = armOrigin(movement, player);
 		this.throwDirection = player.getLookAngle();
 		this.returning = false;
-		releaseCore(movement);
+		releaseGrenade(movement);
 		this.state = State.THROWING;
 		this.lightTarget = false;
 		this.throwWarp = 1;
@@ -230,7 +234,7 @@ final class Whiplash {
 
 	/**
 	 * One step of the flight: the sphere it sweeps (wider the further out it is) catches the nearest enemy it can
-	 * reach, picks up a core, bounces coins onto the wire and grabs an item; a wall ahead stops it short.
+	 * reach, picks up a core or a rocket, bounces coins onto the wire and grabs an item; a wall ahead stops it short.
 	 */
 	private void fly(Level level, LocalPlayer player, UltraMovement movement) {
 		double step = THROW_SPEED * STEP * S * UltraConfig.get().speedScale;
@@ -243,11 +247,11 @@ final class Whiplash {
 		double radius = Math.min(origin.distanceTo(this.hookPoint) / SWEEP_SHARE, MAX_SWEEP_RADIUS * S);
 		boolean caught = false;
 		for (Touch touch : sweep(level, player, step, radius)) {
-			if (touch.core != null) {
-				if (this.caughtCore == null) {
-					this.caughtCore = touch.core;
-					touch.core.hooked = true;
-					this.hits.clink(touch.core.position, this.throwDirection.scale(-1), true);
+			if (touch.grenade != null) {
+				if (this.caughtGrenade == null) {
+					this.caughtGrenade = touch.grenade;
+					touch.grenade.hooked = true;
+					this.hits.clink(touch.contact, this.throwDirection.scale(-1), true);
 				}
 			} else if (touch.coin != null) {
 				if (!touch.coin.shot && touch.coin.hittable()) {
@@ -285,12 +289,12 @@ final class Whiplash {
 			this.hookPoint = this.hookPoint.add(this.throwDirection.scale(step));
 			point = this.hookPoint;
 		}
-		if (this.caughtCore != null) {
-			this.caughtCore.position = point;
+		if (this.caughtGrenade != null) {
+			this.caughtGrenade.position = point;
 			if (caught) {
-				this.caughtCore.hooked = false;
-				this.hits.coreExploded(this.caughtCore);
-				this.caughtCore = null;
+				this.caughtGrenade.hooked = false;
+				this.hits.grenadeExploded(this.caughtGrenade);
+				this.caughtGrenade = null;
 			}
 		}
 	}
@@ -413,8 +417,8 @@ final class Whiplash {
 		Vec3 target = movement.eyePosition().add(player.getLookAngle().scale(CATCH_REACH * S));
 		Vec3 toTarget = target.subtract(this.hookPoint);
 		this.hookPoint = toTarget.length() <= step ? target : this.hookPoint.add(toTarget.normalize().scale(step));
-		if (this.caughtCore != null) {
-			this.caughtCore.position = this.hookPoint;
+		if (this.caughtGrenade != null) {
+			this.caughtGrenade.position = this.hookPoint;
 		}
 		if (!this.hookPoint.equals(target)) {
 			return;
@@ -424,16 +428,19 @@ final class Whiplash {
 		play("Catch", 0);
 		this.sounds.play("whiplash_catch", 1, this.sounds.randomPitch(0.9F, 1.1F));
 		stopArm();
-		if (this.caughtCore != null) {
+		if (this.caughtGrenade instanceof Rocket rocket) {
+			rocket.hooked = false;
+			this.hits.rocketCaught(rocket);
+		} else if (this.caughtGrenade != null) {
 			// The core comes away with the player's velocity, without its fall.
 			Vec3 velocity = movement.velocity();
 			if (velocity.y < 0) {
 				velocity = new Vec3(velocity.x, 0, velocity.z);
 			}
-			this.caughtCore.hooked = false;
-			this.caughtCore.launch(velocity);
-			this.caughtCore = null;
+			this.caughtGrenade.hooked = false;
+			this.caughtGrenade.launch(velocity);
 		}
+		this.caughtGrenade = null;
 	}
 
 	/**
@@ -472,7 +479,7 @@ final class Whiplash {
 		this.woosh.stop();
 	}
 
-	/** HookArm.Cancel: everything stops at once, the arm goes away, and a core on the hook is sent to the player. */
+	/** HookArm.Cancel: everything stops at once, the arm goes away, and a grenade on the hook is sent to the player. */
 	void cancel() {
 		if (!active()) {
 			return;
@@ -482,9 +489,9 @@ final class Whiplash {
 		}
 		this.forcingFistControl = false;
 		if (this.movement != null) {
-			releaseCore(this.movement);
+			releaseGrenade(this.movement);
 		}
-		this.caughtCore = null;
+		this.caughtGrenade = null;
 		this.lightTarget = false;
 		if (this.caughtEnemy != null) {
 			ClientPlayNetworking.send(WhiplashPayload.of(WhiplashPayload.Action.RELEASE));
@@ -541,15 +548,15 @@ final class Whiplash {
 		return this.state != State.READY || this.returning;
 	}
 
-	/** A core on the hook when it's thrown again or called off is sent at the player. */
-	private void releaseCore(UltraMovement movement) {
-		if (this.caughtCore == null) {
+	/** A grenade on the hook when it's thrown again or called off is sent at the player. */
+	private void releaseGrenade(UltraMovement movement) {
+		if (this.caughtGrenade == null) {
 			return;
 		}
-		Vec3 toPlayer = movement.rootPosition().subtract(this.caughtCore.position);
-		this.caughtCore.hooked = false;
-		this.caughtCore.launch(toPlayer.lengthSqr() > 0 ? toPlayer.normalize().scale(RETURN_SPEED + this.returnDistance / 2) : Vec3.ZERO);
-		this.caughtCore = null;
+		Vec3 toPlayer = movement.rootPosition().subtract(this.caughtGrenade.position);
+		this.caughtGrenade.hooked = false;
+		this.caughtGrenade.launch(toPlayer.lengthSqr() > 0 ? toPlayer.normalize().scale(RETURN_SPEED + this.returnDistance / 2) : Vec3.ZERO);
+		this.caughtGrenade = null;
 	}
 
 	private void forceGroundCheck(UltraMovement movement) {
@@ -609,7 +616,7 @@ final class Whiplash {
 		Vec3 from = this.hookPoint;
 		Vec3 to = from.add(this.throwDirection.scale(step));
 		List<Touch> touches = new ArrayList<>();
-		AABB area = new AABB(from, to).inflate(radius + Core.HIT_RADIUS);
+		AABB area = new AABB(from, to).inflate(radius);
 		for (Entity entity : level.getEntities(player, area, e -> ThrownSaw.isEnemy(e) || e instanceof ItemEntity && e.isAlive())) {
 			AABB box = entity.getBoundingBox();
 			OptionalDouble at = sweptEntry(box.inflate(radius), from, to);
@@ -618,9 +625,9 @@ final class Whiplash {
 				touches.add(new Touch(at.getAsDouble(), closest(box, sphere), entity, null, null));
 			}
 		}
-		for (Core core : this.hits.cores()) {
-			if (!core.removed && !core.hooked) {
-				sphereEntry(core.position, radius + Core.HIT_RADIUS, from, step).ifPresent(at -> touches.add(new Touch(at, core.position, null, core, null)));
+		for (Grenade grenade : this.hits.grenades()) {
+			if (!grenade.removed && !grenade.hooked) {
+				sphereEntry(grenade.hitCenter(), radius + grenade.hitRadius(), from, step).ifPresent(at -> touches.add(new Touch(at, grenade.hitCenter(), null, grenade, null)));
 			}
 		}
 		for (Coin coin : this.hits.coins()) {
@@ -633,7 +640,7 @@ final class Whiplash {
 	}
 
 	/** Something the sweep touched, {@code distance} along it, at {@code contact}. */
-	private record Touch(double distance, Vec3 contact, @Nullable Entity entity, @Nullable Core core, @Nullable Coin coin) {
+	private record Touch(double distance, Vec3 contact, @Nullable Entity entity, @Nullable Grenade grenade, @Nullable Coin coin) {
 	}
 
 	/** How far along from {@code from} to {@code to} the segment enters the box: 0 if it starts inside. */

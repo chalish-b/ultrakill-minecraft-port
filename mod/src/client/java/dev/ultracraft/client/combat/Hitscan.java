@@ -29,8 +29,8 @@ final class Hitscan {
 	enum Kind {
 		ENTITY,
 		COIN,
-		/** One of the player's cores, by the trigger sphere around it. */
-		CORE,
+		/** One of the player's cores or rockets, by the trigger sphere around it. */
+		GRENADE,
 		BLOCK,
 		/** The ray reached its range without hitting a block. */
 		END
@@ -41,7 +41,7 @@ final class Hitscan {
 	 * @param block the block a {@link Kind#BLOCK} hit struck
 	 */
 	record Hit(
-		Kind kind, Vec3 position, double distance, @Nullable LivingEntity entity, @Nullable Coin coin, @Nullable Core core, boolean head, @Nullable Direction face,
+		Kind kind, Vec3 position, double distance, @Nullable LivingEntity entity, @Nullable Coin coin, @Nullable Grenade grenade, boolean head, @Nullable Direction face,
 		@Nullable BlockPos block
 	) {
 	}
@@ -50,12 +50,12 @@ final class Hitscan {
 		return cast(level, shooter, from, direction, range, coins, List.of());
 	}
 
-	static List<Hit> cast(Level level, Entity shooter, Vec3 from, Vec3 direction, double range, List<Coin> coins, List<Core> cores) {
-		return cast(level, shooter, from, direction, range, coins, cores, Set.of());
+	static List<Hit> cast(Level level, Entity shooter, Vec3 from, Vec3 direction, double range, List<Coin> coins, List<? extends Grenade> grenades) {
+		return cast(level, shooter, from, direction, range, coins, grenades, Set.of());
 	}
 
 	/** @param broken blocks the ray passes through, as if they were already gone */
-	static List<Hit> cast(Level level, Entity shooter, Vec3 from, Vec3 direction, double range, List<Coin> coins, List<Core> cores, Set<BlockPos> broken) {
+	static List<Hit> cast(Level level, Entity shooter, Vec3 from, Vec3 direction, double range, List<Coin> coins, List<? extends Grenade> grenades, Set<BlockPos> broken) {
 		Vec3 to = from.add(direction.scale(range));
 		BlockHitResult block = clip(level, shooter, from, to, broken);
 		boolean blocked = block.getType() != HitResult.Type.MISS;
@@ -80,22 +80,13 @@ final class Hitscan {
 				hits.add(new Hit(Kind.COIN, nearest, along, null, coin, null, false, null, null));
 			}
 		}
-		for (Core core : cores) {
-			if (core.removed) {
+		for (Grenade grenade : grenades) {
+			if (grenade.removed) {
 				continue;
 			}
-			Vec3 offset = core.position.subtract(from);
-			double along = offset.dot(direction);
-			double off = offset.subtract(direction.scale(along)).length();
-			if (off > Core.HIT_RADIUS) {
-				continue;
-			}
-			double entry = along - Math.sqrt(Core.HIT_RADIUS * Core.HIT_RADIUS - off * off);
-			if (entry < 0 && offset.length() > Core.HIT_RADIUS || entry > from.distanceTo(end)) {
-				continue;
-			}
-			double at = Math.max(entry, 0);
-			hits.add(new Hit(Kind.CORE, from.add(direction.scale(at)), at, null, null, core, false, null, null));
+			sphereEntry(from, direction, from.distanceTo(end), grenade.hitCenter(), grenade.hitRadius()).ifPresent(at ->
+				hits.add(new Hit(Kind.GRENADE, from.add(direction.scale(at)), at, null, null, grenade, false, null, null))
+			);
 		}
 		hits.sort(Comparator.comparingDouble(Hit::distance));
 		hits.add(new Hit(blocked ? Kind.BLOCK : Kind.END, end, from.distanceTo(end), null, null, null, false, blocked ? block.getDirection() : null, blocked ? block.getBlockPos() : null));
@@ -104,9 +95,9 @@ final class Hitscan {
 
 	/**
 	 * A sphere of {@code radius} swept from {@code from} to {@code to} (Physics.SphereCastAll): the entities, coins
-	 * and cores it touches, nearest first, each where the sphere first reaches it. Blocks don't stop it.
+	 * and grenades it touches, nearest first, each where the sphere first reaches it. Blocks don't stop it.
 	 */
-	static List<Hit> sweep(Level level, Entity shooter, Vec3 from, Vec3 to, double radius, List<Coin> coins, List<Core> cores) {
+	static List<Hit> sweep(Level level, Entity shooter, Vec3 from, Vec3 to, double radius, List<Coin> coins, List<? extends Grenade> grenades) {
 		Vec3 direction = to.subtract(from).normalize();
 		double length = from.distanceTo(to);
 		List<Hit> hits = new ArrayList<>();
@@ -130,12 +121,12 @@ final class Hitscan {
 				hits.add(new Hit(Kind.COIN, from.add(direction.scale(at)), at, null, coin, null, false, null, null))
 			);
 		}
-		for (Core core : cores) {
-			if (core.removed) {
+		for (Grenade grenade : grenades) {
+			if (grenade.removed) {
 				continue;
 			}
-			sphereEntry(from, direction, length, core.position, radius + Core.HIT_RADIUS).ifPresent(at ->
-				hits.add(new Hit(Kind.CORE, from.add(direction.scale(at)), at, null, null, core, false, null, null))
+			sphereEntry(from, direction, length, grenade.hitCenter(), radius + grenade.hitRadius()).ifPresent(at ->
+				hits.add(new Hit(Kind.GRENADE, from.add(direction.scale(at)), at, null, null, grenade, false, null, null))
 			);
 		}
 		hits.sort(Comparator.comparingDouble(Hit::distance));

@@ -765,6 +765,124 @@ final class Effects {
 	}
 
 	/**
+	 * Each rocket: its trail; its model, its unlit stripes in the level-up's material once it's levelled up; its glow
+	 * at its tail, a camera-facing flash that blinks out and back 25 times a second (SpriteController, blinking at
+	 * 50 a second), adding its color; and while it's frozen, its FreezeEffect, facing the camera and turning, in the
+	 * variant's color (SpriteGetVariationColor).
+	 */
+	void renderRockets(LevelRenderContext context, List<Rocket> rockets) {
+		Minecraft minecraft = Minecraft.getInstance();
+		UltraModel model = UltraModel.get("rocket");
+		if (minecraft.level == null || model == null || rockets.isEmpty()) {
+			return;
+		}
+		Vec3 camera = minecraft.gameRenderer.mainCamera().position();
+		JsonObject grenade = model.script("grenade");
+		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.lightning(), (pose, buffer) -> {
+			for (Rocket rocket : rockets) {
+				sawTrail(pose, buffer, rocket.position, rocket.trail, camera, grenade.getAsJsonObject("trail"));
+			}
+		});
+		Set<String> unlit = new TreeSet<>();
+		for (int part = 0; part < model.meshCount(); part++) {
+			if (model.meshMaterialName(part).contains("Unlit")) {
+				unlit.add(model.meshMaterialName(part));
+			}
+		}
+		JsonObject levelUp = grenade.has("levelUpMaterials") ? grenade.getAsJsonObject("levelUpMaterials") : new JsonObject();
+		Matrix4f[] world = model.boneMatrices(model.rest(), new Quaternionf());
+		int freezeEffect = grenade.get("freezeEffect").getAsInt();
+		PoseStack poseStack = context.poseStack();
+		float units = (float)PlayerShape.BLOCKS_PER_UNIT;
+		Quaternionf cameraRotation = minecraft.gameRenderer.mainCamera().rotation();
+		for (Rocket rocket : rockets) {
+			Quaternionf facing = facing(rocket.forward);
+			poseStack.pushPose();
+			poseStack.translate(rocket.position.x - camera.x, rocket.position.y - camera.y, rocket.position.z - camera.z);
+			poseStack.pushPose();
+			poseStack.rotate(facing);
+			poseStack.scale(units, units, units);
+			int light = LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(rocket.position));
+			model.submit(poseStack, context.submitNodeCollector(), light, world, unlit);
+			for (String material : unlit) {
+				Identifier swapped = rocket.levelledUp && levelUp.has(material) ? Identifier.parse(levelUp.getAsJsonObject(material).get("texture").getAsString()) : null;
+				model.submitMaterial(poseStack, context.submitNodeCollector(), world, material,
+					texture -> RenderTypes.entityCutout(swapped != null ? swapped : texture), 0xFFFFFFFF, LightCoordsUtil.FULL_BRIGHT);
+			}
+			poseStack.popPose();
+			for (UltraModel.Sprite sprite : model.sprites()) {
+				boolean frozenPart = descends(model, sprite.bone(), freezeEffect);
+				if (frozenPart && !rocket.frozen) {
+					continue;
+				}
+				// The camera-facing object the sprite is on (or under), and the sprite's place below it.
+				int billboard = sprite.bone();
+				while (billboard >= 0 && !facesCamera(model, billboard)) {
+					billboard = model.parent(billboard);
+				}
+				if (billboard < 0) {
+					continue;
+				}
+				Vector3f at = facing.transform(world[billboard].getTranslation(new Vector3f()));
+				float size = world[billboard].getColumn(0, new Vector3f()).length() * units;
+				poseStack.pushPose();
+				poseStack.translate(at.x * units, at.y * units, at.z * units);
+				poseStack.rotate(cameraRotation);
+				poseStack.scale(size, size, size);
+				poseStack.mulPose(below(model, billboard, sprite.bone(), rocket.age()));
+				float[] c = sprite.color();
+				if (frozenPart) {
+					float[] variation = spriteVariationColor(model, billboard);
+					quad(context, sprite.texture(), sprite.rect(), variation[0], variation[1], variation[2], c[3]);
+				} else {
+					float blink = (float)Math.abs(1 - (rocket.age() * spriteController(model, sprite.bone(), "fadeSpeed")) % 2);
+					quad(context, RenderTypes.energySwirl(sprite.texture(), 0, 0), sprite.rect(), c[0] * blink, c[1] * blink, c[2] * blink, 1);
+				}
+				poseStack.popPose();
+			}
+			poseStack.popPose();
+		}
+	}
+
+	private static boolean facesCamera(UltraModel model, int bone) {
+		for (JsonElement element : model.scripts("alwaysLookAtCamera")) {
+			if (element.getAsJsonObject().get("bone").getAsInt() == bone) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Where {@code bone} is under its ancestor {@code top}, in the ancestor's space: each Spin between them turned by now. */
+	private static Matrix4f below(UltraModel model, int top, int bone, double age) {
+		Matrix4f matrix = new Matrix4f();
+		Pose rest = model.rest();
+		for (int b = bone; b != top; b = model.parent(b)) {
+			Quaternionf rotation = new Quaternionf(rest.qx(b), rest.qy(b), rest.qz(b), rest.qw(b));
+			for (JsonElement element : model.scripts("spins")) {
+				JsonObject spin = element.getAsJsonObject();
+				if (spin.get("bone").getAsInt() == b) {
+					JsonArray axis = spin.getAsJsonArray("axis");
+					rotation.rotateAxis((float)Math.toRadians(spin.get("speed").getAsDouble() * age % 360), axis.get(0).getAsFloat(), axis.get(1).getAsFloat(), axis.get(2).getAsFloat());
+				}
+			}
+			matrix.mulLocal(new Matrix4f().translationRotateScale(rest.px(b), rest.py(b), rest.pz(b), rotation.x, rotation.y, rotation.z, rotation.w, rest.sx(b), rest.sy(b), rest.sz(b)));
+		}
+		return matrix;
+	}
+
+	/** SpriteGetVariationColor on {@code bone}: the variant's color its sprites take. */
+	private static float[] spriteVariationColor(UltraModel model, int bone) {
+		for (JsonElement element : model.scripts("spriteVariationColors")) {
+			if (element.getAsJsonObject().get("bone").getAsInt() == bone) {
+				JsonArray color = element.getAsJsonObject().getAsJsonArray("variationColor");
+				return new float[]{color.get(0).getAsFloat(), color.get(1).getAsFloat(), color.get(2).getAsFloat()};
+			}
+		}
+		return new float[]{1, 1, 1};
+	}
+
+	/**
 	 * The zapper: its model, its prongs open or (attached) closed; its cable from where it starts, in its color; and
 	 * once attached, its pulse orb on the cable with its line back to the cable's start.
 	 */

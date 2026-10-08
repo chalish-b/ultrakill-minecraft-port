@@ -56,14 +56,15 @@ public final class UltraModel {
 	 * @param rect left, bottom, right, top
 	 * @param border sliced borders (left, bottom, right, top) in canvas units; {@code uvBorder} in texture space
 	 * @param fillOrigin where a radial fill starts: bottom, right, top or left
+	 * @param transform how it's turned in the canvas, if it is: see {@link #placed}
 	 */
 	public record Image(
 		String name, float[] rect, Identifier texture, float[] color, ImageType type, float[] border, float[] uvBorder,
-		FillMethod fillMethod, int fillOrigin, boolean fillClockwise, float fillAmount
+		FillMethod fillMethod, int fillOrigin, boolean fillClockwise, float fillAmount, float @Nullable [] transform
 	) {
 		/** The same image laid out over another rect, as a Slider moves its fill. */
 		public Image withRect(float[] rect) {
-			return new Image(this.name, rect, this.texture, this.color, this.type, this.border, this.uvBorder, this.fillMethod, this.fillOrigin, this.fillClockwise, this.fillAmount);
+			return new Image(this.name, rect, this.texture, this.color, this.type, this.border, this.uvBorder, this.fillMethod, this.fillOrigin, this.fillClockwise, this.fillAmount, this.transform);
 		}
 	}
 
@@ -94,12 +95,32 @@ public final class UltraModel {
 	 * @param scale its own scale, which its font size is drawn at
 	 * @param font the Minecraft font made from its font
 	 * @param alignment Unity's TextAnchor: 0 to 8, top left to bottom right
+	 * @param transform how it's turned in the canvas, if it is: see {@link #placed}
 	 */
-	public record Text(String name, float[] rect, float[] pivot, float scale, float[] color, Identifier font, float fontSize, int alignment, String text) {
+	public record Text(
+		String name, float[] rect, float[] pivot, float scale, float[] color, Identifier font, float fontSize, int alignment, String text, float @Nullable [] transform
+	) {
 		/** The same text in another color, as a script sets it. */
 		public Text withColor(float[] color) {
-			return new Text(this.name, this.rect, this.pivot, this.scale, color, this.font, this.fontSize, this.alignment, this.text);
+			return new Text(this.name, this.rect, this.pivot, this.scale, color, this.font, this.fontSize, this.alignment, this.text, this.transform);
 		}
+	}
+
+	/**
+	 * A canvas's matrix with an element's turn in it: the element's 2D transform [a, b, c, d, e, f] takes a point
+	 * (x, y) of its rect to (a x + c y + e, b x + d y + f) in the canvas.
+	 */
+	public static Matrix4f placed(Matrix4f canvas, float @Nullable [] transform) {
+		if (transform == null) {
+			return canvas;
+		}
+		Matrix4f turn = new Matrix4f(
+			transform[0], transform[1], 0, 0,
+			transform[2], transform[3], 0, 0,
+			0, 0, 1, 0,
+			transform[4], transform[5], 0, 1
+		);
+		return new Matrix4f(canvas).mul(turn);
 	}
 
 	/**
@@ -481,7 +502,8 @@ public final class UltraModel {
 						FillMethod.valueOf(image.get("fillMethod").getAsString().toUpperCase()),
 						image.get("fillOrigin").getAsInt(),
 						image.get("fillClockwise").getAsBoolean(),
-						image.get("fillAmount").getAsFloat()
+						image.get("fillAmount").getAsFloat(),
+						image.has("transform") ? floats(image.getAsJsonArray("transform")) : null
 					));
 				}
 				List<Text> texts = new ArrayList<>();
@@ -497,7 +519,8 @@ public final class UltraModel {
 							Identifier.parse(text.get("font").getAsString()),
 							text.get("fontSize").getAsFloat(),
 							text.get("alignment").getAsInt(),
-							text.get("text").getAsString()
+							text.get("text").getAsString(),
+							text.has("transform") ? floats(text.getAsJsonArray("transform")) : null
 						));
 					}
 				}
