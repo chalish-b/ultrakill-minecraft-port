@@ -132,6 +132,10 @@ public final class UltraMovement {
 	private double jumpReadyTimer;
 	/** Rocket jumps since the player last stood on the ground or stepped on an enemy. */
 	private int rocketJumps;
+	/** Rockets ridden since the player last stood on the ground or stepped on an enemy (NewMovement.rocketRides). */
+	private int rocketRides;
+	/** Riding a rocket, which carries the player: their own physics moves them nowhere. */
+	private boolean ridingRocket;
 	/** A harmless explosion can't launch the player again until this runs out. */
 	private double safeExplosionLaunchCooldown;
 	/**
@@ -160,8 +164,8 @@ public final class UltraMovement {
 	private @Nullable Vec3 landingImpact;
 	private double sinceLastGrounded;
 
-	/** GroundCheck and SlopeCheck forced off (ForceOff): the player counts as in the air. */
-	private boolean groundForcedOff;
+	/** How many hold GroundCheck and SlopeCheck forced off (ForceOff): while any do, the player counts as in the air. */
+	private int groundForcedOff;
 
 	// HookArm
 	/** HookArm.FixedUpdate, run every physics step after NewMovement's, before the body moves. */
@@ -267,9 +271,13 @@ public final class UltraMovement {
 		if (this.hookFixedUpdate != null) {
 			this.hookFixedUpdate.run();
 		}
-		UltraBody.Contact contact = this.body.step(this.player, displacementScale());
-		if (UltraConfig.get().stepMode == UltraConfig.StepMode.ULTRAKILL && contact.hitHorizontally()) {
-			climbStep(contact);
+		if (this.ridingRocket) {
+			this.body.stop();
+		} else {
+			UltraBody.Contact contact = this.body.step(this.player, displacementScale());
+			if (UltraConfig.get().stepMode == UltraConfig.StepMode.ULTRAKILL && contact.hitHorizontally()) {
+				climbStep(contact);
+			}
 		}
 		updateTriggers();
 		// Minecraft's own ground flag (mining speed, the server's fall checks) follows ULTRAKILL's ground
@@ -339,6 +347,7 @@ public final class UltraMovement {
 		if (this.onGround && !this.jumping) {
 			this.currentWallJumps = 0;
 			this.rocketJumps = 0;
+			this.rocketRides = 0;
 			double downwardSpeed = G.dot(this.body.velocity);
 			if (this.slopeOnGround && this.inputDir.x == 0 && this.inputDir.z == 0) {
 				downwardSpeed = 0;
@@ -843,6 +852,7 @@ public final class UltraMovement {
 	private void enemyStepResets() {
 		this.currentWallJumps = 0;
 		this.rocketJumps = 0;
+		this.rocketRides = 0;
 		this.clingFade = 0;
 	}
 
@@ -1081,13 +1091,13 @@ public final class UltraMovement {
 			this.superJumpChance = 0.1;
 		}
 		this.groundTouching = touching;
-		this.slopeOnGround = !this.groundForcedOff && groundOverlap(SLOPE_CHECK_DEPTH, SLOPE_CHECK_INSET * S);
+		this.slopeOnGround = this.groundForcedOff == 0 && groundOverlap(SLOPE_CHECK_DEPTH, SLOPE_CHECK_INSET * S);
 		this.canJump = enemyUnderFeet();
 		updateWallCheck();
 	}
 
 	private void groundCheckUpdate(double dt) {
-		this.onGround = this.groundTouching && !this.groundForcedOff;
+		this.onGround = this.groundTouching && this.groundForcedOff == 0;
 		if (this.onGround) {
 			this.sinceLastGrounded = 0;
 		}
@@ -1393,21 +1403,22 @@ public final class UltraMovement {
 	}
 
 	/**
-	 * HookArm.ForceGroundCheck and StopForceGroundCheck: the ground and slope checks are forced off, so the player
-	 * counts as in the air; forcing them off ends a slide.
+	 * GroundCheck.ForceOff and SlopeCheck.ForceOff: the ground and slope checks are forced off, so the player counts
+	 * as in the air, until whatever forced them stops; forcing them off ends a slide.
 	 */
-	public void forceGroundOff(boolean off) {
-		if (off == this.groundForcedOff) {
-			return;
+	public void forceGroundOff() {
+		this.groundForcedOff++;
+		if (this.sliding) {
+			stopSlide();
 		}
-		this.groundForcedOff = off;
-		if (off) {
-			if (this.sliding) {
-				stopSlide();
-			}
-			this.onGround = false;
-			this.slopeOnGround = false;
-		} else {
+		this.onGround = false;
+		this.slopeOnGround = false;
+	}
+
+	/** GroundCheck.StopForceOff and SlopeCheck.StopForceOff: once nothing forces them off, they read the ground again. */
+	public void stopForceGroundOff() {
+		this.groundForcedOff = Math.max(this.groundForcedOff - 1, 0);
+		if (this.groundForcedOff == 0) {
 			this.onGround = this.groundTouching;
 		}
 	}
@@ -1415,6 +1426,75 @@ public final class UltraMovement {
 	/** HookArm.beingPulled: while the Whiplash pulls the player, slides end and can't start, and slams keep the pull. */
 	public void setBeingPulled(boolean pulled) {
 		this.beingPulled = pulled;
+	}
+
+	// ---- for rocket riding (Grenade) ------------------------------------------------------------
+
+	/**
+	 * Grenade.PlayerRideStart and PlayerRideEnd: on a rocket, the player stands still in its grip (a slam is called
+	 * off) and the ground checks are forced off.
+	 */
+	public void setRidingRocket(boolean riding) {
+		if (riding == this.ridingRocket) {
+			return;
+		}
+		this.ridingRocket = riding;
+		if (riding) {
+			this.heavyFall = false;
+			forceGroundOff();
+		} else {
+			stopForceGroundOff();
+		}
+	}
+
+	public boolean ridingRocket() {
+		return this.ridingRocket;
+	}
+
+	/** A rocket newly ridden: one more ride since the player last stood on the ground, and how many that makes. */
+	public int countRocketRide() {
+		return ++this.rocketRides;
+	}
+
+	/**
+	 * Grenade.LateUpdate: the rocket puts NewMovement's transform.position at {@code root} (blocks), stopped there, and
+	 * the camera follows it there this frame.
+	 */
+	public void placeRider(Vec3 root) {
+		Vec3 feet = root.subtract(root().subtract(this.player.position()));
+		this.player.setPos(feet);
+		this.previousFeet = feet;
+		this.currentFeet = feet;
+		this.body.stop();
+	}
+
+	/** Where the ground check is (GroundCheck's transform.position), in blocks. */
+	public Vec3 groundCheckPoint() {
+		return groundCheckPosition();
+	}
+
+	/** NewMovement.preSlideSpeed and preSlideDelay: how fast a slide started now begins, and for how long that holds. */
+	public void setPreSlide(double speed, double delay) {
+		this.preSlideSpeed = speed;
+		this.preSlideDelay = delay;
+	}
+
+	/** The movement keys this frame: right and forward, each -1 to 1. */
+	public double moveX() {
+		return this.input.moveX;
+	}
+
+	public double moveY() {
+		return this.input.moveY;
+	}
+
+	public boolean jumpHeld() {
+		return this.input.jumpHeld;
+	}
+
+	/** Whether slide was pressed this frame. */
+	public boolean slidePressed() {
+		return this.input.slidePressed;
 	}
 
 	/** GroundCheck.onGround: standing on the ground, unless the ground check is forced off. */

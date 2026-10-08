@@ -414,7 +414,7 @@ def rocket_launcher(env, x):
     """The rocket launcher's shot and its clunks (their pitch is set by the code); the Freezeframe's clock starting
     and stopping, its ticking while rockets are frozen and its windup as the freeze recharges (their pitch is set by
     the code); the rocket's hum in flight and its level-up, from where the rocket is (the hum's pitch is set by the
-    code); and the harmless explosion where a rocket hits a wall."""
+    code); the harmless explosion where a rocket hits a wall; and the sound of getting on a rocket."""
     launcher = find_class(env, "RocketLauncher", "Rocket Launcher Freeze", variation=0)
     shot = next(components(launcher.m_GameObject.read(), "AudioSource"))
     x.add_clip("rocket_launcher_shoot", shot.m_audioClip, shot.m_Volume)
@@ -435,6 +435,8 @@ def rocket_launcher(env, x):
     x.event("rocket_level_up", [sound(x.clip(level_up.m_audioClip, mono=True, speed=level_up.m_Pitch), level_up.m_Volume)])
     x.events["rocket_level_up"]["sounds"][0]["attenuation_distance"] = round(next(audio_sources_tree(level_up_go))["MaxDistance"] * BLOCKS_PER_UNIT)
     x.add_source("explosion_rocket_harmless", next(audio_sources(rocket.harmlessExplosion.deref().read())))
+    ride = next(audio_sources(rocket.playerRideSound.deref().read()))
+    x.add_source("rocket_ride", ride)
 
 
 def jumpstart(env, x):

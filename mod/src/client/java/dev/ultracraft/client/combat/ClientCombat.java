@@ -415,9 +415,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			}
 		}
 		this.cores.removeIf(core -> core.removed);
+		UltraMovement riderMovement = UltraController.INSTANCE.isDriving(player) ? UltraController.INSTANCE.movement() : null;
 		for (Rocket rocket : List.copyOf(this.rockets)) {
 			if (!rocket.removed) {
-				rocket.update(dt, minecraft.level, player, this.rocketLauncher.frozen(), this);
+				rocket.update(dt, minecraft.level, player, riderMovement, this.rocketLauncher.frozen(), this);
 			}
 		}
 		this.rockets.removeIf(this::rocketGone);
@@ -1247,10 +1248,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 	}
 
-	/** Coin.ExplosiveReflectCheck: the nearest core or rocket to the coin that it can see, within reach of the player. */
+	/**
+	 * Coin.ExplosiveReflectCheck: the nearest core or rocket to the coin that it can see, within reach of the player,
+	 * but not a rocket the player rides.
+	 */
 	private @Nullable Grenade grenadeTarget(Coin coin, Level level, LocalPlayer player) {
 		return grenades().stream()
-			.filter(g -> !g.removed && g.position.distanceTo(player.position()) < GRENADE_TARGET_RANGE && Hitscan.clear(level, player, coin.position, g.position))
+			.filter(g -> !g.removed && !(g instanceof Rocket rocket && rocket.playerRiding) && g.position.distanceTo(player.position()) < GRENADE_TARGET_RANGE && Hitscan.clear(level, player, coin.position, g.position))
 			.min(Comparator.comparingDouble(g -> g.position.distanceToSqr(coin.position)))
 			.orElse(null);
 	}
@@ -3206,7 +3210,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		if (animator != null) {
 			animator.setTrigger("Fire");
 		}
-		this.rockets.add(new Rocket(movement.eyePosition(), player.getLookAngle(), this.sounds));
+		Vector3f up = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation()).transform(new Vector3f(0, 1, 0));
+		this.rockets.add(new Rocket(movement.eyePosition(), player.getLookAngle(), new Vec3(up.x, up.y, up.z), this.sounds));
 		movement.shake(0.75);
 	}
 
@@ -3277,10 +3282,17 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		return this.magnets;
 	}
 
-	/** Whether the rocket is gone: then its sounds stop, and the freeze's idle time starts over (Grenade.OnDestroy). */
+	/**
+	 * Whether the rocket is gone: then its sounds stop, its rider gets off, and the freeze's idle time starts over
+	 * (Grenade.OnDestroy).
+	 */
 	private boolean rocketGone(Rocket rocket) {
 		if (!rocket.removed) {
 			return false;
+		}
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (rocket.playerRiding && movement != null) {
+			rocket.endRide(movement);
 		}
 		rocket.discard();
 		this.rocketLauncher.rocketGone();
@@ -3335,17 +3347,39 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	}
 
 	/**
-	 * HookArm's catch, with a rocket on the hook: it's brought to the player and goes off there, launching them, as
-	 * a super explosion if they're in the air.
+	 * HookArm's catch, with a rocket on the hook: it's brought to the player. Coming up from below them (within 45
+	 * degrees of straight down), or with jump held, the player gets on it; otherwise it goes off there, launching
+	 * them, as a super explosion if they're in the air.
 	 */
 	@Override
-	public void rocketCaught(Rocket rocket) {
+	public void rocketCaught(Rocket rocket, Vec3 from) {
 		UltraMovement movement = UltraController.INSTANCE.movement();
 		if (rocket.removed || movement == null) {
 			return;
 		}
-		rocket.position = movement.rootPosition();
-		explodeRocket(rocket, false, false, !movement.onGround(), 1, false, true);
+		Vec3 root = movement.rootPosition();
+		rocket.position = root;
+		Vec3 toRocket = from.subtract(root);
+		boolean below = toRocket.lengthSqr() > 0 && Math.toDegrees(Math.acos(Math.clamp(-toRocket.normalize().y, -1, 1))) < 45;
+		if (!movement.ridingRocket() && (below || movement.jumpHeld())) {
+			rocket.startRide(movement);
+		} else {
+			explodeRocket(rocket, false, false, !movement.onGround(), 1, false, true);
+		}
+	}
+
+	/** The Whiplash's pull takes the player off the rocket they ride. */
+	@Override
+	public void groundCheckForced() {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (movement == null) {
+			return;
+		}
+		for (Rocket rocket : this.rockets) {
+			if (rocket.playerRiding) {
+				rocket.endRide(movement);
+			}
+		}
 	}
 
 	/** HookArm's clinkSparks and clinkObjectSparks: sparks out of {@code facing}, with their clink. */

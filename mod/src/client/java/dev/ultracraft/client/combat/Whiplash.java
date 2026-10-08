@@ -97,8 +97,11 @@ final class Whiplash {
 		/** The core or rocket on the hook reached what stopped the hook, and goes off. */
 		void grenadeExploded(Grenade grenade);
 
-		/** The rocket on the hook was reeled in to the player. */
-		void rocketCaught(Rocket rocket);
+		/** The rocket on the hook was reeled in to the player, last coming from {@code from}. */
+		void rocketCaught(Rocket rocket, Vec3 from);
+
+		/** HookArm.ForceGroundCheck, as a pull starts: it ends a rocket ride. */
+		void groundCheckForced();
 
 		/** HookArm's clinkSparks (or, for something it caught, clinkObjectSparks) here, facing {@code facing}. */
 		void clink(Vec3 at, Vec3 facing, boolean object);
@@ -185,6 +188,11 @@ final class Whiplash {
 		if (this.caughtGrenade != null && this.caughtGrenade.removed) {
 			this.caughtGrenade = null;
 		}
+		// A rocket the player got on comes off the hook.
+		if (this.caughtGrenade instanceof Rocket rocket && rocket.playerRiding) {
+			rocket.hooked = false;
+			this.caughtGrenade = null;
+		}
 		if (this.state == State.READY && this.returning) {
 			reelIn(player, movement);
 		}
@@ -251,6 +259,9 @@ final class Whiplash {
 				if (this.caughtGrenade == null) {
 					this.caughtGrenade = touch.grenade;
 					touch.grenade.hooked = true;
+					if (touch.grenade instanceof Rocket rocket) {
+						rocket.rideable = true;
+					}
 					this.hits.clink(touch.contact, this.throwDirection.scale(-1), true);
 				}
 			} else if (touch.coin != null) {
@@ -415,6 +426,7 @@ final class Whiplash {
 	private void reelIn(LocalPlayer player, UltraMovement movement) {
 		double step = STEP * (RETURN_SPEED + this.returnDistance / 2) * S * UltraConfig.get().speedScale;
 		Vec3 target = movement.eyePosition().add(player.getLookAngle().scale(CATCH_REACH * S));
+		Vec3 from = this.hookPoint;
 		Vec3 toTarget = target.subtract(this.hookPoint);
 		this.hookPoint = toTarget.length() <= step ? target : this.hookPoint.add(toTarget.normalize().scale(step));
 		if (this.caughtGrenade != null) {
@@ -430,7 +442,7 @@ final class Whiplash {
 		stopArm();
 		if (this.caughtGrenade instanceof Rocket rocket) {
 			rocket.hooked = false;
-			this.hits.rocketCaught(rocket);
+			this.hits.rocketCaught(rocket, from);
 		} else if (this.caughtGrenade != null) {
 			// The core comes away with the player's velocity, without its fall.
 			Vec3 velocity = movement.velocity();
@@ -559,14 +571,16 @@ final class Whiplash {
 		this.caughtGrenade = null;
 	}
 
+	/** HookArm.ForceGroundCheck: the pull takes the player off any rocket they ride, and keeps them in the air. */
 	private void forceGroundCheck(UltraMovement movement) {
+		this.hits.groundCheckForced();
 		this.forcingGroundCheck = true;
-		movement.forceGroundOff(true);
+		movement.forceGroundOff();
 	}
 
 	private void stopForceGroundCheck(UltraMovement movement) {
 		this.forcingGroundCheck = false;
-		movement.forceGroundOff(false);
+		movement.stopForceGroundOff();
 	}
 
 	private void play(String state, double normalizedTime) {
@@ -626,7 +640,7 @@ final class Whiplash {
 			}
 		}
 		for (Grenade grenade : this.hits.grenades()) {
-			if (!grenade.removed && !grenade.hooked) {
+			if (!grenade.removed && !grenade.hooked && !(grenade instanceof Rocket rocket && rocket.playerRiding)) {
 				sphereEntry(grenade.hitCenter(), radius + grenade.hitRadius(), from, step).ifPresent(at -> touches.add(new Touch(at, grenade.hitCenter(), null, grenade, null)));
 			}
 		}

@@ -42,6 +42,12 @@ final class UltraBody {
 		this.pendingVelocityChange = this.pendingVelocityChange.add(acceleration.scale(FIXED_DT));
 	}
 
+	/** Stopped where it is: no velocity, and nothing still to be added to it. */
+	void stop() {
+		this.velocity = Vec3.ZERO;
+		this.pendingVelocityChange = Vec3.ZERO;
+	}
+
 	static Vec3 gravityVector() {
 		return GRAVITY_DIRECTION.scale(GRAVITY);
 	}
