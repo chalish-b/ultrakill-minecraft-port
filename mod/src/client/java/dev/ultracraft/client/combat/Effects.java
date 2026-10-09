@@ -844,6 +844,59 @@ final class Effects {
 		}
 	}
 
+	/**
+	 * Each cannonball: its trail; its model; and its glow, facing the camera and spinning (Spin), drawn as the
+	 * explosions' sprites are.
+	 */
+	void renderCannonballs(LevelRenderContext context, List<Cannonball> cannonballs) {
+		Minecraft minecraft = Minecraft.getInstance();
+		UltraModel model = UltraModel.get("cannonball");
+		if (minecraft.level == null || model == null || cannonballs.isEmpty()) {
+			return;
+		}
+		Vec3 camera = minecraft.gameRenderer.mainCamera().position();
+		JsonObject trail = model.script("cannonball").getAsJsonObject("trail");
+		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.lightning(), (pose, buffer) -> {
+			for (Cannonball ball : cannonballs) {
+				sawTrail(pose, buffer, ball.position, ball.trail, camera, trail);
+			}
+		});
+		Matrix4f[] world = model.boneMatrices(model.rest(), new Quaternionf());
+		PoseStack poseStack = context.poseStack();
+		float units = (float)PlayerShape.BLOCKS_PER_UNIT;
+		Quaternionf cameraRotation = minecraft.gameRenderer.mainCamera().rotation();
+		for (Cannonball ball : cannonballs) {
+			Quaternionf facing = facing(ball.forward);
+			poseStack.pushPose();
+			poseStack.translate(ball.position.x - camera.x, ball.position.y - camera.y, ball.position.z - camera.z);
+			poseStack.pushPose();
+			poseStack.rotate(facing);
+			poseStack.scale(units, units, units);
+			model.submit(poseStack, context.submitNodeCollector(), LightCoordsUtil.getLightCoords(minecraft.level, BlockPos.containing(ball.position)), world);
+			poseStack.popPose();
+			for (UltraModel.Sprite sprite : model.sprites()) {
+				int billboard = sprite.bone();
+				while (billboard >= 0 && !facesCamera(model, billboard)) {
+					billboard = model.parent(billboard);
+				}
+				if (billboard < 0) {
+					continue;
+				}
+				Vector3f at = facing.transform(world[billboard].getTranslation(new Vector3f()));
+				float size = world[billboard].getColumn(0, new Vector3f()).length() * units;
+				poseStack.pushPose();
+				poseStack.translate(at.x * units, at.y * units, at.z * units);
+				poseStack.rotate(cameraRotation);
+				poseStack.scale(size, size, size);
+				poseStack.mulPose(below(model, billboard, sprite.bone(), ball.age()));
+				float[] c = sprite.color();
+				quad(context, sprite.texture(), sprite.rect(), c[0], c[1], c[2], c[3]);
+				poseStack.popPose();
+			}
+			poseStack.popPose();
+		}
+	}
+
 	private static boolean facesCamera(UltraModel model, int bone) {
 		for (JsonElement element : model.scripts("alwaysLookAtCamera")) {
 			if (element.getAsJsonObject().get("bone").getAsInt() == bone) {

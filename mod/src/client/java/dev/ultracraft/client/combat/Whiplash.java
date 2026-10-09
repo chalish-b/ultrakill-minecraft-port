@@ -28,7 +28,7 @@ import java.util.OptionalDouble;
 
 /**
  * The Whiplash (HookArm): a hook on a wire, thrown along the aim for as long as its key is held. It catches the first
- * enemy it reaches, takes a core or a rocket along, bounces the coins it passes and brings back an item; a wall stops it. Let go
+ * enemy it reaches, takes a core or a rocket and cannonballs along, bounces the coins it passes and brings back an item; a wall stops it. Let go
  * of on an enemy, it pulls: a light enemy comes to the player, the player goes to a heavy one. Then it reels back to
  * the hand.
  *
@@ -66,6 +66,8 @@ final class Whiplash {
 	private static final double RETURN_SPEED = 100;
 	private static final double MIN_RETURN_DISTANCE = 25;
 	private static final double CATCH_REACH = 1.5;
+	/** It carries at most this many things at once, one of them a core or a rocket. */
+	private static final int MAX_CAUGHT = 5;
 	/** The thrown wire's wobble fades this fast. */
 	private static final double WARP_FADE = 6.5;
 	/** The arm hangs this far below the camera (FistControl's "Punch"). */
@@ -81,11 +83,11 @@ final class Whiplash {
 		PULLING
 	}
 
-	/** What the hook does to things. */
-	interface Hits {
+	/** What the hook does to things, and what the cannonballs it carries do. */
+	interface Hits extends Cannonball.Hits {
 		List<Coin> coins();
 
-		/** The player's cores and rockets. */
+		/** The player's cores, rockets and cannonballs. */
 		List<Grenade> grenades();
 
 		/** Coin.Bounce: the coin pops up again as {@code bounced}. */
@@ -134,6 +136,7 @@ final class Whiplash {
 	private Vec3 caughtOffset = Vec3.ZERO;
 	private boolean lightTarget;
 	private @Nullable Grenade caughtGrenade;
+	private final List<Cannonball> caughtCannonballs = new ArrayList<>();
 	private boolean forcingGroundCheck;
 	/** The Whiplash has the arm, from a throw until it's caught again. */
 	private boolean forcingFistControl;
@@ -188,6 +191,7 @@ final class Whiplash {
 		if (this.caughtGrenade != null && this.caughtGrenade.removed) {
 			this.caughtGrenade = null;
 		}
+		this.caughtCannonballs.removeIf(ball -> ball.removed);
 		// A rocket the player got on comes off the hook.
 		if (this.caughtGrenade instanceof Rocket rocket && rocket.playerRiding) {
 			rocket.hooked = false;
@@ -197,7 +201,7 @@ final class Whiplash {
 			reelIn(player, movement);
 		}
 		if (this.state == State.THROWING) {
-			if (!this.held && (this.cooldown <= LET_GO_COOLDOWN || this.caughtGrenade != null)) {
+			if (!this.held && (this.cooldown <= LET_GO_COOLDOWN || caughtCount() > 0)) {
 				stopThrow(level, player, 0, false);
 			} else {
 				fly(level, player, movement);
@@ -229,7 +233,7 @@ final class Whiplash {
 		this.hookPoint = armOrigin(movement, player);
 		this.throwDirection = player.getLookAngle();
 		this.returning = false;
-		releaseGrenade(movement);
+		releaseCaught(movement, false);
 		this.state = State.THROWING;
 		this.lightTarget = false;
 		this.throwWarp = 1;
@@ -242,7 +246,9 @@ final class Whiplash {
 
 	/**
 	 * One step of the flight: the sphere it sweeps (wider the further out it is) catches the nearest enemy it can
-	 * reach, picks up a core or a rocket, bounces coins onto the wire and grabs an item; a wall ahead stops it short.
+	 * reach, picks up a core or a rocket and cannonballs, bounces coins onto the wire and grabs an item; a wall ahead
+	 * stops it short. The cannonballs it carries reach an enemy first: one that hits it turns the hook back without
+	 * catching it. Where the hook stops, a core or rocket it carries goes off, and the cannonballs drop off.
 	 */
 	private void fly(Level level, LocalPlayer player, UltraMovement movement) {
 		double step = THROW_SPEED * STEP * S * UltraConfig.get().speedScale;
@@ -255,8 +261,14 @@ final class Whiplash {
 		double radius = Math.min(origin.distanceTo(this.hookPoint) / SWEEP_SHARE, MAX_SWEEP_RADIUS * S);
 		boolean caught = false;
 		for (Touch touch : sweep(level, player, step, radius)) {
-			if (touch.grenade != null) {
-				if (this.caughtGrenade == null) {
+			if (touch.grenade instanceof Cannonball ball) {
+				if (caughtCount() < MAX_CAUGHT) {
+					this.caughtCannonballs.add(ball);
+					ball.caught();
+					this.hits.clink(touch.contact, this.throwDirection.scale(-1), true);
+				}
+			} else if (touch.grenade != null) {
+				if (this.caughtGrenade == null && caughtCount() < MAX_CAUGHT) {
 					this.caughtGrenade = touch.grenade;
 					touch.grenade.hooked = true;
 					if (touch.grenade instanceof Rocket rocket) {
@@ -273,6 +285,10 @@ final class Whiplash {
 				Vec3 center = enemy.getBoundingBox().getCenter();
 				if (blocked(level, player, this.hookPoint, center)) {
 					continue;
+				}
+				if (cannonballsStrike(enemy, this.hookPoint.add(this.throwDirection.scale(touch.distance)))) {
+					stopThrow(level, player, 0, false);
+					return;
 				}
 				catchEnemy(enemy, center, touch.contact);
 				caught = true;
@@ -308,6 +324,40 @@ final class Whiplash {
 				this.caughtGrenade = null;
 			}
 		}
+		for (Cannonball ball : this.caughtCannonballs) {
+			ball.position = point;
+			if (caught) {
+				ball.dropped();
+			}
+		}
+		if (caught) {
+			this.caughtCannonballs.clear();
+		}
+	}
+
+	/**
+	 * The cannonballs on the hook, carried to {@code at}, hit {@code enemy} if they reach it.
+	 *
+	 * @return whether one has hit it
+	 */
+	private boolean cannonballsStrike(LivingEntity enemy, Vec3 at) {
+		boolean struck = false;
+		for (Cannonball ball : this.caughtCannonballs) {
+			if (ball.removed) {
+				continue;
+			}
+			ball.position = at;
+			if (ball.reaches(enemy)) {
+				ball.collide(enemy, this.hits);
+			}
+			struck |= ball.hasHit(enemy);
+		}
+		return struck;
+	}
+
+	/** How many things the hook carries. */
+	private int caughtCount() {
+		return this.caughtCannonballs.size() + (this.caughtGrenade != null ? 1 : 0);
 	}
 
 	/** The hook caught an enemy: it holds on at the enemy's middle and hits it. */
@@ -432,6 +482,9 @@ final class Whiplash {
 		if (this.caughtGrenade != null) {
 			this.caughtGrenade.position = this.hookPoint;
 		}
+		for (Cannonball ball : this.caughtCannonballs) {
+			ball.position = this.hookPoint;
+		}
 		if (!this.hookPoint.equals(target)) {
 			return;
 		}
@@ -440,19 +493,24 @@ final class Whiplash {
 		play("Catch", 0);
 		this.sounds.play("whiplash_catch", 1, this.sounds.randomPitch(0.9F, 1.1F));
 		stopArm();
+		// A core or cannonball comes away with the player's velocity, without its fall.
+		Vec3 velocity = movement.velocity();
+		if (velocity.y < 0) {
+			velocity = new Vec3(velocity.x, 0, velocity.z);
+		}
 		if (this.caughtGrenade instanceof Rocket rocket) {
 			rocket.hooked = false;
 			this.hits.rocketCaught(rocket, from);
 		} else if (this.caughtGrenade != null) {
-			// The core comes away with the player's velocity, without its fall.
-			Vec3 velocity = movement.velocity();
-			if (velocity.y < 0) {
-				velocity = new Vec3(velocity.x, 0, velocity.z);
-			}
 			this.caughtGrenade.hooked = false;
 			this.caughtGrenade.launch(velocity);
 		}
 		this.caughtGrenade = null;
+		for (Cannonball ball : this.caughtCannonballs) {
+			ball.hooked = false;
+			ball.launch(velocity);
+		}
+		this.caughtCannonballs.clear();
 	}
 
 	/**
@@ -491,7 +549,7 @@ final class Whiplash {
 		this.woosh.stop();
 	}
 
-	/** HookArm.Cancel: everything stops at once, the arm goes away, and a grenade on the hook is sent to the player. */
+	/** HookArm.Cancel: everything stops at once, the arm goes away, and what's on the hook is sent to the player. */
 	void cancel() {
 		if (!active()) {
 			return;
@@ -501,9 +559,10 @@ final class Whiplash {
 		}
 		this.forcingFistControl = false;
 		if (this.movement != null) {
-			releaseGrenade(this.movement);
+			releaseCaught(this.movement, true);
 		}
 		this.caughtGrenade = null;
+		this.caughtCannonballs.clear();
 		this.lightTarget = false;
 		if (this.caughtEnemy != null) {
 			ClientPlayNetworking.send(WhiplashPayload.of(WhiplashPayload.Action.RELEASE));
@@ -560,15 +619,30 @@ final class Whiplash {
 		return this.state != State.READY || this.returning;
 	}
 
-	/** A grenade on the hook when it's thrown again or called off is sent at the player. */
-	private void releaseGrenade(UltraMovement movement) {
-		if (this.caughtGrenade == null) {
-			return;
+	/**
+	 * What's on the hook when it's thrown again or called off is sent at the player. Called off, the cannonballs can
+	 * hit every enemy again, at their speed's damage.
+	 */
+	private void releaseCaught(UltraMovement movement, boolean cancelled) {
+		if (this.caughtGrenade != null) {
+			this.caughtGrenade.hooked = false;
+			this.caughtGrenade.launch(toPlayer(movement, this.caughtGrenade.position));
+			this.caughtGrenade = null;
 		}
-		Vec3 toPlayer = movement.rootPosition().subtract(this.caughtGrenade.position);
-		this.caughtGrenade.hooked = false;
-		this.caughtGrenade.launch(toPlayer.lengthSqr() > 0 ? toPlayer.normalize().scale(RETURN_SPEED + this.returnDistance / 2) : Vec3.ZERO);
-		this.caughtGrenade = null;
+		for (Cannonball ball : this.caughtCannonballs) {
+			if (cancelled) {
+				ball.sentBack(toPlayer(movement, ball.position));
+			} else {
+				ball.hooked = false;
+				ball.launch(toPlayer(movement, ball.position));
+			}
+		}
+		this.caughtCannonballs.clear();
+	}
+
+	private Vec3 toPlayer(UltraMovement movement, Vec3 from) {
+		Vec3 toPlayer = movement.rootPosition().subtract(from);
+		return toPlayer.lengthSqr() > 0 ? toPlayer.normalize().scale(RETURN_SPEED + this.returnDistance / 2) : Vec3.ZERO;
 	}
 
 	/** HookArm.ForceGroundCheck: the pull takes the player off any rocket they ride, and keeps them in the air. */

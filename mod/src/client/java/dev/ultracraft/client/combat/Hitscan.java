@@ -29,7 +29,7 @@ final class Hitscan {
 	enum Kind {
 		ENTITY,
 		COIN,
-		/** One of the player's cores or rockets, by the trigger sphere around it. */
+		/** One of the player's cores, rockets or cannonballs, by the trigger sphere around it. */
 		GRENADE,
 		BLOCK,
 		/** The ray reached its range without hitting a block. */
@@ -134,7 +134,7 @@ final class Hitscan {
 	}
 
 	/** How far along a ray of {@code length} it first comes within {@code reach} of {@code center}, if it does. */
-	private static OptionalDouble sphereEntry(Vec3 from, Vec3 direction, double length, Vec3 center, double reach) {
+	static OptionalDouble sphereEntry(Vec3 from, Vec3 direction, double length, Vec3 center, double reach) {
 		Vec3 offset = center.subtract(from);
 		double along = offset.dot(direction);
 		double off = offset.subtract(direction.scale(along)).length();

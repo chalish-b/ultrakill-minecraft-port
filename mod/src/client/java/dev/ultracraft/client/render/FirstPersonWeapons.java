@@ -73,7 +73,8 @@ public final class FirstPersonWeapons {
 		RAILCANNON_ELECTRIC("railcannon_electric"),
 		RAILCANNON_SCREWDRIVER("railcannon_screwdriver"),
 		RAILCANNON_MALICIOUS("railcannon_malicious"),
-		ROCKET_LAUNCHER_FREEZEFRAME("rocket_launcher_freezeframe");
+		ROCKET_LAUNCHER_FREEZEFRAME("rocket_launcher_freezeframe"),
+		ROCKET_LAUNCHER_SRS("rocket_launcher_srs");
 
 		final String model;
 
@@ -143,6 +144,18 @@ public final class FirstPersonWeapons {
 	 * @param reddening how far a {@link MeterTint#VARIANT} meter has reddened, 0 to 1
 	 * @param jitter how far the gun shakes from its place, in units
 	 */
+	/**
+	 * What the rocket launcher's dial shows (RocketLauncher.Update), and how the gun shakes.
+	 *
+	 * @param timer how full the dial is, 0 to 1
+	 * @param reddening how far its colors have turned red, 0 to 1
+	 * @param dimmed whether its colors show at half their opacity
+	 * @param jitter how far the gun shakes from its place, in units
+	 */
+	public record RocketLauncherState(double timer, double reddening, boolean dimmed, Vec3 jitter) {
+		public static final RocketLauncherState NONE = new RocketLauncherState(1, 0, false, Vec3.ZERO);
+	}
+
 	public record ShotgunState(double heat, double meter, MeterTint tint, double reddening, Vec3 jitter, SawState saw) {
 		public static final ShotgunState NONE = new ShotgunState(0, 60, MeterTint.VARIANT, 0, Vec3.ZERO, SawState.NONE);
 	}
@@ -326,8 +339,8 @@ public final class FirstPersonWeapons {
 	private final Vector3f sawShakeTarget = new Vector3f();
 	/** The railcannons' charge, 0 to 5 (WeaponCharges.raicharge). */
 	private double railcannonCharge = 5;
-	/** How full the rocket launcher's dial shows, 0 to 1: the Freezeframe's freeze. */
-	private double rocketTimer = 1;
+	/** What the rocket launcher's dial shows. */
+	private RocketLauncherState rocketLauncher = RocketLauncherState.NONE;
 	/** The HUD camera's field of view (degrees), and whether a zoom narrows it (CameraController.Zoom). */
 	private double weaponFov = WEAPON_FOV;
 	private boolean zooming;
@@ -603,17 +616,18 @@ public final class FirstPersonWeapons {
 	 * Runs the held weapon's and the arm's Animators, and the scripts that move them after.
 	 *
 	 * @param railcannonCharge the railcannons' charge, 0 to 5
-	 * @param rocketTimer how full the rocket launcher's dial shows, 0 to 1
+	 * @param rocketLauncher what the rocket launcher's dial shows
 	 */
 	public void update(
-		double dt, @Nullable Weapon held, RevolverState state, ShotgunState shotgun, NailgunState nailgun, double railcannonCharge, double rocketTimer, Events events
+		double dt, @Nullable Weapon held, RevolverState state, ShotgunState shotgun, NailgunState nailgun, double railcannonCharge, RocketLauncherState rocketLauncher,
+		Events events
 	) {
 		this.held = held;
 		this.state = state;
 		this.shotgun = shotgun;
 		this.nailgun = nailgun;
 		this.railcannonCharge = railcannonCharge;
-		this.rocketTimer = rocketTimer;
+		this.rocketLauncher = rocketLauncher;
 		double fovTarget = this.zooming ? Minecraft.getInstance().options.fov().get() / 2.0 : WEAPON_FOV;
 		double fovStep = 300 * dt;
 		this.weaponFov = Math.abs(fovTarget - this.weaponFov) <= fovStep ? fovTarget : this.weaponFov + Math.signum(fovTarget - this.weaponFov) * fovStep;
@@ -967,19 +981,26 @@ public final class FirstPersonWeapons {
 	}
 
 	/**
-	 * The rocket launcher, and its dial (RocketLauncher.Update): its rings and quarter marks in the variant's color,
-	 * its inner ring filled as far as the dial shows, and its clock hand turned to match, a full turn back from
-	 * upright when it's empty.
+	 * The rocket launcher, and its dial (RocketLauncher.Update): its rings and quarter marks in the variant's color
+	 * (turned toward red, or dimmed, as the dial says), its inner ring filled as far as the dial shows, and its clock
+	 * hand turned to match, a full turn back from upright when it's empty. Charging shakes it.
 	 */
 	private void submitRocketLauncher(PoseStack poseStack, SubmitNodeCollector collector, int light, Viewmodel weapon) {
+		Vec3 jitter = this.rocketLauncher.jitter();
+		poseStack.pushPose();
+		poseStack.translate(jitter.x, jitter.y, -jitter.z);
 		Matrix4f[] world = weapon.model.boneMatrices(weapon.pose, new Quaternionf());
 		weapon.model.submit(poseStack, collector, light, world);
 		JsonObject script = weapon.model.script("rocketLauncher");
 		if (script == null) {
+			poseStack.popPose();
 			return;
 		}
-		float[] variation = variationColor(script);
-		float timer = (float)Math.clamp(this.rocketTimer, 0, 1);
+		float[] base = variationColor(script);
+		float red = (float)this.rocketLauncher.reddening();
+		float[] variation = {base[0] + (1 - base[0]) * red, base[1] * (1 - red), base[2] * (1 - red)};
+		float opacity = this.rocketLauncher.dimmed() ? 0.5F : 1;
+		float timer = (float)Math.clamp(this.rocketLauncher.timer(), 0, 1);
 		JsonObject arm = script.getAsJsonObject("timerArm");
 		float[] pivot = floats(arm.getAsJsonArray("pivot"));
 		for (int c = 0; c < weapon.model.canvases().size(); c++) {
@@ -991,13 +1012,14 @@ public final class FirstPersonWeapons {
 				UltraModel.Image image = canvas.images().get(i);
 				float[] color = image.color();
 				if (within(script.getAsJsonArray("variationColorables"), c, i)) {
-					color = new float[]{variation[0], variation[1], variation[2], image.color()[3]};
+					color = new float[]{variation[0], variation[1], variation[2], image.color()[3] * opacity};
 				}
 				float fill = at(script.get("timerMeter"), c, i) ? timer : image.fillAmount();
 				Matrix4f placed = within(arm.getAsJsonArray("images"), c, i) ? turned : matrix;
 				ModelOverlays.image(poseStack, collector, RenderTypes.text(image.texture()), placed, image, color, fill, i);
 			}
 		}
+		poseStack.popPose();
 	}
 
 	/** Whether {@code place} is {@code canvas}'s {@code index}th. */

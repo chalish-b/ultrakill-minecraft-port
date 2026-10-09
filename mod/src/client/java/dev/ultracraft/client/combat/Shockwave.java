@@ -15,9 +15,10 @@ import java.util.HashSet;
 import java.util.Set;
 
 /**
- * The power slam's shockwave (PhysicalShockwave): a flat disc growing out from the player's feet that sends every
- * enemy it reaches into the air, harder the longer the slam was. It does no damage, and never hurts the player.
- * Once it's at its full size it stops hitting and fades.
+ * The player's shockwave (PhysicalShockwave), from a power slam or a landing cannonball: a flat disc growing out
+ * along the ground that sends every enemy it reaches into the air, harder the longer the slam was or the faster the
+ * cannonball landed. It does no damage, and never hurts the player. Once it's at its full size it stops hitting and
+ * fades.
  */
 final class Shockwave {
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
@@ -42,14 +43,19 @@ final class Shockwave {
 	private double fadeTime;
 	private final Set<Integer> hit = new HashSet<>();
 
-	Shockwave(UltraModel model, Vec3 origin, double slamForce) {
+	/** A shockwave with {@code force} (PhysicalShockwave.force). */
+	Shockwave(UltraModel model, Vec3 origin, double force) {
 		this.model = model;
 		this.settings = model.script("physicalShockwave");
 		this.origin = origin;
 		this.scale = model.rest().sx(0);
-		double force = this.settings.get("force").getAsDouble() * slamForce * SLAM_FORCE_MULTIPLIER;
 		// DeliverDamage's force (up × force × 2) comes to a thousandth of it as speed.
 		this.push = force * 2 / 1000;
+	}
+
+	/** A power slam's: its prefab's force, times the slam's force. */
+	static Shockwave slam(UltraModel model, Vec3 origin, double slamForce) {
+		return new Shockwave(model, origin, model.script("physicalShockwave").get("force").getAsDouble() * slamForce * SLAM_FORCE_MULTIPLIER);
 	}
 
 	void update(double dt, Level level, LocalPlayer player, Hits hits) {

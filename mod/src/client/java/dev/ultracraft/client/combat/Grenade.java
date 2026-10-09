@@ -3,10 +3,11 @@ package dev.ultracraft.client.combat;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * One of the player's grenades (Grenade): a core the Core Eject throws, or a rocket. Revolver shots, coins and
- * railcannon beams set them off, and the Whiplash catches them, by the trigger sphere around each.
+ * One of the player's explosives: a core the Core Eject throws or a rocket (Grenade), or a cannonball (Cannonball).
+ * Revolver shots, coins and railcannon beams set them off, and the Whiplash catches them, by the trigger sphere
+ * around each.
  */
-abstract sealed class Grenade permits Core, Rocket {
+abstract sealed class Grenade permits Cannonball, Core, Rocket {
 	/** Blocks. */
 	Vec3 position;
 	boolean removed;

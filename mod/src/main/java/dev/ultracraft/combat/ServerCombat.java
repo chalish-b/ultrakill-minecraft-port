@@ -8,6 +8,7 @@ import dev.ultracraft.UltraPlayer;
 import dev.ultracraft.mixin.AbstractArrowAccessor;
 import dev.ultracraft.mixin.LivingEntityAccessor;
 import dev.ultracraft.net.CycleVariantPayload;
+import dev.ultracraft.net.CannonballHitPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
 import dev.ultracraft.net.HitstopPayload;
@@ -105,6 +106,7 @@ public final class ServerCombat {
 		ServerPlayNetworking.registerGlobalReceiver(ExplosionHitPayload.TYPE, (payload, context) -> onExplosionHit(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(ExplosionHurtPayload.TYPE, (payload, context) -> onExplosionHurt(context.player(), payload.damage()));
 		ServerPlayNetworking.registerGlobalReceiver(SlamHitPayload.TYPE, (payload, context) -> onSlamHit(context.player(), payload));
+		ServerPlayNetworking.registerGlobalReceiver(CannonballHitPayload.TYPE, (payload, context) -> onCannonballHit(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(MagnetPullPayload.TYPE, (payload, context) -> onMagnetPull(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(ZapHurtPayload.TYPE, (payload, context) -> onZapHurt(context.player()));
 		ServerPlayNetworking.registerGlobalReceiver(HitstopPayload.TYPE, (payload, context) -> {
@@ -130,6 +132,22 @@ public final class ServerCombat {
 		Vec3 velocity = target.getDeltaMovement();
 		damage(player, target, SLAM_DAMAGE, false, hit.position(), true, false);
 		knockBack(target, velocity, new Vec3(0, -SLAM_PUSH, 0));
+	}
+
+	/**
+	 * Cannonball.Collide on an enemy: it takes the hit, bursting if it dies (DeliverDamage's tryForExplode), and is
+	 * knocked along the cannonball's way.
+	 */
+	private static void onCannonballHit(ServerPlayer player, CannonballHitPayload hit) {
+		if (!active(player) || !(player.level().getEntity(hit.entityId()) instanceof LivingEntity target) || target == player || !target.isAlive()) {
+			return;
+		}
+		if (target.distanceToSqr(player) > EXPLOSION_REACH * EXPLOSION_REACH) {
+			return;
+		}
+		Vec3 velocity = target.getDeltaMovement();
+		damage(player, target, hit.damage(), false, hit.position(), true, false);
+		knockBack(target, velocity, hit.push());
 	}
 
 	private static void onWeaponHit(ServerPlayer player, WeaponHitPayload hit) {

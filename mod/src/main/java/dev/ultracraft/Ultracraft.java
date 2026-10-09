@@ -4,6 +4,7 @@ import dev.ultracraft.combat.BlockDamage;
 import dev.ultracraft.combat.ServerCombat;
 import dev.ultracraft.combat.ServerWhiplash;
 import dev.ultracraft.net.BlockHitPayload;
+import dev.ultracraft.net.CannonballHitPayload;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionBlocksPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
@@ -49,6 +50,7 @@ public class Ultracraft implements ModInitializer {
 		PayloadTypeRegistry.serverboundPlay().register(WhiplashPayload.TYPE, WhiplashPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(MagnetPullPayload.TYPE, MagnetPullPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(ZapHurtPayload.TYPE, ZapHurtPayload.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(CannonballHitPayload.TYPE, CannonballHitPayload.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(PunchResultPayload.TYPE, PunchResultPayload.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(WhiplashBrokenPayload.TYPE, WhiplashBrokenPayload.CODEC);
 		ServerPlayNetworking.registerGlobalReceiver(UltraStatePayload.TYPE, (payload, context) ->

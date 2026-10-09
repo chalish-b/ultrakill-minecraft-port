@@ -26,7 +26,7 @@ import java.util.Set;
 /**
  * ULTRAKILL's Explosion. Its trigger sphere grows every physics step and hits whatever it touches once, through
  * walls: enemies take damage and are knocked away (upwards too), projectiles turn friendly and fly away from it,
- * and loose objects are thrown. Its damage drops by a third once it's past half its size. At full size it turns
+ * and loose objects, cannonballs among them, are thrown. Its damage drops by a third once it's past half its size. At full size it turns
  * harmless, keeps growing at a quarter of the speed, and fades out.
  */
 final class Explosion {
@@ -174,6 +174,9 @@ final class Explosion {
 
 		/** The player's cores, which an explosion with a set direction throws that way. */
 		List<Core> cores();
+
+		/** The player's cannonballs, which it throws while they fall. */
+		List<Cannonball> cannonballs();
 	}
 
 	final Settings settings;
@@ -186,7 +189,7 @@ final class Explosion {
 	/** From a boosted projectile: it launches the player at a set speed instead. */
 	final boolean boosted;
 	private final Set<Integer> hit = new HashSet<>();
-	private final Set<Core> hitCores = new HashSet<>();
+	private final Set<Grenade> hitGrenades = new HashSet<>();
 	private double localScale;
 	private double speed;
 	private int damage;
@@ -288,10 +291,16 @@ final class Explosion {
 	/** Explosion.Collide, for everything the sphere has newly reached. */
 	private void collide(Level level, LocalPlayer player, Hits hits, double radius) {
 		for (Core core : hits.cores()) {
-			if (!core.removed && this.forceDirection != null && !this.hitCores.contains(core) && core.position.distanceTo(this.origin) <= radius + Core.RADIUS * S) {
+			if (!core.removed && this.forceDirection != null && !this.hitGrenades.contains(core) && core.position.distanceTo(this.origin) <= radius + Core.RADIUS * S) {
 				// Cores ignore explosions' pushes, but not a set direction: it sets their velocity.
-				this.hitCores.add(core);
+				this.hitGrenades.add(core);
 				core.launch(this.forceDirection.scale(100));
+			}
+		}
+		for (Cannonball ball : hits.cannonballs()) {
+			if (!ball.removed && ball.underGravity() && !this.hitGrenades.contains(ball) && ball.position.distanceTo(this.origin) <= radius + Cannonball.RADIUS * S) {
+				this.hitGrenades.add(ball);
+				ball.explosionPush(this.origin, this.forceDirection);
 			}
 		}
 		AABB area = new AABB(this.origin, this.origin).inflate(radius);

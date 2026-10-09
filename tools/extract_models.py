@@ -48,6 +48,7 @@ MODELS = {
     "railcannon_screwdriver": ("Railcannon Harpoon", "Railcannon", (0, 0, 0)),
     "railcannon_malicious": ("Railcannon Malicious", "Railcannon", (0, 0, 0)),
     "rocket_launcher_freezeframe": ("Rocket Launcher Freeze", "RocketLauncher", (0, 0, 0)),
+    "rocket_launcher_srs": ("Rocket Launcher Cannonball", "RocketLauncher", (0, 0, 0)),
     "nailgun_attractor": ("Nailgun Magnet", "Nailgun", (0, 0, 0)),
     "nailgun_overheat": ("Nailgun Overheat", "Nailgun", (0, 0, 0)),
     "nailgun_jumpstart": ("Nailgun Zapper", "Nailgun", (0, 0, 0)),
@@ -88,6 +89,7 @@ REFERENCED = {
     "slide_particle": ("NewMovement", "Player", "slideParticle"),
     "rocket": ("RocketLauncher", "Rocket Launcher Freeze", "rocket"),
     "rocket_launcher_muzzle_flash": ("RocketLauncher", "Rocket Launcher Freeze", "muzzleFlash"),
+    "cannonball": ("RocketLauncher", "Rocket Launcher Cannonball", "cannonBall"),
 }
 # FootstepSet's per-surface prefabs: model name prefix -> the list field. Each surface it lists is written as
 # <prefix>_<surface>.
@@ -102,6 +104,7 @@ NESTED = {
     "magnet_beeper": ("magnet", "TimeBomb", "beepLight"),
     "magnet_break": ("magnet", "TimeBomb", "explosion"),
     "explosion_rocket_harmless": ("rocket", "Grenade", "harmlessExplosion"),
+    "explosion_cannonball": ("cannonball", "Cannonball", "interruptionExplosion"),
 }
 
 # AnimatorControllerParameterType and AnimatorConditionMode values.
@@ -1183,6 +1186,19 @@ def export_scripts(exporter, rig, colors, placed, rects, pivots):
                     "levelUpEffect": rig.index[transform_of(grenade.levelUpEffect.deref().read()).object_reader.path_id],
                     "trail": trail_values(exporter, go),
                     **level_up_materials(exporter, grenade.levelUpEffect.deref().read()),
+                }
+            elif kind == "Cannonball":
+                tree = obj.read_typetree()
+                sphere = next(x.component.deref().read() for x in go.m_Component if x.component.deref().type.name == "SphereCollider")
+                kids = {t.m_GameObject.read().m_Name: t for t in (c.deref().read() for c in transform_of(go).m_Children)}
+                helper = kids["InterruptHelper"]
+                helper_sphere = next(x.component.deref().read() for x in helper.m_GameObject.read().m_Component
+                                     if x.component.deref().type.name == "SphereCollider")
+                scripts["cannonball"] = {
+                    **{k: tree[k] for k in ("damage", "speed", "durability", "maxBounces")},
+                    "radius": sphere.m_Radius,
+                    "helperRadius": helper_sphere.m_Radius * helper.m_LocalScale.x,
+                    "trail": trail_values(exporter, kids["Trail"].m_GameObject.read()),
                 }
             elif kind == "SpriteGetVariationColor" and active:
                 tree = obj.read_typetree()

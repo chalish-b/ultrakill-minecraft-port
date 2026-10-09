@@ -18,6 +18,7 @@ import dev.ultracraft.combat.FistType;
 import dev.ultracraft.combat.Gore;
 import dev.ultracraft.combat.ServerCombat;
 import dev.ultracraft.net.BlockHitPayload;
+import dev.ultracraft.net.CannonballHitPayload;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionBlocksPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
@@ -79,7 +80,7 @@ import java.util.function.UnaryOperator;
 
 /**
  * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the shotgun's pellets, the
- * nailgun's nails, magnets and zapper and the electricity between enemies, the railcannon's beams, the rocket launcher's rockets, the arms' punches (and boosting pellets with them) and the
+ * nailgun's nails, magnets and zapper and the electricity between enemies, the railcannon's beams, the rocket launcher's rockets and cannonballs, the arms' punches (and boosting pellets with them) and the
  * Knuckleblaster's blast, the Whiplash, explosions, weapon charges (WeaponCharges) and the hitstops after a parry
  * or a punch. Hits go to the server, which applies them.
  */
@@ -102,7 +103,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private static final double PUNCH_ACTIVE_TIME = 6 * 0.008;
 	/** The Knuckleblaster's blast goes off this far ahead of the camera, or just short of a wall (Punch.BlastCheck). */
 	private static final double BLAST_DISTANCE = 2 * S;
-	/** Coins look for cores and rockets this close to the player. */
+	/** Coins look for cores, rockets and cannonballs this close to the player. */
 	private static final double GRENADE_TARGET_RANGE = 100 * S;
 	/** TimeController.HitStop when a core or a rocket hits an enemy. */
 	private static final double GRENADE_HITSTOP = 0.05;
@@ -213,6 +214,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private final List<Pellet> pellets = new ArrayList<>();
 	private final List<Core> cores = new ArrayList<>();
 	private final List<Rocket> rockets = new ArrayList<>();
+	private final List<Cannonball> cannonballs = new ArrayList<>();
 	private final Revolver.Input input = new Revolver.Input();
 	private final RandomSource random = RandomSource.create();
 	private final Map<Shotgun.Variant, Shotgun> shotguns = new EnumMap<>(Shotgun.Variant.class);
@@ -328,6 +330,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			this.cores.clear();
 			this.rockets.forEach(Rocket::discard);
 			this.rockets.clear();
+			this.cannonballs.clear();
 			this.saws.forEach(saw -> saw.spin.stop());
 			this.saws.clear();
 			this.sawblades.forEach(sawblade -> sawblade.spin.stop());
@@ -422,6 +425,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			}
 		}
 		this.rockets.removeIf(this::rocketGone);
+		for (Cannonball ball : List.copyOf(this.cannonballs)) {
+			if (!ball.removed) {
+				ball.update(dt, minecraft.level, player, this);
+			}
+		}
+		this.cannonballs.removeIf(ball -> ball.removed);
 		updateSaws(dt, minecraft.level, player);
 		float partialTick = minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false);
 		for (Drill drill : List.copyOf(this.drills)) {
@@ -518,7 +527,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			));
 		Nailgun nailgun = nailgun(this.held);
 		FirstPersonWeapons.NailgunState nailgunDisplay = nailgun == null ? FirstPersonWeapons.NailgunState.NONE : nailgun.display();
-		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, nailgunDisplay, this.railcannon.charge(), this.rocketLauncher.freezeShare(), this);
+		FirstPersonWeapons.RocketLauncherState rocketLauncherDisplay = rocketLauncherVariant(this.held) == null
+			? FirstPersonWeapons.RocketLauncherState.NONE
+			: this.rocketLauncher.display();
+		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, nailgunDisplay, this.railcannon.charge(), rocketLauncherDisplay, this);
 	}
 
 	private void updateHeld(FirstPersonWeapons.@Nullable Weapon weapon) {
@@ -673,8 +685,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			case "ActiveStart" -> {
 				Minecraft minecraft = Minecraft.getInstance();
 				LocalPlayer player = minecraft.player;
-				// A boosted pellet, or a chainsaw or sawblade punched on, takes the punch: it hits nothing else.
-				boolean taken = player != null && (this.arm == FistType.STANDARD ? boostPellet(player) || punchSaws(player) : detachSaw(player));
+				// A boosted pellet, a punched cannonball, or a chainsaw or sawblade punched on, takes the punch: it hits nothing else.
+				boolean taken = player != null && (this.arm == FistType.STANDARD
+					? boostPellet(player) || punchCannonball(player) || punchSaws(player)
+					: smashCannonball(player) || detachSaw(player));
 				if (!taken) {
 					ClientPlayNetworking.send(new PunchPayload(this.arm));
 				}
@@ -752,6 +766,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		if (stack.is(UltraItems.ROCKET_LAUNCHER_FREEZEFRAME)) {
 			return FirstPersonWeapons.Weapon.ROCKET_LAUNCHER_FREEZEFRAME;
 		}
+		if (stack.is(UltraItems.ROCKET_LAUNCHER_SRS)) {
+			return FirstPersonWeapons.Weapon.ROCKET_LAUNCHER_SRS;
+		}
 		return stack.is(UltraItems.SHOTGUN_SAWED_ON) ? FirstPersonWeapons.Weapon.SHOTGUN_SAWED_ON : null;
 	}
 
@@ -776,12 +793,20 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	}
 
 	private static RocketLauncher.@Nullable Variant rocketLauncherVariant(FirstPersonWeapons.@Nullable Weapon weapon) {
-		return weapon == FirstPersonWeapons.Weapon.ROCKET_LAUNCHER_FREEZEFRAME ? RocketLauncher.Variant.FREEZEFRAME : null;
+		if (weapon == null) {
+			return null;
+		}
+		return switch (weapon) {
+			case ROCKET_LAUNCHER_FREEZEFRAME -> RocketLauncher.Variant.FREEZEFRAME;
+			case ROCKET_LAUNCHER_SRS -> RocketLauncher.Variant.SRS;
+			default -> null;
+		};
 	}
 
 	private static FirstPersonWeapons.Weapon weapon(RocketLauncher.Variant variant) {
 		return switch (variant) {
 			case FREEZEFRAME -> FirstPersonWeapons.Weapon.ROCKET_LAUNCHER_FREEZEFRAME;
+			case SRS -> FirstPersonWeapons.Weapon.ROCKET_LAUNCHER_SRS;
 		};
 	}
 
@@ -1725,7 +1750,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	 * @param chainHits the enemies coins have already sent this beam at
 	 */
 	private void electricBeam(Level level, LocalPlayer player, Vec3 from, Vec3 direction, Vec3 drawFrom, float damage, float coinPower, Set<Integer> chainHits) {
-		Tunnel tunnel = tunnel(level, player, from, direction, damage * RAIL_HITS);
+		Tunnel tunnel = Tunnel.bore(level, player, from, direction, RANGE, damage * RAIL_HITS, RAIL_RADIUS, RAIL_TUNNEL_DEPTH);
 		List<Hitscan.Hit> hits = new ArrayList<>(tunnel.blocks());
 		for (Hitscan.Hit hit : Hitscan.sweep(level, player, from, tunnel.end(), RAIL_RADIUS, this.coins, grenades())) {
 			for (int i = 0; i < (hit.kind() == Hitscan.Kind.ENTITY ? RAIL_HITS : 1); i++) {
@@ -1746,66 +1771,6 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		RailShot shot = new RailShot(hits, this.effects.heldBeam(drawFrom, end, Effects.BeamStyle.RAILCANNON), damage, coinPower, chainHits);
 		this.railShots.add(shot);
 		advance(shot, level, player);
-	}
-
-	/**
-	 * The blocks a railcannon beam bores through and the one that stops it, nearest first, and where it ends. Along
-	 * its middle it goes through each block its damage breaks, up to {@link #RAIL_TUNNEL_DEPTH} past the first
-	 * block it meets, and stops at the next. Over that depth, every block within its radius is hit too.
-	 */
-	private record Tunnel(List<Hitscan.Hit> blocks, Vec3 end) {
-	}
-
-	private static Tunnel tunnel(Level level, LocalPlayer player, Vec3 from, Vec3 direction, float damage) {
-		Vec3 to = from.add(direction.scale(RANGE));
-		Set<BlockPos> bored = new HashSet<>();
-		List<Hitscan.Hit> blocks = new ArrayList<>();
-		double first = -1;
-		Vec3 end = to;
-		while (true) {
-			BlockHitResult hit = Hitscan.clip(level, player, from, to, bored);
-			if (hit.getType() == HitResult.Type.MISS) {
-				break;
-			}
-			double distance = hit.getLocation().distanceTo(from);
-			if (first < 0) {
-				first = distance;
-			}
-			BlockPos pos = hit.getBlockPos();
-			if (distance - first <= RAIL_TUNNEL_DEPTH && BlockDamage.breaksInOneHit(level, pos, damage)) {
-				bored.add(pos);
-				blocks.add(new Hitscan.Hit(Hitscan.Kind.BLOCK, hit.getLocation(), distance, null, null, null, false, null, pos));
-				continue;
-			}
-			end = hit.getLocation();
-			bored.add(pos);
-			blocks.add(new Hitscan.Hit(Hitscan.Kind.BLOCK, end, distance, null, null, null, false, hit.getDirection(), pos));
-			break;
-		}
-		if (first >= 0) {
-			Vec3 start = from.add(direction.scale(first));
-			Vec3 last = from.add(direction.scale(Math.min(end.distanceTo(from), first + RAIL_TUNNEL_DEPTH)));
-			AABB area = new AABB(start, last).inflate(RAIL_RADIUS);
-			for (BlockPos pos : BlockPos.betweenClosed(BlockPos.containing(area.minX, area.minY, area.minZ), BlockPos.containing(area.maxX, area.maxY, area.maxZ))) {
-				if (bored.contains(pos)) {
-					continue;
-				}
-				BlockState state = level.getBlockState(pos);
-				if (state.isAir()) {
-					continue;
-				}
-				VoxelShape shape = state.getCollisionShape(level, pos);
-				if (shape.isEmpty()) {
-					continue;
-				}
-				AABB box = shape.bounds().move(pos);
-				if (nearSegment(box, start, last, RAIL_RADIUS)) {
-					Vec3 center = box.getCenter();
-					blocks.add(new Hitscan.Hit(Hitscan.Kind.BLOCK, center, center.subtract(from).dot(direction), null, null, null, false, null, pos.immutable()));
-				}
-			}
-		}
-		return new Tunnel(blocks, end);
 	}
 
 	/** A railcannon beam working its way through its hits (RevolverBeam.PiercingShotCheck). */
@@ -1917,7 +1882,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			}
 			case GRENADE -> {
 				grenadeNuke(hit.grenade());
-				maliciousExplosion(hit.position(), back, added, true);
+				maliciousExplosion(hit.position(), back, added, !(hit.grenade() instanceof Cannonball));
 			}
 			case BLOCK -> {
 				this.effects.impact(level, hit.position());
@@ -1938,7 +1903,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	/**
 	 * RevolverBeam's Malicious railcannon beam on a grenade: the parry flash, and it goes off twice as big,
-	 * ultraboosting: a core as a super explosion, a rocket as a big explosion.
+	 * ultraboosting: a core as a super explosion, a rocket as a big explosion. A cannonball explodes as it does for
+	 * any shot.
 	 */
 	private void grenadeNuke(Grenade grenade) {
 		if (grenade.removed) {
@@ -1946,6 +1912,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 		parryFlash();
 		ClientPlayNetworking.send(new HitstopPayload((int)(PARRY_HITSTOP * 1000)));
+		if (grenade instanceof Cannonball ball) {
+			explodeCannonball(ball);
+			return;
+		}
 		if (grenade instanceof Rocket rocket) {
 			explodeRocket(rocket, true, false, false, NUKE_SIZE, true, false);
 			return;
@@ -2397,14 +2367,14 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		UltraMovement.PowerSlam powerSlam = movement.takePowerSlam();
 		UltraModel model = UltraModel.get(SHOCKWAVE);
 		if (powerSlam != null && model != null) {
-			this.shockwaves.add(new Shockwave(model, powerSlam.position(), powerSlam.slamForce()));
+			this.shockwaves.add(Shockwave.slam(model, powerSlam.position(), powerSlam.slamForce()));
 			this.sounds.play(SHOCKWAVE, 1, 1);
 			movement.enviroGibs(SLAM_GIBS);
 		}
 	}
 
 	/** Whether a box comes within {@code radius} of the segment from {@code from} to {@code to}. */
-	private static boolean nearSegment(AABB box, Vec3 from, Vec3 to, double radius) {
+	static boolean nearSegment(AABB box, Vec3 from, Vec3 to, double radius) {
 		int samples = Math.max(1, (int)Math.ceil(from.distanceTo(to) / (0.25 * S)));
 		for (int i = 0; i <= samples; i++) {
 			Vec3 point = from.lerp(to, i / (double)samples);
@@ -3028,6 +2998,32 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private static final String EXPLOSION_ROCKET_HARMLESS = "explosion_rocket_harmless";
 	/** The rocket launcher's muzzle flash ("RocketLauncherFire"). */
 	private static final String ROCKET_LAUNCHER_MUZZLE_FLASH = "rocket_launcher_muzzle_flash";
+	/** "Explosion Big": a cannonball's interruptionExplosion, where a shot set it off. */
+	private static final String EXPLOSION_CANNONBALL = "explosion_cannonball";
+	/** RocketLauncher.ShootCannonball: the cannonball's speed uncharged, and fully charged (units a second). */
+	private static final double CANNONBALL_MIN_SPEED = 15;
+	private static final double CANNONBALL_MAX_SPEED = 150;
+	/** A cannonball's breakEffect shakes the camera this much (its CameraShake). */
+	private static final double CANNONBALL_BREAK_SHAKE = 0.75;
+	/** Punches find a cannonball along the aim with a box this much wider than a ray (half its size). */
+	private static final double CANNONBALL_PUNCH_BOX = 0.3 * S;
+	/**
+	 * A cannonball the Feedbacker launches toward something within this far of it starts where the aim meets an
+	 * enemy or a wall within this far of the camera.
+	 */
+	private static final double CANNONBALL_PUNCH_NEAR = 10 * S;
+	private static final double CANNONBALL_PUNCH_PLACE = 5 * S;
+	/**
+	 * The Knuckleblaster's smash of a cannonball: its box's half width, half height and half depth, how far along the
+	 * aim it's swept, the push it gives the enemies in it (DeliverDamage's force of 50000, units a second) and how
+	 * fast it launches the player for each unit down they look.
+	 */
+	private static final double SMASH_HALF_WIDTH = 5 * S;
+	private static final double SMASH_HALF_HEIGHT = 1 * S;
+	private static final double SMASH_HALF_DEPTH = 1 * S;
+	private static final double SMASH_REACH = 20 * S;
+	private static final double SMASH_PUSH = 50;
+	private static final double SMASH_LAUNCH = 42;
 	/** A core or rocket the Malicious railcannon shoots goes off this many times as big. */
 	private static final double NUKE_SIZE = 2;
 	/** RevolverBeam sweeps a single-target beam, as the Malicious railcannon's is, with a sphere this big. */
@@ -3041,6 +3037,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private static final float OVERPUMP_BLOCK_POWER = 3;
 	private static final float SUPER_BLOCK_POWER = 4;
 	private static final float MALICIOUS_BLOCK_POWER = 3.5F;
+	private static final float CANNONBALL_BLOCK_POWER = 4;
 	/** An explosion's RandomPitch: up to a quarter either way. */
 	private static final float[] EXPLOSION_PITCH = {0.75F, 1.25F};
 
@@ -3141,7 +3138,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		explode(EXPLOSION, core.position, null, false, CORE_BLOCK_POWER);
 	}
 
-	/** RevolverBeam on a core or rocket: the parry flash, and it goes off. */
+	/** RevolverBeam on a core, rocket or cannonball: the parry flash, and it goes off. */
 	private void grenadeShot(Grenade grenade) {
 		if (grenade.removed) {
 			return;
@@ -3151,9 +3148,16 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		shotExplode(grenade);
 	}
 
-	/** A revolver shot (or a coin's) on a core or rocket: a core makes a super explosion, a rocket a big explosion. */
+	/**
+	 * A revolver shot (or a coin's) on a core, rocket or cannonball: a core makes a super explosion, a rocket a big
+	 * explosion, and a cannonball its interruption explosion.
+	 */
 	private void shotExplode(Grenade grenade) {
 		if (grenade.removed) {
+			return;
+		}
+		if (grenade instanceof Cannonball ball) {
+			explodeCannonball(ball);
 			return;
 		}
 		if (grenade instanceof Rocket rocket) {
@@ -3169,11 +3173,17 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		return this.cores;
 	}
 
-	/** The player's cores and rockets. */
+	@Override
+	public List<Cannonball> cannonballs() {
+		return this.cannonballs;
+	}
+
+	/** The player's cores, rockets and cannonballs. */
 	@Override
 	public List<Grenade> grenades() {
 		List<Grenade> grenades = new ArrayList<>(this.cores);
 		grenades.addAll(this.rockets);
+		grenades.addAll(this.cannonballs);
 		return grenades;
 	}
 
@@ -3200,7 +3210,34 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			return;
 		}
 		this.sounds.play("rocket_launcher_shoot", 1, this.sounds.randomPitch(0.9F, 1.1F));
-		FirstPersonWeapons.Weapon weapon = weapon(variant);
+		rocketLauncherFired(weapon(variant));
+		Vector3f up = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation()).transform(new Vector3f(0, 1, 0));
+		this.rockets.add(new Rocket(movement.eyePosition(), player.getLookAngle(), new Vec3(up.x, up.y, up.z), this.sounds));
+		movement.shake(0.75);
+	}
+
+	/**
+	 * RocketLauncher.ShootCannonball: the shot, lower (0.6 to 0.8), the muzzle flash, the Fire animation and a camera
+	 * shake; the cannonball comes out a unit ahead of the camera, along the aim at 15 units a second up to 150 at
+	 * full charge, keeping what's left uncharged of the player's own velocity.
+	 */
+	@Override
+	public void shootCannonball(RocketLauncher.Variant variant, double charge) {
+		LocalPlayer player = Minecraft.getInstance().player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (player == null || movement == null) {
+			return;
+		}
+		this.sounds.play("rocket_launcher_shoot", 1, this.sounds.randomPitch(0.6F, 0.8F));
+		rocketLauncherFired(weapon(variant));
+		Vec3 look = player.getLookAngle();
+		Vec3 velocity = movement.velocity().scale(1 - charge).add(look.scale(Math.max(CANNONBALL_MIN_SPEED, charge * CANNONBALL_MAX_SPEED)));
+		this.cannonballs.add(new Cannonball(movement.eyePosition().add(look.scale(S)), velocity, look));
+		movement.shake(0.75);
+	}
+
+	/** The rocket launcher's muzzle flash at its barrel, and its Fire animation. */
+	private void rocketLauncherFired(FirstPersonWeapons.Weapon weapon) {
 		FirstPersonWeapons.Placement point = FirstPersonWeapons.INSTANCE.rocketLauncherShootPoint(weapon);
 		UltraModel flash = UltraModel.get(ROCKET_LAUNCHER_MUZZLE_FLASH);
 		if (point != null && flash != null) {
@@ -3210,9 +3247,6 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		if (animator != null) {
 			animator.setTrigger("Fire");
 		}
-		Vector3f up = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation()).transform(new Vector3f(0, 1, 0));
-		this.rockets.add(new Rocket(movement.eyePosition(), player.getLookAngle(), new Vec3(up.x, up.y, up.z), this.sounds));
-		movement.shake(0.75);
 	}
 
 	/**
@@ -3280,6 +3314,159 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	@Override
 	public List<Magnet> magnets() {
 		return this.magnets;
+	}
+
+	// ---- cannonball -----------------------------------------------------------------------------
+
+	/** Cannonball.Explode: its interruption explosion, and it breaks. */
+	private void explodeCannonball(Cannonball ball) {
+		if (ball.removed) {
+			return;
+		}
+		explode(EXPLOSION_CANNONBALL, ball.position, null, false, CANNONBALL_BLOCK_POWER);
+		ball.breakApart(this);
+	}
+
+	@Override
+	public void cannonballHitEnemy(LivingEntity enemy, float damage, Vec3 push, Vec3 at) {
+		ClientPlayNetworking.send(new CannonballHitPayload(enemy.getId(), damage, push, at));
+		Level level = Minecraft.getInstance().level;
+		if (level != null) {
+			Gore gore = Gore.of(false, damage, false);
+			this.effects.blood(level, at, gore);
+			this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
+		}
+	}
+
+	@Override
+	public void cannonballHitBlock(BlockPos block, float damage) {
+		if (damage > 0) {
+			hitBlock(block, damage);
+		}
+	}
+
+	/** Cannonball.Bounce: a camera shake, and its bounce sound from where it is. */
+	@Override
+	public void cannonballBounced(Cannonball ball) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (movement != null) {
+			movement.shake(1);
+		}
+		this.sounds.once().update("cannonball_bounce", 1, 1, ball.position);
+	}
+
+	/** Its groundHitShockwave, with the slam's sound from where it landed. */
+	@Override
+	public void cannonballLanded(Cannonball ball, Vec3 at, double force) {
+		UltraModel model = UltraModel.get(SHOCKWAVE);
+		if (model != null) {
+			this.shockwaves.add(new Shockwave(model, at, force));
+		}
+		this.sounds.once().update("cannonball_shockwave", 1, 1, at);
+	}
+
+	/** Its breakEffect: its sound (its RandomPitch: 0.75, a tenth either way) and its dust's, and a camera shake. */
+	@Override
+	public void cannonballBroke(Cannonball ball) {
+		this.sounds.once().update("cannonball_break", 1, this.sounds.randomPitch(0.65F, 0.85F), ball.position);
+		this.sounds.once().update("cannonball_break_dust", 1, 1, ball.position);
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (movement != null) {
+			movement.shake(CANNONBALL_BREAK_SHAKE);
+		}
+	}
+
+	/**
+	 * The cannonball a punch reaches through its ParryHelper sphere: one the camera is within {@code touch} of, or else
+	 * the first along the aim within the punch's reach (a ray, then a 0.3 unit box).
+	 */
+	private @Nullable Cannonball cannonballInReach(Vec3 eye, Vec3 look, double touch) {
+		double radius = Cannonball.HIT_RADIUS * S;
+		Cannonball nearest = null;
+		double best = Double.MAX_VALUE;
+		for (Cannonball ball : this.cannonballs) {
+			if (ball.removed || ball.hooked) {
+				continue;
+			}
+			if (ball.position.distanceTo(eye) <= radius + touch) {
+				return ball;
+			}
+			OptionalDouble along = Hitscan.sphereEntry(eye, look, PUNCH_REACH, ball.position, radius + CANNONBALL_PUNCH_BOX);
+			if (along.isPresent() && along.getAsDouble() < best) {
+				best = along.getAsDouble();
+				nearest = ball;
+			}
+		}
+		return nearest;
+	}
+
+	/**
+	 * Punch.TryParryProjectile on a cannonball, for the Feedbacker: the parry flash and the hook, and it's launched
+	 * toward what the player aims at. Aimed at something within 10 units of it, it starts where the aim meets an
+	 * enemy or a wall within 5 units of the camera (or 5 units ahead), flying along the aim.
+	 */
+	private boolean punchCannonball(LocalPlayer player) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		Level level = Minecraft.getInstance().level;
+		if (movement == null || level == null || this.cannonballs.isEmpty()) {
+			return false;
+		}
+		Vec3 eye = movement.eyePosition();
+		Vec3 look = player.getLookAngle();
+		Cannonball ball = cannonballInReach(eye, look, SAW_PUNCH_TOUCH);
+		if (ball == null || !ball.punchable()) {
+			return false;
+		}
+		Animator arm = FirstPersonWeapons.INSTANCE.armAnimator();
+		if (arm != null) {
+			arm.play("Hook", 0.065);
+		}
+		parryFlash();
+		ClientPlayNetworking.send(new HitstopPayload((int)(PARRY_HITSTOP * 1000)));
+		Vec3 target = parryLookTarget(level, player, eye, look);
+		if (ball.position.distanceTo(target) < CANNONBALL_PUNCH_NEAR) {
+			ball.punched(Hitscan.cast(level, player, eye, look, CANNONBALL_PUNCH_PLACE, List.of()).getFirst().position(), look);
+		} else {
+			ball.punched(ball.position, target.subtract(ball.position).normalize());
+		}
+		return true;
+	}
+
+	/**
+	 * Punch.ActiveFrame on a cannonball, for the Knuckleblaster: a short hitstop, a shake and the parry flash; the
+	 * cannonball breaks, every enemy in a box 10 units wide and 2 high reaching 20 units along the aim is knocked
+	 * away along it, unhurt, and the player is launched up as far as they look down (down as far as they look up).
+	 */
+	private boolean smashCannonball(LocalPlayer player) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		Level level = Minecraft.getInstance().level;
+		if (movement == null || level == null || this.cannonballs.isEmpty()) {
+			return false;
+		}
+		Vec3 eye = movement.eyePosition();
+		Vec3 look = player.getLookAngle();
+		Cannonball ball = cannonballInReach(eye, look, SAW_HEAVY_PUNCH_TOUCH);
+		if (ball == null) {
+			return false;
+		}
+		this.hitstopLeft = Math.max(this.hitstopLeft, PUNCH_HITSTOP);
+		ClientPlayNetworking.send(new HitstopPayload((int)(PUNCH_HITSTOP * 1000)));
+		movement.shake(0.5 * this.arm.screenShakeMultiplier);
+		parryFlash();
+		ClientPlayNetworking.send(new HitstopPayload((int)(PARRY_HITSTOP * 1000)));
+		ball.breakApart(this);
+		Vec3 up = Whiplash.upVector(player);
+		OrientedBox swept = new OrientedBox(eye.add(look.scale(SMASH_REACH / 2)), look.cross(up).normalize(), up, look,
+			SMASH_HALF_WIDTH, SMASH_HALF_HEIGHT, SMASH_REACH / 2 + SMASH_HALF_DEPTH);
+		AABB area = new AABB(eye, eye.add(look.scale(SMASH_REACH))).inflate(SMASH_HALF_WIDTH + SMASH_HALF_DEPTH);
+		for (LivingEntity enemy : level.getEntitiesOfClass(LivingEntity.class, area, e -> e != player && e.isAlive() && !e.isSpectator())) {
+			if (swept.intersects(enemy.getBoundingBox())) {
+				ClientPlayNetworking.send(new ExplosionHitPayload(enemy.getId(), 0, look.scale(SMASH_PUSH)));
+			}
+		}
+		Vec3 velocity = movement.velocity();
+		movement.setVelocity(new Vec3(velocity.x, -look.y * SMASH_LAUNCH, velocity.z));
+		return true;
 	}
 
 	/**
@@ -3416,6 +3603,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	public void render(LevelRenderContext context) {
 		this.effects.render(context, this.coins, this.shells, this.pellets, this.cores);
 		this.effects.renderRockets(context, this.rockets);
+		this.effects.renderCannonballs(context, this.cannonballs);
 		this.effects.renderSaws(context, this.saws, this.sawblades, chainStart());
 		this.effects.renderDrills(context, this.drills);
 		this.effects.renderNails(context, this.nails);

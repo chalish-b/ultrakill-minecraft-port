@@ -437,6 +437,37 @@ def rocket_launcher(env, x):
     x.add_source("explosion_rocket_harmless", next(audio_sources(rocket.harmlessExplosion.deref().read())))
     ride = next(audio_sources(rocket.playerRideSound.deref().read()))
     x.add_source("rocket_ride", ride)
+    cannonball(env, x)
+
+
+def cannonball(env, x):
+    """The S.R.S. Cannon's charge hum (its pitch is set by the code), and its cannonball's sounds from where it is: its
+    bounce off an enemy, its break (the break effect's own pitch is set by its RandomPitch, its dust's on its
+    AudioSource) and its ground shockwave (the slam's). Its interruption explosion is heard everywhere, as the other
+    explosions are (its pitch is set by its RandomPitch)."""
+    launcher = find_class(env, "RocketLauncher", "Rocket Launcher Cannonball", variation=1)
+    charge = source_ref(launcher.chargeSound)
+    x.add_clip("rocket_cannonball_charge", charge.m_audioClip, charge.m_Volume)
+    ball_go = launcher.cannonBall.deref().read().m_GameObject.read()
+    ball = next(s for s in components(ball_go, "MonoBehaviour") if hasattr(s, "groundHitShockwave"))
+
+    def placed(event, go, source, pitch=1.0):
+        x.add_clip(event, source.m_audioClip, source.m_Volume, pitch, mono=True)
+        tree = next(t for t in audio_sources_tree(go) if t["m_audioClip"]["m_PathID"] == source.m_audioClip.path_id)
+        x.events[event]["sounds"][0]["attenuation_distance"] = round(tree["MaxDistance"] * BLOCKS_PER_UNIT)
+
+    bounce_go = ball.bounceSound.deref().read().m_GameObject.read()
+    placed("cannonball_bounce", bounce_go, next(components(bounce_go, "AudioSource")))
+    break_go = ball.breakEffect.deref().read()
+    placed("cannonball_break", break_go, next(components(break_go, "AudioSource")))
+    dust = named_source(break_go, "Dust")
+    placed("cannonball_break_dust", break_go, dust, dust.m_Pitch)
+    shockwave_go = ball.groundHitShockwave.deref().read()
+    shockwave = next(m for m in components(shockwave_go, "MonoBehaviour") if hasattr(m, "soundEffect"))
+    sound_go = shockwave.soundEffect.deref().read()
+    placed("cannonball_shockwave", sound_go, next(components(sound_go, "AudioSource")), next(components(sound_go, "AudioSource")).m_Pitch)
+    explosion = next(audio_sources(ball.interruptionExplosion.deref().read()))
+    x.add_clip("explosion_cannonball", explosion.m_audioClip, explosion.m_Volume)
 
 
 def jumpstart(env, x):
