@@ -15,15 +15,21 @@ import dev.ultracraft.client.render.UltraModel;
 import dev.ultracraft.client.render.animation.Animator;
 import dev.ultracraft.combat.BlockDamage;
 import dev.ultracraft.combat.FistType;
+import dev.ultracraft.combat.Gasoline;
 import dev.ultracraft.combat.Gore;
 import dev.ultracraft.combat.ServerCombat;
 import dev.ultracraft.net.BlockHitPayload;
+import dev.ultracraft.net.BurnPayload;
 import dev.ultracraft.net.CannonballHitPayload;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionBlocksPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
+import dev.ultracraft.net.GasolineExplosionPayload;
+import dev.ultracraft.net.GasolineSoakPayload;
+import dev.ultracraft.net.GasolineStainPayload;
 import dev.ultracraft.net.HitstopPayload;
+import dev.ultracraft.net.IgnitePayload;
 import dev.ultracraft.net.MagnetPullPayload;
 import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
@@ -85,7 +91,7 @@ import java.util.function.UnaryOperator;
  * or a punch. Hits go to the server, which applies them.
  */
 public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Nailgun.Actions, Railcannon.Actions, RocketLauncher.Actions, Pellet.Hits, Core.Hits,
-	Rocket.Hits, FirstPersonWeapons.Events, Explosion.Hits, SawZone.Hits, ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits, Drill.Hits, Nail.Hits,
+	Rocket.Hits, FirstPersonWeapons.Events, Explosion.Hits, SawZone.Hits, ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits, Drill.Hits, Nail.Hits, GasolineProjectile.Hits,
 	Magnet.Hits, Zapper.Hits, Conductor.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
@@ -215,6 +221,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private final List<Core> cores = new ArrayList<>();
 	private final List<Rocket> rockets = new ArrayList<>();
 	private final List<Cannonball> cannonballs = new ArrayList<>();
+	/** The Firestarter's drops of gasoline, and the stains they leave. */
+	private final List<GasolineProjectile> gasoline = new ArrayList<>();
+	private final GasolineStains stains = new GasolineStains();
 	private final Revolver.Input input = new Revolver.Input();
 	private final RandomSource random = RandomSource.create();
 	private final Map<Shotgun.Variant, Shotgun> shotguns = new EnumMap<>(Shotgun.Variant.class);
@@ -305,6 +314,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	public static void init() {
 		ClientPlayNetworking.registerGlobalReceiver(PunchResultPayload.TYPE, (payload, context) -> INSTANCE.onPunchResult(payload));
+		ClientPlayNetworking.registerGlobalReceiver(GasolineExplosionPayload.TYPE, (payload, context) -> INSTANCE.gasolineExploded(payload.at()));
 		ClientPlayNetworking.registerGlobalReceiver(WhiplashBrokenPayload.TYPE, (payload, context) -> {
 			Minecraft minecraft = Minecraft.getInstance();
 			if (minecraft.level != null && minecraft.player != null) {
@@ -331,6 +341,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			this.rockets.forEach(Rocket::discard);
 			this.rockets.clear();
 			this.cannonballs.clear();
+			this.gasoline.clear();
 			this.saws.forEach(saw -> saw.spin.stop());
 			this.saws.clear();
 			this.sawblades.forEach(sawblade -> sawblade.spin.stop());
@@ -431,6 +442,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			}
 		}
 		this.cannonballs.removeIf(ball -> ball.removed);
+		for (GasolineProjectile drop : List.copyOf(this.gasoline)) {
+			drop.update(dt, minecraft.level, player, this);
+		}
+		this.gasoline.removeIf(drop -> drop.removed);
 		updateSaws(dt, minecraft.level, player);
 		float partialTick = minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false);
 		for (Drill drill : List.copyOf(this.drills)) {
@@ -769,6 +784,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		if (stack.is(UltraItems.ROCKET_LAUNCHER_SRS)) {
 			return FirstPersonWeapons.Weapon.ROCKET_LAUNCHER_SRS;
 		}
+		if (stack.is(UltraItems.ROCKET_LAUNCHER_FIRESTARTER)) {
+			return FirstPersonWeapons.Weapon.ROCKET_LAUNCHER_FIRESTARTER;
+		}
 		return stack.is(UltraItems.SHOTGUN_SAWED_ON) ? FirstPersonWeapons.Weapon.SHOTGUN_SAWED_ON : null;
 	}
 
@@ -799,6 +817,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		return switch (weapon) {
 			case ROCKET_LAUNCHER_FREEZEFRAME -> RocketLauncher.Variant.FREEZEFRAME;
 			case ROCKET_LAUNCHER_SRS -> RocketLauncher.Variant.SRS;
+			case ROCKET_LAUNCHER_FIRESTARTER -> RocketLauncher.Variant.FIRESTARTER;
 			default -> null;
 		};
 	}
@@ -807,6 +826,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		return switch (variant) {
 			case FREEZEFRAME -> FirstPersonWeapons.Weapon.ROCKET_LAUNCHER_FREEZEFRAME;
 			case SRS -> FirstPersonWeapons.Weapon.ROCKET_LAUNCHER_SRS;
+			case FIRESTARTER -> FirstPersonWeapons.Weapon.ROCKET_LAUNCHER_FIRESTARTER;
 		};
 	}
 
@@ -1402,6 +1422,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			return;
 		}
 		this.sounds.once().update("nail_hit_enemy", NAIL_HIT_VOLUME, this.sounds.randomPitch(0.9F, 1.1F), nail.position);
+		if (nail.heated) {
+			ClientPlayNetworking.send(new BurnPayload(enemy.getId()));
+		}
 		Nail.Burst burst = nail.burst != null && !nail.burst.over() ? nail.burst : null;
 		if (burst == null) {
 			nailHit(level, enemy, nail.damage, nail.position, WeaponHitPayload.Kind.NAIL);
@@ -1921,6 +1944,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			return;
 		}
 		grenade.removed = true;
+		grenadeIgnites(grenade.position, true);
 		explode(EXPLOSION_SUPER, grenade.position, null, false, SUPER_BLOCK_POWER, settings -> settings.ultraboosted(NUKE_SIZE));
 	}
 
@@ -2154,6 +2178,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			this.effects.blood(minecraft.level, enemy.getBoundingBox().getCenter(), gore);
 			this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
 		}
+	}
+
+	@Override
+	public void burn(LivingEntity enemy) {
+		ClientPlayNetworking.send(new BurnPayload(enemy.getId()));
 	}
 
 	@Override
@@ -3000,6 +3029,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private static final String ROCKET_LAUNCHER_MUZZLE_FLASH = "rocket_launcher_muzzle_flash";
 	/** "Explosion Big": a cannonball's interruptionExplosion, where a shot set it off. */
 	private static final String EXPLOSION_CANNONBALL = "explosion_cannonball";
+	/** RocketLauncher.ShootNapalm: a drop's speed (units a second). */
+	private static final double NAPALM_SPEED = 150;
 	/** RocketLauncher.ShootCannonball: the cannonball's speed uncharged, and fully charged (units a second). */
 	private static final double CANNONBALL_MIN_SPEED = 15;
 	private static final double CANNONBALL_MAX_SPEED = 150;
@@ -3057,12 +3088,20 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	/** Like {@link #explode(String, Vec3, Vec3, boolean, float, UnaryOperator)}, its sound's pitch picked from {@code pitch}'s range. */
 	private void explode(String prefab, Vec3 at, @Nullable Vec3 facing, boolean boosted, float blockPower, UnaryOperator<Explosion.Settings> setUp, float[] pitch) {
+		explode(prefab, at, facing, boosted, blockPower, setUp, pitch, true);
+	}
+
+	/** Like the others; an explosion that {@code ignites} lights the gasoline around it (its ExplosionController). */
+	private void explode(String prefab, Vec3 at, @Nullable Vec3 facing, boolean boosted, float blockPower, UnaryOperator<Explosion.Settings> setUp, float[] pitch, boolean ignites) {
 		UltraModel model = UltraModel.get(prefab);
 		if (model == null) {
 			return;
 		}
 		if (blockPower > 0) {
 			ClientPlayNetworking.send(new ExplosionBlocksPayload(at, blockPower));
+		}
+		if (ignites) {
+			ClientPlayNetworking.send(new IgnitePayload(at, Gasoline.CHECK_SIZE));
 		}
 		Quaternionf rotation = facing == null ? new Quaternionf()
 			: new Quaternionf().lookAlong((float)facing.x, (float)facing.y, (float)facing.z, 0, 1, 0).conjugate();
@@ -3135,6 +3174,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			this.hitstopLeft = Math.max(this.hitstopLeft, GRENADE_HITSTOP);
 			ClientPlayNetworking.send(new HitstopPayload((int)(GRENADE_HITSTOP * 1000)));
 		}
+		grenadeIgnites(core.position, false);
 		explode(EXPLOSION, core.position, null, false, CORE_BLOCK_POWER);
 	}
 
@@ -3165,6 +3205,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			return;
 		}
 		grenade.removed = true;
+		grenadeIgnites(grenade.position, true);
 		explode(EXPLOSION_SUPER, grenade.position, null, false, SUPER_BLOCK_POWER);
 	}
 
@@ -3199,7 +3240,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	/**
 	 * RocketLauncher.Shoot: the shot (its pitch a tenth either way), the muzzle flash at the barrel, the Fire
-	 * animation, a rocket out of the camera along the aim, and a camera shake.
+	 * animation (unless the Firestarter is spraying), a rocket out of the camera along the aim, and a camera shake.
 	 */
 	@Override
 	public void shootRocket(RocketLauncher.Variant variant) {
@@ -3210,7 +3251,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			return;
 		}
 		this.sounds.play("rocket_launcher_shoot", 1, this.sounds.randomPitch(0.9F, 1.1F));
-		rocketLauncherFired(weapon(variant));
+		rocketLauncherFired(weapon(variant), !this.rocketLauncher.spraying());
 		Vector3f up = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation()).transform(new Vector3f(0, 1, 0));
 		this.rockets.add(new Rocket(movement.eyePosition(), player.getLookAngle(), new Vec3(up.x, up.y, up.z), this.sounds));
 		movement.shake(0.75);
@@ -3229,24 +3270,79 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			return;
 		}
 		this.sounds.play("rocket_launcher_shoot", 1, this.sounds.randomPitch(0.6F, 0.8F));
-		rocketLauncherFired(weapon(variant));
+		rocketLauncherFired(weapon(variant), true);
 		Vec3 look = player.getLookAngle();
 		Vec3 velocity = movement.velocity().scale(1 - charge).add(look.scale(Math.max(CANNONBALL_MIN_SPEED, charge * CANNONBALL_MAX_SPEED)));
 		this.cannonballs.add(new Cannonball(movement.eyePosition().add(look.scale(S)), velocity, look));
 		movement.shake(0.75);
 	}
 
-	/** The rocket launcher's muzzle flash at its barrel, and its Fire animation. */
-	private void rocketLauncherFired(FirstPersonWeapons.Weapon weapon) {
+	/** The rocket launcher's muzzle flash at its barrel, and its Fire animation if {@code animate}. */
+	private void rocketLauncherFired(FirstPersonWeapons.Weapon weapon, boolean animate) {
 		FirstPersonWeapons.Placement point = FirstPersonWeapons.INSTANCE.rocketLauncherShootPoint(weapon);
 		UltraModel flash = UltraModel.get(ROCKET_LAUNCHER_MUZZLE_FLASH);
 		if (point != null && flash != null) {
 			this.effects.explosion(new ExplosionLook(flash, List.of(), point.position(), point.rotation()));
 		}
 		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon);
-		if (animator != null) {
+		if (animator != null && animate) {
 			animator.setTrigger("Fire");
 		}
+	}
+
+	/**
+	 * RocketLauncher.ShootNapalm: the Spray animation, and a drop of gasoline a unit ahead of the camera, turned up
+	 * to a degree about each axis from the aim, at 150 units a second; a small camera shake.
+	 */
+	@Override
+	public void shootNapalm(RocketLauncher.Variant variant) {
+		Minecraft minecraft = Minecraft.getInstance();
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		UltraModel model = UltraModel.get(GasolineProjectile.MODEL);
+		if (minecraft.player == null || movement == null || model == null) {
+			return;
+		}
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon(variant));
+		if (animator != null) {
+			animator.setTrigger("Spray");
+		}
+		Quaternionf rotation = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation())
+			.rotateXYZ((float)Math.toRadians(spread(1)), (float)Math.toRadians(spread(1)), (float)Math.toRadians(spread(1)));
+		Vector3f forward = rotation.transform(new Vector3f(0, 0, -1));
+		Vec3 look = minecraft.player.getLookAngle();
+		Vec3 direction = new Vec3(forward.x, forward.y, forward.z);
+		this.gasoline.add(new GasolineProjectile(model.script("gasolineProjectile"), movement.eyePosition().add(look.scale(S)), direction.scale(NAPALM_SPEED)));
+		movement.shake(0.15);
+	}
+
+	/** GasolineProjectile on an enemy: it soaks the drop up. */
+	@Override
+	public void gasolineEnemy(GasolineProjectile drop, LivingEntity enemy) {
+		ClientPlayNetworking.send(new GasolineSoakPayload(enemy.getId()));
+	}
+
+	/** GasolineProjectile on a wall: a stain where it landed. */
+	@Override
+	public void gasolineWall(GasolineProjectile drop, BlockHitResult wall) {
+		ClientPlayNetworking.send(new GasolineStainPayload(wall.getLocation(), wall.getDirection()));
+	}
+
+	/** VoxelProxy.ExplodeAndDestroy: gasoline lit in water explodes, lighting no more gasoline itself. */
+	private void gasolineExploded(Vec3 at) {
+		explode(EXPLOSION, at, null, false, CORE_BLOCK_POWER, UnaryOperator.identity(), EXPLOSION_PITCH, false);
+	}
+
+	/**
+	 * Grenade.Explode's StainVoxelManager.TryIgniteAt: a core or rocket lights the gasoline around it, further for a
+	 * super explosion.
+	 *
+	 * @return whether there was gasoline to light, which makes a rocket's harmless explosion a real one
+	 */
+	private boolean grenadeIgnites(Vec3 at, boolean superExplosion) {
+		int checkSize = superExplosion ? Gasoline.SUPER_CHECK_SIZE : Gasoline.CHECK_SIZE;
+		ClientPlayNetworking.send(new IgnitePayload(at, checkSize));
+		ClientLevel level = Minecraft.getInstance().level;
+		return level != null && Gasoline.present(level, at, checkSize);
 	}
 
 	/**
@@ -3280,6 +3376,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	 */
 	private void explodeRocket(Rocket rocket, boolean big, boolean harmless, boolean superExplosion, double sizeMultiplier, boolean ultrabooster, boolean fup) {
 		rocket.removed = true;
+		if (grenadeIgnites(rocket.position, superExplosion)) {
+			harmless = false;
+		}
 		String prefab = harmless ? EXPLOSION_ROCKET_HARMLESS : superExplosion ? EXPLOSION_SUPER : EXPLOSION;
 		double size = superExplosion && big ? 2.5 : big || rocket.frozen ? 1.5 : 1;
 		float blockPower = harmless ? 0 : superExplosion ? SUPER_BLOCK_POWER : CORE_BLOCK_POWER;
@@ -3530,6 +3629,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			return;
 		}
 		grenade.removed = true;
+		grenadeIgnites(grenade.position, false);
 		explode(EXPLOSION, grenade.position, null, false, CORE_BLOCK_POWER);
 	}
 
@@ -3604,6 +3704,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		this.effects.render(context, this.coins, this.shells, this.pellets, this.cores);
 		this.effects.renderRockets(context, this.rockets);
 		this.effects.renderCannonballs(context, this.cannonballs);
+		this.effects.renderGasoline(context, this.gasoline);
+		this.stains.render(context);
 		this.effects.renderSaws(context, this.saws, this.sawblades, chainStart());
 		this.effects.renderDrills(context, this.drills);
 		this.effects.renderNails(context, this.nails);

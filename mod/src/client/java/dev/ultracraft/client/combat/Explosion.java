@@ -63,11 +63,12 @@ final class Explosion {
 	 *     player, or 0
 	 * @param ultrabooster whether it launches a nearby player twice as hard, and hurts them a set amount
 	 * @param fup whether it's a rocket the Whiplash brought to the player (isFup): it launches them at a set speed
+	 * @param ignite whether it sets alight the enemies it hits that can burn
 	 */
 	record Settings(
 		double scale, double startScale, double colliderRadius, double speed, double maxSize, int damage,
 		double enemyDamageMultiplier, double pushForceMultiplier, boolean halved, Subjects canHit,
-		boolean rocketExplosion, int playerDamageOverride, double touchShake, boolean ultrabooster, boolean fup
+		boolean rocketExplosion, int playerDamageOverride, double touchShake, boolean ultrabooster, boolean fup, boolean ignite
 	) {
 		/** An Explosion on an extracted prefab, scaled by the bones above it. */
 		static Settings of(UltraModel model, JsonObject explosion) {
@@ -87,7 +88,7 @@ final class Explosion {
 				explosion.get("maxSize").getAsDouble(), explosion.get("damage").getAsInt(), explosion.get("enemyDamageMultiplier").getAsDouble(),
 				explosion.get("pushForceMultiplier").getAsDouble(), explosion.get("halved").getAsInt() != 0,
 				Subjects.values()[explosion.get("canHit").getAsInt()], explosion.has("rocketExplosion") && explosion.get("rocketExplosion").getAsInt() != 0,
-				-1, touchShake, false, false
+				-1, touchShake, false, false, explosion.has("ignite") && explosion.get("ignite").getAsInt() != 0
 			);
 		}
 
@@ -95,7 +96,7 @@ final class Explosion {
 		Settings overridden(double sizeMultiplier, int damage, double enemyDamageMultiplier) {
 			return new Settings(
 				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize * sizeMultiplier, damage, enemyDamageMultiplier,
-				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster, this.fup
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster, this.fup, this.ignite
 			);
 		}
 
@@ -103,7 +104,7 @@ final class Explosion {
 		Settings ultraboosted(double sizeMultiplier) {
 			return new Settings(
 				this.scale, this.startScale, this.colliderRadius, this.speed * sizeMultiplier, this.maxSize * sizeMultiplier, this.damage, this.enemyDamageMultiplier,
-				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, true, this.fup
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, true, this.fup, this.ignite
 			);
 		}
 
@@ -117,7 +118,7 @@ final class Explosion {
 			}
 			return new Settings(
 				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize, this.damage + Math.round(added * 20), this.enemyDamageMultiplier,
-				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.damage, this.touchShake, this.ultrabooster, this.fup
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.damage, this.touchShake, this.ultrabooster, this.fup, this.ignite
 			);
 		}
 
@@ -125,7 +126,7 @@ final class Explosion {
 		Settings scaled(double multiplier) {
 			return new Settings(
 				this.scale, this.startScale, this.colliderRadius, this.speed * multiplier, this.maxSize * multiplier, this.damage, this.enemyDamageMultiplier,
-				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster, this.fup
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster, this.fup, this.ignite
 			);
 		}
 
@@ -133,14 +134,14 @@ final class Explosion {
 		Settings fupped() {
 			return new Settings(
 				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize, this.damage, this.enemyDamageMultiplier,
-				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster, true
+				this.pushForceMultiplier, this.halved, this.canHit, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster, true, this.ignite
 			);
 		}
 
 		Settings enemiesOnly() {
 			return new Settings(
 				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize, this.damage, this.enemyDamageMultiplier,
-				this.pushForceMultiplier, this.halved, Subjects.ENEMIES_ONLY, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster, this.fup
+				this.pushForceMultiplier, this.halved, Subjects.ENEMIES_ONLY, this.rocketExplosion, this.playerDamageOverride, this.touchShake, this.ultrabooster, this.fup, this.ignite
 			);
 		}
 	}
@@ -168,6 +169,9 @@ final class Explosion {
 		void object(Entity object, Vec3 velocity);
 
 		void player(Explosion explosion);
+
+		/** An enemy it hit is set alight, if it can burn. */
+		void burn(LivingEntity enemy);
 
 		/** The sphere reached the player, whether or not it can hit them. */
 		void touched(Explosion explosion);
@@ -332,6 +336,9 @@ final class Explosion {
 				}
 				// DeliverDamage's force (direction × 50000 × pushForceMultiplier) comes to this much speed.
 				hits.enemy(enemy, (float)(this.damage / 10.0 * this.settings.enemyDamageMultiplier), direction.scale(50 * this.settings.pushForceMultiplier));
+				if (this.settings.ignite) {
+					hits.burn(enemy);
+				}
 			} else if (entity instanceof Projectile projectile) {
 				this.hit.add(entity.getId());
 				Vec3 direction = projectile.getOwner() == player && this.forceDirection != null ? this.forceDirection : away;

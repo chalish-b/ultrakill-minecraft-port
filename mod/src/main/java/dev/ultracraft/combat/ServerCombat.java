@@ -7,17 +7,22 @@ import dev.ultracraft.UltraItems;
 import dev.ultracraft.UltraPlayer;
 import dev.ultracraft.mixin.AbstractArrowAccessor;
 import dev.ultracraft.mixin.LivingEntityAccessor;
+import dev.ultracraft.net.BurnPayload;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.CannonballHitPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
+import dev.ultracraft.net.GasolineSoakPayload;
+import dev.ultracraft.net.GasolineStainPayload;
 import dev.ultracraft.net.HitstopPayload;
+import dev.ultracraft.net.IgnitePayload;
 import dev.ultracraft.net.MagnetPullPayload;
 import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.SlamHitPayload;
 import dev.ultracraft.net.WeaponHitPayload;
 import dev.ultracraft.net.ZapHurtPayload;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.core.registries.Registries;
@@ -45,6 +50,8 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
+
+import org.jspecify.annotations.Nullable;
 
 import java.util.HashMap;
 import java.util.Iterator;
@@ -114,7 +121,40 @@ public final class ServerCombat {
 				hitstop(context.player().level().getServer(), Math.clamp(payload.millis(), 0, PARRY_HITSTOP_MILLIS));
 			}
 		});
+		ServerPlayNetworking.registerGlobalReceiver(GasolineStainPayload.TYPE, (payload, context) -> {
+			if (active(context.player())) {
+				Gasoline.stain(context.player(), payload.position(), payload.face());
+			}
+		});
+		ServerPlayNetworking.registerGlobalReceiver(GasolineSoakPayload.TYPE, (payload, context) -> {
+			if (reachable(context.player(), payload.entityId()) instanceof LivingEntity target) {
+				Gasoline.soak(target);
+			}
+		});
+		ServerPlayNetworking.registerGlobalReceiver(BurnPayload.TYPE, (payload, context) -> {
+			Entity target = reachable(context.player(), payload.entityId());
+			if (target != null) {
+				Gasoline.burn(target);
+			}
+		});
+		ServerPlayNetworking.registerGlobalReceiver(IgnitePayload.TYPE, (payload, context) -> {
+			ServerPlayer player = context.player();
+			if (active(player) && payload.at().distanceToSqr(player.position()) < EXPLOSION_REACH * EXPLOSION_REACH) {
+				Gasoline.ignite(player.level(), payload.at(), Math.clamp(payload.checkSize(), 1, Gasoline.SUPER_CHECK_SIZE));
+			}
+		});
 		ServerTickEvents.END_SERVER_TICK.register(ServerCombat::tick);
+		ServerTickEvents.END_LEVEL_TICK.register(Gasoline::tick);
+		ServerLifecycleEvents.SERVER_STOPPED.register(server -> Gasoline.clear());
+	}
+
+	/** The entity the active player's weapon reached, or null if the hit doesn't count. */
+	private static @Nullable Entity reachable(ServerPlayer player, int entityId) {
+		Entity entity = player.level().getEntity(entityId);
+		if (!active(player) || entity == null || entity == player || !entity.isAlive() || entity.distanceToSqr(player) > EXPLOSION_REACH * EXPLOSION_REACH) {
+			return null;
+		}
+		return entity;
 	}
 
 	static boolean active(ServerPlayer player) {

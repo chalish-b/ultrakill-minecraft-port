@@ -74,7 +74,8 @@ public final class FirstPersonWeapons {
 		RAILCANNON_SCREWDRIVER("railcannon_screwdriver"),
 		RAILCANNON_MALICIOUS("railcannon_malicious"),
 		ROCKET_LAUNCHER_FREEZEFRAME("rocket_launcher_freezeframe"),
-		ROCKET_LAUNCHER_SRS("rocket_launcher_srs");
+		ROCKET_LAUNCHER_SRS("rocket_launcher_srs"),
+		ROCKET_LAUNCHER_FIRESTARTER("rocket_launcher_firestarter");
 
 		final String model;
 
@@ -145,15 +146,18 @@ public final class FirstPersonWeapons {
 	 * @param jitter how far the gun shakes from its place, in units
 	 */
 	/**
-	 * What the rocket launcher's dial shows (RocketLauncher.Update), and how the gun shakes.
+	 * What the rocket launcher's dial shows (RocketLauncher.Update), how the gun shakes, and the Firestarter's spray.
 	 *
 	 * @param timer how full the dial is, 0 to 1
 	 * @param reddening how far its colors have turned red, 0 to 1
 	 * @param dimmed whether its colors show at half their opacity
+	 * @param gray whether its colors are gray instead of the variant's
 	 * @param jitter how far the gun shakes from its place, in units
+	 * @param napalmFlash the scale of the Firestarter's muzzle flash
+	 * @param spraying whether the Firestarter sprays, its muzzle flash giving off particles
 	 */
-	public record RocketLauncherState(double timer, double reddening, boolean dimmed, Vec3 jitter) {
-		public static final RocketLauncherState NONE = new RocketLauncherState(1, 0, false, Vec3.ZERO);
+	public record RocketLauncherState(double timer, double reddening, boolean dimmed, boolean gray, Vec3 jitter, double napalmFlash, boolean spraying) {
+		public static final RocketLauncherState NONE = new RocketLauncherState(1, 0, false, false, Vec3.ZERO, 0, false);
 	}
 
 	public record ShotgunState(double heat, double meter, MeterTint tint, double reddening, Vec3 jitter, SawState saw) {
@@ -271,6 +275,9 @@ public final class FirstPersonWeapons {
 		final List<ViewmodelParticles> fullChargeParticles = new ArrayList<>();
 		/** A nailgun's heat steam. */
 		final List<ViewmodelParticles> steamParticles = new ArrayList<>();
+		/** The Firestarter's spray, off its muzzle flash, and its particles' start color. */
+		final List<ViewmodelParticles> napalmParticles = new ArrayList<>();
+		final List<float[]> napalmParticleColors = new ArrayList<>();
 
 		Viewmodel(UltraModel model, Animator animator) {
 			this.model = model;
@@ -297,6 +304,17 @@ public final class FirstPersonWeapons {
 			if (model.script("nailgun") != null) {
 				for (JsonElement system : model.particles()) {
 					this.steamParticles.add(new ViewmodelParticles(system.getAsJsonObject(), model.rest().sx(system.getAsJsonObject().get("bone").getAsInt())));
+				}
+			}
+			JsonObject rocketLauncher = model.script("rocketLauncher");
+			if (rocketLauncher != null && rocketLauncher.has("napalmMuzzleFlashParticles")) {
+				int napalm = rocketLauncher.get("napalmMuzzleFlashParticles").getAsInt();
+				for (JsonElement element : model.particles()) {
+					JsonObject system = element.getAsJsonObject();
+					if (system.get("bone").getAsInt() == napalm) {
+						this.napalmParticles.add(new ViewmodelParticles(system, model.rest().sx(napalm)));
+						this.napalmParticleColors.add(color(system.getAsJsonObject("color").getAsJsonArray("color")));
+					}
 				}
 			}
 		}
@@ -341,6 +359,8 @@ public final class FirstPersonWeapons {
 	private double railcannonCharge = 5;
 	/** What the rocket launcher's dial shows. */
 	private RocketLauncherState rocketLauncher = RocketLauncherState.NONE;
+	/** How long the Firestarter's muzzle flash sprite has been spinning (seconds). */
+	private double napalmSpin;
 	/** The HUD camera's field of view (degrees), and whether a zoom narrows it (CameraController.Zoom). */
 	private double weaponFov = WEAPON_FOV;
 	private boolean zooming;
@@ -660,6 +680,7 @@ public final class FirstPersonWeapons {
 						system.stop();
 					}
 				}
+				napalmFlash(dt, weapon, rocketLauncher);
 				shakeSaw(dt, weapon, shotgun.saw().broken());
 				if (weapon.cylinder != null && weapon.cylinder.update(dt, state.cylinderSpin(), weapon.pose)) {
 					events.cylinderClicked();
@@ -686,6 +707,32 @@ public final class FirstPersonWeapons {
 			if (RevolverCylinder.angle(this.armRotation, identity) == 0) {
 				this.returnToOrigRot = false;
 			}
+		}
+	}
+
+	/**
+	 * The Firestarter's muzzle flash at its scale, its sprite spinning (Spin), and its particles coming off it while
+	 * it sprays.
+	 */
+	private void napalmFlash(double dt, Viewmodel weapon, RocketLauncherState state) {
+		JsonObject script = weapon.model.script("rocketLauncher");
+		if (script == null || !script.has("napalmMuzzleFlash")) {
+			return;
+		}
+		float scale = (float)state.napalmFlash();
+		weapon.pose.setScale(script.get("napalmMuzzleFlash").getAsInt(), scale, scale, scale);
+		this.napalmSpin += dt;
+		for (JsonElement element : weapon.model.scripts("spins")) {
+			JsonObject spin = element.getAsJsonObject();
+			int bone = spin.get("bone").getAsInt();
+			JsonArray axis = spin.getAsJsonArray("axis");
+			Vector3f direction = new Vector3f(axis.get(0).getAsFloat(), axis.get(1).getAsFloat(), axis.get(2).getAsFloat()).normalize();
+			Quaternionf rotation = new Quaternionf(weapon.model.rest().qx(bone), weapon.model.rest().qy(bone), weapon.model.rest().qz(bone), weapon.model.rest().qw(bone))
+				.rotateAxis((float)Math.toRadians(spin.get("speed").getAsDouble() * this.napalmSpin % 360), direction);
+			weapon.pose.setRotation(bone, rotation.x, rotation.y, rotation.z, rotation.w);
+		}
+		for (ViewmodelParticles system : weapon.napalmParticles) {
+			system.update(dt, state.spraying());
 		}
 	}
 
@@ -999,6 +1046,9 @@ public final class FirstPersonWeapons {
 		float[] base = variationColor(script);
 		float red = (float)this.rocketLauncher.reddening();
 		float[] variation = {base[0] + (1 - base[0]) * red, base[1] * (1 - red), base[2] * (1 - red)};
+		if (this.rocketLauncher.gray()) {
+			variation = GRAY;
+		}
 		float opacity = this.rocketLauncher.dimmed() ? 0.5F : 1;
 		float timer = (float)Math.clamp(this.rocketLauncher.timer(), 0, 1);
 		JsonObject arm = script.getAsJsonObject("timerArm");
@@ -1018,6 +1068,15 @@ public final class FirstPersonWeapons {
 				Matrix4f placed = within(arm.getAsJsonArray("images"), c, i) ? turned : matrix;
 				ModelOverlays.image(poseStack, collector, RenderTypes.text(image.texture()), placed, image, color, fill, i);
 			}
+		}
+		if (script.has("napalmMuzzleFlash") && this.rocketLauncher.napalmFlash() > 0) {
+			for (UltraModel.Sprite sprite : weapon.model.sprites()) {
+				ModelOverlays.sprite(poseStack, collector, RenderTypes.text(sprite.texture()), world[sprite.bone()], sprite.rect(), sprite.color());
+			}
+		}
+		for (int i = 0; i < weapon.napalmParticles.size(); i++) {
+			ViewmodelParticles system = weapon.napalmParticles.get(i);
+			system.submit(poseStack, collector, world[system.bone], weapon.napalmParticleColors.get(i));
 		}
 		poseStack.popPose();
 	}

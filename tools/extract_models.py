@@ -10,7 +10,8 @@ the bones (and bind poses) each vertex follows. Models with an Animator also car
 transitions, parameters) and clips (curves and events), for the mod to play. Everything is in Unity's space:
 ULTRAKILL units, x right, y up, z forward; the mod flips z when drawing. Writes
 assets/ultracraft/viewmodels/<name>.json and the textures they use under textures/viewmodel/, plus each
-weapon's HUD icon, tinted with its variant's color, as textures/item/<name>.png.
+weapon's HUD icon, tinted with its variant's color, as textures/item/<name>.png, and the gasoline stain's splats as
+textures/gasoline/stain_<index>.png.
 """
 import argparse
 import json
@@ -49,6 +50,7 @@ MODELS = {
     "railcannon_malicious": ("Railcannon Malicious", "Railcannon", (0, 0, 0)),
     "rocket_launcher_freezeframe": ("Rocket Launcher Freeze", "RocketLauncher", (0, 0, 0)),
     "rocket_launcher_srs": ("Rocket Launcher Cannonball", "RocketLauncher", (0, 0, 0)),
+    "rocket_launcher_firestarter": ("Rocket Launcher Napalm", "RocketLauncher", (0, 0, 0)),
     "nailgun_attractor": ("Nailgun Magnet", "Nailgun", (0, 0, 0)),
     "nailgun_overheat": ("Nailgun Overheat", "Nailgun", (0, 0, 0)),
     "nailgun_jumpstart": ("Nailgun Zapper", "Nailgun", (0, 0, 0)),
@@ -90,6 +92,7 @@ REFERENCED = {
     "rocket": ("RocketLauncher", "Rocket Launcher Freeze", "rocket"),
     "rocket_launcher_muzzle_flash": ("RocketLauncher", "Rocket Launcher Freeze", "muzzleFlash"),
     "cannonball": ("RocketLauncher", "Rocket Launcher Cannonball", "cannonBall"),
+    "gasoline_projectile": ("RocketLauncher", "Rocket Launcher Napalm", "napalmProjectile"),
 }
 # FootstepSet's per-surface prefabs: model name prefix -> the list field. Each surface it lists is written as
 # <prefix>_<surface>.
@@ -1169,9 +1172,17 @@ def export_scripts(exporter, rig, colors, placed, rects, pivots):
                     "rateOfFire": tree["rateOfFire"],
                     "shootPoint": rig.index[launcher.shootPoint.path_id],
                     "timerMeter": list(placed[launcher.timerMeter.path_id]),
-                    "variationColorables": [list(placed[i.path_id]) for i in launcher.variationColorables],
+                    # The Firestarter's dial hides two of its quarter markers.
+                    "variationColorables": [list(placed[i.path_id]) for i in launcher.variationColorables if i.path_id in placed],
                     "timerArm": {**placed_under(arm, placed), "pivot": list(pivots[arm.object_reader.path_id])},
                 }
+                if tree["variation"] == 2:
+                    flash = launcher.napalmMuzzleFlashTransform.deref().read()
+                    particles = launcher.napalmMuzzleFlashParticles.deref().read().m_GameObject.read()
+                    scripts["rocketLauncher"].update({
+                        "napalmMuzzleFlash": rig.index[flash.object_reader.path_id],
+                        "napalmMuzzleFlashParticles": rig.index[transform_of(particles).object_reader.path_id],
+                    })
             elif kind == "Grenade" and obj.read_typetree()["rocket"]:
                 grenade = obj.read()
                 tree = obj.read_typetree()
@@ -1200,6 +1211,23 @@ def export_scripts(exporter, rig, colors, placed, rects, pivots):
                     "helperRadius": helper_sphere.m_Radius * helper.m_LocalScale.x,
                     "trail": trail_values(exporter, kids["Trail"].m_GameObject.read()),
                 }
+            elif kind == "GasolineProjectile":
+                # Sizes in units, with the projectile's own scale: its trigger's radius, and its ball's (a sphere mesh
+                # in its untextured gasoline material, whose color is the trail's). The stain it leaves is a square
+                # quad: its side, with the stain's scale.
+                scale = transform_of(go).m_LocalScale.x
+                sphere = next(x.component.deref().read() for x in go.m_Component if x.component.deref().type.name == "SphereCollider")
+                ball = transform_of(go).m_Children[0].deref().read()
+                mesh_filter = next(x.component.deref().read() for x in ball.m_GameObject.read().m_Component if x.component.deref().type.name == "MeshFilter")
+                extent = mesh_filter.m_Mesh.deref().read().m_LocalAABB.m_Extent
+                stain = obj.read().stain.deref().read()
+                stain_go = stain.m_GameObject.read()
+                stain_mesh = next(x.component.deref().read() for x in stain_go.m_Component if x.component.deref().type.name == "MeshFilter")
+                stain_extent = stain_mesh.m_Mesh.deref().read().m_LocalAABB.m_Extent
+                scripts["gasolineProjectile"] = {"radius": sphere.m_Radius * scale,
+                                                 "ballRadius": max(extent.x, extent.y, extent.z) * ball.m_LocalScale.x * scale,
+                                                 "stainSize": 2 * stain_extent.x * transform_of(stain_go).m_LocalScale.x,
+                                                 "trail": trail_values(exporter, go)}
             elif kind == "SpriteGetVariationColor" and active:
                 tree = obj.read_typetree()
                 scripts.setdefault("spriteVariationColors", []).append({
@@ -1721,6 +1749,27 @@ def export_icon(root_go, model, colors):
     tinted.save(path)
 
 
+# A gasoline stain is this bright in the middle, for the edges' color to show a little lighter.
+STAIN_INTERIOR = 0.65
+
+
+def export_gasoline_stains(env):
+    """The gasoline stain's splats (the cells of its material's splatter atlas), each as a texture to tint with the
+    stain's color: its alpha is the splat's, and it darkens from the splat's edges inwards by its thickness (the
+    atlas's green), as textures/gasoline/stain_<index>.png."""
+    from PIL import Image
+    material = next(obj.read() for obj in env.objects if obj.type.name == "Material" and obj.read().m_Name == "Gasolinestain_ProceduralInstancing")
+    atlas = next(v.m_Texture.deref().read() for k, v in material.m_SavedProperties.m_TexEnvs if k == "_SplatterAtlas").image.convert("RGBA")
+    thickness = np.array(atlas, dtype=float)[..., 1] / 255
+    shade = np.round((1 - (1 - STAIN_INTERIOR) * thickness) * 255).astype(np.uint8)
+    pixels = np.dstack([shade, shade, shade, np.array(atlas)[..., 3]])
+    side = atlas.height
+    folder = OUT / "textures" / "gasoline"
+    folder.mkdir(parents=True, exist_ok=True)
+    for index in range(atlas.width // side):
+        Image.fromarray(pixels[:, index * side:(index + 1) * side], "RGBA").save(folder / f"stain_{index}.png")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--preview", type=Path, help="also render previews of each model and its clips into this folder")
@@ -1732,7 +1781,7 @@ def main():
     if missing:
         sys.exit(f"models not found: {sorted(missing)}")
 
-    for folder in ("viewmodels", "textures/viewmodel", "textures/item", "font"):
+    for folder in ("viewmodels", "textures/viewmodel", "textures/item", "textures/gasoline", "font"):
         if (OUT / folder).exists():
             shutil.rmtree(OUT / folder)
     (OUT / "viewmodels").mkdir(parents=True)
@@ -1753,6 +1802,7 @@ def main():
               f"scripts {sorted(model['scripts'])}, clips {clips}")
         if args.preview:
             preview(name, model, args.preview)
+    export_gasoline_stains(env)
     print(f"{len(exporter.textures)} textures -> {OUT.relative_to(REPO)}")
 
 

@@ -12,13 +12,15 @@ import net.minecraft.world.phys.Vec3;
  * again unfreezes them; frozen, the freeze runs down in real time and the clock ticks, and with no rockets left
  * it soon unfreezes by itself. Unfrozen, it refills at half that speed, its windup sounding at each quarter. Fire2
  * on the S.R.S. Cannon, once its charge is full, charges a cannonball for up to a second, humming higher and shaking
- * the gun, and lets it go when released; the charge then refills over 8 seconds. It decides when to fire;
- * {@link ClientCombat} does the firing.
+ * the gun, and lets it go when released; the charge then refills over 8 seconds. Fire2 on the Firestarter sprays
+ * gasoline while it's held and there's fuel, starting with at least a quarter; the fuel refills over 8 seconds, all
+ * the while. It decides when to fire; {@link ClientCombat} does the firing.
  */
 final class RocketLauncher {
 	enum Variant {
 		FREEZEFRAME,
-		SRS
+		SRS,
+		FIRESTARTER
 	}
 
 	interface Actions {
@@ -27,6 +29,9 @@ final class RocketLauncher {
 
 		/** RocketLauncher.ShootCannonball, charged this far (0 to 1). */
 		void shootCannonball(Variant variant, double charge);
+
+		/** RocketLauncher.ShootNapalm: a drop of gasoline. */
+		void shootNapalm(Variant variant);
 	}
 
 	/** RocketLauncher.rateOfFire: the cooldown a shot sets. */
@@ -52,6 +57,19 @@ final class RocketLauncher {
 	private static final float CHARGE_HUM_PITCH = 0.5F;
 	/** Charging, the gun shakes by up to this share of the charge, in units, along each axis. */
 	private static final double CHARGE_JITTER = 0.01;
+	/** WeaponCharges.rocketNapalmFuel refills at this much a second; spraying starts with at least a quarter. */
+	private static final double NAPALM_REFILL = 0.125;
+	private static final double NAPALM_MIN_FUEL = 0.25;
+	/** RocketLauncher.ShootNapalm: each drop takes this much fuel, and the next follows this long after. */
+	private static final double NAPALM_FUEL_PER_SHOT = 0.015;
+	private static final double NAPALM_SHOT_COOLDOWN = 0.02;
+	/** Time.fixedDeltaTime: FixedUpdate sprays the drops. */
+	private static final double STEP = 0.008;
+	/** Spraying can't start within this long of a rocket being fired. */
+	private static final double NAPALM_START_COOLDOWN = 0.5;
+	/** The spray's muzzle flash: its scale while spraying, shrinking at this much a second after. */
+	private static final double NAPALM_FLASH_SCALE = 3;
+	private static final double NAPALM_FLASH_SHRINK = 9;
 	/** For a moment after the gun is drawn, alt fire held from before doesn't count. */
 	private static final double EQUIP_GRACE = 0.25;
 	private static final double FRESH_PRESS = 0.025;
@@ -73,6 +91,16 @@ final class RocketLauncher {
 	private double cannonballCharge = 1;
 	/** RocketLauncher.cbCharge: the cannonball being charged, 0 to 1. */
 	private double cbCharge;
+	/** WeaponCharges.rocketNapalmFuel, 0 to 1, and the Firestarter's dial when its windup was last checked. */
+	private double napalmFuel = 1;
+	private double lastKnownNapalm = 1;
+	/** RocketLauncher.firingNapalm, napalmProjectileCooldown, and the napalm muzzle flash's scale. */
+	private boolean firingNapalm;
+	private double napalmCooldown;
+	private double napalmFlash;
+	private double stepAccumulator;
+	private final UltraSounds.Loop spray;
+	private float sprayPitch = 1;
 	private Vec3 jitter = Vec3.ZERO;
 	private final UltraSounds.Loop chargeHum;
 	private final RandomSource random = RandomSource.create();
@@ -87,6 +115,7 @@ final class RocketLauncher {
 		this.sounds = sounds;
 		this.ticker = sounds.loop();
 		this.chargeHum = sounds.loop();
+		this.spray = sounds.loop();
 	}
 
 	/** Whether the rockets out are frozen (WeaponCharges.rocketFrozen). */
@@ -94,18 +123,28 @@ final class RocketLauncher {
 		return this.frozen;
 	}
 
+	/** Whether the Firestarter is spraying: the Fire animation doesn't play for a rocket fired meanwhile. */
+	boolean spraying() {
+		return this.firingNapalm;
+	}
+
 	/**
 	 * What the held variant's dial shows (RocketLauncher.Update): the Freezeframe's freeze; the S.R.S.'s charge, or the
-	 * cannonball being charged, its colors turning red with it, and dimmed while the charge refills.
+	 * cannonball being charged, its colors turning red with it, and dimmed while the charge refills; the Firestarter's
+	 * fuel, gray while there's too little to start spraying, and its spray's muzzle flash.
 	 */
 	FirstPersonWeapons.RocketLauncherState display() {
 		if (this.held == Variant.FREEZEFRAME) {
-			return new FirstPersonWeapons.RocketLauncherState(this.freezeTime / FREEZE_TIME, 0, false, Vec3.ZERO);
+			return new FirstPersonWeapons.RocketLauncherState(this.freezeTime / FREEZE_TIME, 0, false, false, Vec3.ZERO, 0, false);
+		}
+		if (this.held == Variant.FIRESTARTER) {
+			boolean gray = !this.firingNapalm && this.napalmFuel < NAPALM_MIN_FUEL;
+			return new FirstPersonWeapons.RocketLauncherState(this.napalmFuel, 0, false, gray, Vec3.ZERO, this.napalmFlash, this.firingNapalm);
 		}
 		if (this.cbCharge > 0) {
-			return new FirstPersonWeapons.RocketLauncherState(this.cbCharge, this.cbCharge, false, this.jitter);
+			return new FirstPersonWeapons.RocketLauncherState(this.cbCharge, this.cbCharge, false, false, this.jitter, 0, false);
 		}
-		return new FirstPersonWeapons.RocketLauncherState(this.cannonballCharge, 0, this.cannonballCharge < 1, Vec3.ZERO);
+		return new FirstPersonWeapons.RocketLauncherState(this.cannonballCharge, 0, this.cannonballCharge < 1, false, Vec3.ZERO, 0, false);
 	}
 
 	/**
@@ -129,6 +168,7 @@ final class RocketLauncher {
 		}
 		this.freezeTime = this.frozen ? Math.max(this.freezeTime - dt, 0) : Math.min(this.freezeTime + dt * FREEZE_REFILL, FREEZE_TIME);
 		this.cannonballCharge = Math.min(this.cannonballCharge + dt * CANNONBALL_REFILL, 1);
+		this.napalmFuel = Math.min(this.napalmFuel + dt * NAPALM_REFILL, 1);
 		if (this.frozen && this.freezeTime <= 0) {
 			unfreeze();
 		}
@@ -152,10 +192,16 @@ final class RocketLauncher {
 		this.sinceEquipped = 0;
 	}
 
-	/** Put away (RocketLauncher.OnDisable): its cooldown goes on counting down, and a cannonball being charged is dropped. */
+	/**
+	 * Put away (RocketLauncher.OnDisable): its cooldown goes on counting down, a cannonball being charged is dropped,
+	 * and the spray stops.
+	 */
 	void holster() {
 		this.equipped = false;
 		stopCharging();
+		this.firingNapalm = false;
+		this.spray.stop();
+		this.napalmFlash = 0;
 	}
 
 	/** RocketLauncher.Update, for the held rocket launcher. */
@@ -179,6 +225,8 @@ final class RocketLauncher {
 			if (windup(share, this.lastKnownFreeze / FREEZE_TIME, WINDUP_PITCH, 1)) {
 				this.lastKnownFreeze = this.freezeTime;
 			}
+		} else if (this.held == Variant.FIRESTARTER) {
+			napalm(dt, input);
 		} else {
 			if (windup(this.cannonballCharge, this.lastKnownCannonball, CANNONBALL_WINDUP_PITCH, this.cannonballCharge < 1 ? 0.5F : 1)) {
 				this.lastKnownCannonball = this.cannonballCharge;
@@ -203,6 +251,59 @@ final class RocketLauncher {
 			// A rocket fired while a cannonball charges drops the charge.
 			stopCharging();
 			actions.shootRocket(this.held);
+		}
+		if (this.held == Variant.FIRESTARTER) {
+			this.stepAccumulator += dt;
+			while (this.stepAccumulator >= STEP) {
+				this.stepAccumulator -= STEP;
+				fixedUpdate(actions);
+			}
+		}
+	}
+
+	/**
+	 * The Firestarter's part of RocketLauncher.Update: Fire2 held sprays while there's fuel, starting only with at
+	 * least a quarter and not within half a second of a rocket. Starting, the muzzle flash shows and the spray starts
+	 * sounding; stopping, it stops with its own sound. Pressed with too little fuel, it clicks. The muzzle flash
+	 * shrinks away once it stops, and the windup sounds as the fuel passes a quarter.
+	 */
+	private void napalm(double dt, Revolver.Input input) {
+		if (input.fire2Held && this.napalmFuel > 0 && (this.firingNapalm || this.napalmFuel >= NAPALM_MIN_FUEL)) {
+			if (this.cooldown < NAPALM_START_COOLDOWN) {
+				if (!this.firingNapalm) {
+					this.napalmFlash = NAPALM_FLASH_SCALE;
+					this.sprayPitch = this.sounds.randomPitch(0.9F, 1.1F);
+					this.sounds.play("rocket_napalm_start", 1, this.sounds.randomPitch(0.9F, 1.1F));
+				}
+				this.firingNapalm = true;
+			}
+		} else if (this.firingNapalm) {
+			this.firingNapalm = false;
+			this.spray.stop();
+			this.sounds.play("rocket_napalm_stop", 1, this.sounds.randomPitch(0.9F, 1.1F));
+		} else if (input.fire2Pressed && this.napalmFuel < NAPALM_MIN_FUEL) {
+			this.sounds.play("rocket_napalm_no_ammo", 1, 1);
+		}
+		if (this.firingNapalm) {
+			this.spray.update("rocket_napalm_spray", 1, this.sprayPitch);
+		} else {
+			this.napalmFlash = Math.max(this.napalmFlash - NAPALM_FLASH_SHRINK * dt, 0);
+		}
+		if (this.lastKnownNapalm != this.napalmFuel) {
+			if (this.napalmFuel >= NAPALM_MIN_FUEL && this.lastKnownNapalm < NAPALM_MIN_FUEL) {
+				this.sounds.play("rocket_freeze_windup", 1, 1);
+			}
+			this.lastKnownNapalm = this.napalmFuel;
+		}
+	}
+
+	/** RocketLauncher.FixedUpdate: spraying, a drop goes out as soon as the last one's cooldown is over. */
+	private void fixedUpdate(Actions actions) {
+		this.napalmCooldown = Math.max(this.napalmCooldown - STEP, 0);
+		if (this.firingNapalm && this.napalmCooldown == 0) {
+			this.napalmCooldown = NAPALM_SHOT_COOLDOWN;
+			this.napalmFuel -= NAPALM_FUEL_PER_SHOT;
+			actions.shootNapalm(this.held);
 		}
 	}
 

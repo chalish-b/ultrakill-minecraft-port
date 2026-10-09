@@ -10,6 +10,7 @@
 		"KeyboardHandlerMixin",
 		"KeyboardInputMixin",
 		"LivingEntityMixin",
+		"LivingEntityRendererMixin",
 		"LocalPlayerMixin",
 		"MinecraftCombatInputMixin",
 		"MinecraftMixin",

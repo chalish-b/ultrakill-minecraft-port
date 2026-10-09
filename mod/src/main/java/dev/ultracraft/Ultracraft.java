@@ -1,15 +1,21 @@
 package dev.ultracraft;
 
 import dev.ultracraft.combat.BlockDamage;
+import dev.ultracraft.combat.Gasoline;
 import dev.ultracraft.combat.ServerCombat;
 import dev.ultracraft.combat.ServerWhiplash;
 import dev.ultracraft.net.BlockHitPayload;
+import dev.ultracraft.net.BurnPayload;
 import dev.ultracraft.net.CannonballHitPayload;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionBlocksPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
+import dev.ultracraft.net.GasolineExplosionPayload;
+import dev.ultracraft.net.GasolineSoakPayload;
+import dev.ultracraft.net.GasolineStainPayload;
 import dev.ultracraft.net.HitstopPayload;
+import dev.ultracraft.net.IgnitePayload;
 import dev.ultracraft.net.MagnetPullPayload;
 import dev.ultracraft.net.SlamHitPayload;
 import dev.ultracraft.net.PunchPayload;
@@ -51,11 +57,18 @@ public class Ultracraft implements ModInitializer {
 		PayloadTypeRegistry.serverboundPlay().register(MagnetPullPayload.TYPE, MagnetPullPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(ZapHurtPayload.TYPE, ZapHurtPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(CannonballHitPayload.TYPE, CannonballHitPayload.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(GasolineStainPayload.TYPE, GasolineStainPayload.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(GasolineSoakPayload.TYPE, GasolineSoakPayload.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(BurnPayload.TYPE, BurnPayload.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(IgnitePayload.TYPE, IgnitePayload.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(PunchResultPayload.TYPE, PunchResultPayload.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(WhiplashBrokenPayload.TYPE, WhiplashBrokenPayload.CODEC);
+		PayloadTypeRegistry.clientboundPlay().register(GasolineExplosionPayload.TYPE, GasolineExplosionPayload.CODEC);
 		ServerPlayNetworking.registerGlobalReceiver(UltraStatePayload.TYPE, (payload, context) ->
 			((UltraPlayer)context.player()).ultracraft$setUltraState(payload.active(), payload.crouched())
 		);
+		UltraBlocks.init();
+		Gasoline.init();
 		UltraItems.init();
 		ServerCombat.init();
 		ServerWhiplash.init();

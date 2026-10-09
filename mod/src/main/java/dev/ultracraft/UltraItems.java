@@ -27,6 +27,7 @@ public final class UltraItems {
 	public static final Item RAILCANNON_MALICIOUS = register("railcannon_malicious");
 	public static final Item ROCKET_LAUNCHER_FREEZEFRAME = register("rocket_launcher_freezeframe");
 	public static final Item ROCKET_LAUNCHER_SRS = register("rocket_launcher_srs");
+	public static final Item ROCKET_LAUNCHER_FIRESTARTER = register("rocket_launcher_firestarter");
 
 	/** Variants in the order the slot key cycles through them. */
 	private static final List<List<Item>> VARIANTS = List.of(
@@ -34,7 +35,7 @@ public final class UltraItems {
 		List.of(SHOTGUN_CORE_EJECT, SHOTGUN_PUMP_CHARGE, SHOTGUN_SAWED_ON),
 		List.of(NAILGUN_ATTRACTOR, NAILGUN_OVERHEAT, NAILGUN_JUMPSTART),
 		List.of(RAILCANNON_ELECTRIC, RAILCANNON_SCREWDRIVER, RAILCANNON_MALICIOUS),
-		List.of(ROCKET_LAUNCHER_FREEZEFRAME, ROCKET_LAUNCHER_SRS)
+		List.of(ROCKET_LAUNCHER_FREEZEFRAME, ROCKET_LAUNCHER_SRS, ROCKET_LAUNCHER_FIRESTARTER)
 	);
 
 	private UltraItems() {
@@ -61,6 +62,7 @@ public final class UltraItems {
 			output.accept(RAILCANNON_MALICIOUS);
 			output.accept(ROCKET_LAUNCHER_FREEZEFRAME);
 			output.accept(ROCKET_LAUNCHER_SRS);
+			output.accept(ROCKET_LAUNCHER_FIRESTARTER);
 		});
 	}
 

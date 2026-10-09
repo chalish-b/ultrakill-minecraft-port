@@ -1085,6 +1085,13 @@ final class Effects {
 	 * gradient and its Legacy Particles/Additive material (twice its tint).
 	 */
 	private static void sawTrail(PoseStack.Pose pose, VertexConsumer buffer, Vec3 head, Iterable<Pellet.TrailPoint> trail, Vec3 camera, JsonObject settings) {
+		JsonObject material = settings.getAsJsonObject("material");
+		float tint = material.getAsJsonObject("colors").has("_TintColor") ? 2 * material.getAsJsonObject("colors").getAsJsonArray("_TintColor").get(0).getAsFloat() : 1;
+		sawTrail(pose, buffer, head, trail, camera, settings, new float[]{tint, tint, tint});
+	}
+
+	/** An extracted TrailRenderer, its colors times {@code tint}. */
+	private static void sawTrail(PoseStack.Pose pose, VertexConsumer buffer, Vec3 head, Iterable<Pellet.TrailPoint> trail, Vec3 camera, JsonObject settings, float[] tint) {
 		List<Vec3> points = new ArrayList<>();
 		points.add(head.subtract(camera));
 		for (Pellet.TrailPoint point : trail) {
@@ -1103,8 +1110,6 @@ final class Effects {
 		if (length <= 0) {
 			return;
 		}
-		JsonObject material = settings.getAsJsonObject("material");
-		float tint = material.getAsJsonObject("colors").has("_TintColor") ? 2 * material.getAsJsonObject("colors").getAsJsonArray("_TintColor").get(0).getAsFloat() : 1;
 		double width = settings.get("width").getAsDouble() * PlayerShape.BLOCKS_PER_UNIT;
 		JsonArray curve = settings.getAsJsonArray("widthCurve");
 		Vec3[] left = new Vec3[points.size()];
@@ -1120,7 +1125,7 @@ final class Effects {
 			left[j] = points.get(j).add(side);
 			right[j] = points.get(j).subtract(side);
 			float[] c = Particles.gradient(settings.getAsJsonObject("color"), t);
-			colors[j] = new float[]{c[0] * tint, c[1] * tint, c[2] * tint, c[3]};
+			colors[j] = new float[]{c[0] * tint[0], c[1] * tint[1], c[2] * tint[2], c[3]};
 		}
 		for (int i = 0; i + 1 < points.size(); i++) {
 			Vec3[] quad = {left[i], right[i], right[i + 1], left[i + 1]};
@@ -1294,20 +1299,46 @@ final class Effects {
 			for (Pellet pellet : pellets) {
 				pelletTrail(pose, buffer, pellet, camera);
 				float[] color = pellet.boosted ? PELLET_BOOSTED : PELLET;
-				// The ball, as a disc facing the camera: an unlit sphere looks the same from every side.
-				Vec3 at = pellet.position.subtract(camera);
-				float radius = (float)(PELLET_RADIUS * PlayerShape.BLOCKS_PER_UNIT);
-				int sides = 8;
-				for (int i = 0; i < sides; i++) {
-					double a0 = Math.PI * 2 * i / sides;
-					double a1 = Math.PI * 2 * (i + 1) / sides;
-					Vector3f p0 = facing.transform(new Vector3f((float)Math.cos(a0) * radius, (float)Math.sin(a0) * radius, 0));
-					Vector3f p1 = facing.transform(new Vector3f((float)Math.cos(a1) * radius, (float)Math.sin(a1) * radius, 0));
-					Vector3f centre = new Vector3f((float)at.x, (float)at.y, (float)at.z);
-					for (Vector3f v : new Vector3f[]{new Vector3f(centre), new Vector3f(centre).add(p0), new Vector3f(centre).add(p1), new Vector3f(centre)}) {
-						buffer.addVertex(pose, v).setColor(color[0], color[1], color[2], 1);
-					}
-				}
+				ball(pose, buffer, pellet.position.subtract(camera), PELLET_RADIUS * PlayerShape.BLOCKS_PER_UNIT, facing, color);
+			}
+		});
+	}
+
+	/** A ball, as a disc facing the camera: an unlit sphere looks the same from every side. */
+	private static void ball(PoseStack.Pose pose, VertexConsumer buffer, Vec3 at, double radius, Quaternionf facing, float[] color) {
+		int sides = 8;
+		float r = (float)radius;
+		for (int i = 0; i < sides; i++) {
+			double a0 = Math.PI * 2 * i / sides;
+			double a1 = Math.PI * 2 * (i + 1) / sides;
+			Vector3f p0 = facing.transform(new Vector3f((float)Math.cos(a0) * r, (float)Math.sin(a0) * r, 0));
+			Vector3f p1 = facing.transform(new Vector3f((float)Math.cos(a1) * r, (float)Math.sin(a1) * r, 0));
+			Vector3f centre = new Vector3f((float)at.x, (float)at.y, (float)at.z);
+			for (Vector3f v : new Vector3f[]{new Vector3f(centre), new Vector3f(centre).add(p0), new Vector3f(centre).add(p1), new Vector3f(centre)}) {
+				buffer.addVertex(pose, v).setColor(color[0], color[1], color[2], 1);
+			}
+		}
+	}
+
+	/**
+	 * The Firestarter's drops of gasoline: each one's trail and its ball in the gasoline's color (the unlit color of
+	 * its material, which its trail's colors are times).
+	 */
+	void renderGasoline(LevelRenderContext context, List<GasolineProjectile> drops) {
+		UltraModel model = UltraModel.get(GasolineProjectile.MODEL);
+		if (model == null || drops.isEmpty()) {
+			return;
+		}
+		JsonObject script = model.script("gasolineProjectile");
+		JsonObject trail = script.getAsJsonObject("trail");
+		float[] color = floats(trail.getAsJsonObject("material").getAsJsonObject("colors").getAsJsonArray("_Color"));
+		double radius = script.get("ballRadius").getAsDouble() * PlayerShape.BLOCKS_PER_UNIT;
+		Vec3 camera = Minecraft.getInstance().gameRenderer.mainCamera().position();
+		Quaternionf facing = Minecraft.getInstance().gameRenderer.mainCamera().rotation();
+		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.debugQuads(), (pose, buffer) -> {
+			for (GasolineProjectile drop : drops) {
+				sawTrail(pose, buffer, drop.position, drop.trail, camera, trail, color);
+				ball(pose, buffer, drop.position.subtract(camera), radius, facing, color);
 			}
 		});
 	}

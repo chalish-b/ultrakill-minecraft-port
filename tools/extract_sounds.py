@@ -438,6 +438,7 @@ def rocket_launcher(env, x):
     ride = next(audio_sources(rocket.playerRideSound.deref().read()))
     x.add_source("rocket_ride", ride)
     cannonball(env, x)
+    firestarter(env, x)
 
 
 def cannonball(env, x):
@@ -468,6 +469,18 @@ def cannonball(env, x):
     placed("cannonball_shockwave", sound_go, next(components(sound_go, "AudioSource")), next(components(sound_go, "AudioSource")).m_Pitch)
     explosion = next(audio_sources(ball.interruptionExplosion.deref().read()))
     x.add_clip("explosion_cannonball", explosion.m_audioClip, explosion.m_Volume)
+
+
+def firestarter(env, x):
+    """The Firestarter's spray: its start and its loop as it starts (their pitch is set by the code), its stop (the
+    same), and the click when there isn't enough fuel to start."""
+    launcher = find_class(env, "RocketLauncher", "Rocket Launcher Napalm", variation=2)
+    loop, start = (source_ref(s) for s in launcher.napalmMuzzleFlashSounds)
+    x.add_clip("rocket_napalm_spray", loop.m_audioClip, loop.m_Volume)
+    x.add_clip("rocket_napalm_start", start.m_audioClip, start.m_Volume)
+    stop = source_ref(launcher.napalmStopSound)
+    x.add_clip("rocket_napalm_stop", stop.m_audioClip, stop.m_Volume)
+    x.add_source("rocket_napalm_no_ammo", source_ref(launcher.napalmNoAmmoSound))
 
 
 def jumpstart(env, x):
@@ -526,6 +539,11 @@ def main():
                          ("dash_jump", "dashJumpSound"), ("landing_heavy", "impactDust")]:
         source = next(s for s in audio_sources(getattr(movement, field).deref().read()) if s.m_PlayOnAwake and s.m_audioClip.path_id)
         x.add_source(event, source)
+
+    # Sliding on gasoline: its pitch goes up to 2.75, past Minecraft's highest, so it's baked in at 2 and the code
+    # plays it at half its pitch.
+    oil = source_ref(movement.oilSlideEffect)
+    x.event("oil_slide", [sound(x.clip(oil.m_audioClip, speed=2), oil.m_Volume)])
 
     player = movement.m_GameObject.read()
     x.add_clip("woosh", next(components(child(player, "WallCheck"), "AudioSource")).m_audioClip)

@@ -5,6 +5,7 @@ import dev.ultracraft.UltraDifficulty;
 import dev.ultracraft.UltraPlayer;
 import dev.ultracraft.client.UltraConfig;
 import dev.ultracraft.client.movement.UltraSounds.Channel;
+import dev.ultracraft.combat.Gasoline;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
@@ -77,6 +78,15 @@ public final class UltraMovement {
 	final UltraBody body = new UltraBody();
 	final UltraCamera camera = new UltraCamera();
 	private final UltraSounds sounds = new UltraSounds();
+	/** NewMovement.oilSlideEffect: sliding along on gasoline. */
+	private final UltraSounds.Loop oilSlide = this.sounds.loop();
+	/** NewMovement.modForcedFrictionMultip: 0 while the player is on gasoline. */
+	private double forcedFriction = 1;
+	/**
+	 * NewMovement.friction, which takes the forced friction every physics step: with none, the player keeps their
+	 * speed on the ground and can't steer, as in the air.
+	 */
+	private double friction = 1;
 	private UltraInput input = new UltraInput();
 	private double clock;
 	private double accumulator;
@@ -286,6 +296,7 @@ public final class UltraMovement {
 	}
 
 	private void fixedUpdate() {
+		this.friction = this.forcedFriction;
 		if (this.sliding) {
 			if (this.slideSafety <= 0) {
 				double horizontalSpeed = new Vec3(this.body.velocity.x, 0, this.body.velocity.z).length();
@@ -348,6 +359,8 @@ public final class UltraMovement {
 			this.currentWallJumps = 0;
 			this.rocketJumps = 0;
 			this.rocketRides = 0;
+		}
+		if (this.onGround && this.friction > 0 && !this.jumping) {
 			double downwardSpeed = G.dot(this.body.velocity);
 			if (this.slopeOnGround && this.inputDir.x == 0 && this.inputDir.z == 0) {
 				downwardSpeed = 0;
@@ -357,7 +370,7 @@ public final class UltraMovement {
 			}
 			double speed = this.slowMode ? 1.25 : 2.75;
 			Vec3 targetVel = this.inputDir.scale(WALK_SPEED * DT * speed).add(G.scale(downwardSpeed));
-			this.body.velocity = U.lerp(this.body.velocity, targetVel, 0.25);
+			this.body.velocity = U.lerp(this.body.velocity, targetVel, 0.25 * this.friction);
 			return;
 		}
 
@@ -418,8 +431,8 @@ public final class UltraMovement {
 					this.preSlideSpeed = 3;
 				}
 				speed = this.preSlideSpeed;
-				if (this.onGround) {
-					this.preSlideSpeed -= DT * this.preSlideSpeed;
+				if (this.onGround && this.friction != 0) {
+					this.preSlideSpeed -= DT * this.preSlideSpeed * this.friction;
 				}
 				this.preSlideDelay = 0;
 			}
@@ -456,7 +469,7 @@ public final class UltraMovement {
 		this.invincible = true;
 		if (this.slideEnding) {
 			this.slideEnding = false;
-			if (!this.onGround) {
+			if (!this.onGround || this.friction == 0) {
 				this.boost = false;
 				return;
 			}
@@ -466,7 +479,9 @@ public final class UltraMovement {
 			this.boostLeft -= 4;
 			return;
 		}
-		this.body.velocity = targetVel;
+		if (!this.onGround || this.friction != 0) {
+			this.body.velocity = targetVel;
+		}
 		this.boost = false;
 	}
 
@@ -476,6 +491,11 @@ public final class UltraMovement {
 		this.movementHor = this.input.moveX;
 		this.inputDir = U.clampMagnitude(right().scale(this.input.moveX).add(forward().scale(this.input.moveY)), 1);
 
+		if (this.onGround) {
+			checkForGasoline();
+		} else {
+			this.oilSlide.stop();
+		}
 		if (this.onGround) {
 			this.fallTime = 0;
 			this.clingFade = 0;
@@ -710,9 +730,24 @@ public final class UltraMovement {
 		}
 	}
 
+	/**
+	 * NewMovement.CheckForGasoline: on gasoline there's no friction, and the slide on it sounds louder and higher the
+	 * faster the player goes, up to 35 units a second.
+	 */
+	private void checkForGasoline() {
+		this.forcedFriction = Gasoline.underfoot(level(), root()) ? 0 : 1;
+		if (this.forcedFriction != 0) {
+			this.oilSlide.stop();
+			return;
+		}
+		double speed = Math.min(35, this.body.velocity.length()) / 35;
+		// The sound has twice its pitch baked in.
+		this.oilSlide.update("oil_slide", U.lerp(0, 0.85, speed), U.lerp(1.75, 2.75, speed) / 2);
+	}
+
 	/** Walking down slopes and small steps keeps the player on the ground. */
 	private void tryFloorSnap(double dt) {
-		if (this.slopeOnGround || this.jumping || this.boost || U.isZero(this.body.velocity)) {
+		if (this.slopeOnGround || this.friction == 0 || this.jumping || this.boost || U.isZero(this.body.velocity)) {
 			return;
 		}
 		double rootHeight = rootHeight();
@@ -1080,6 +1115,7 @@ public final class UltraMovement {
 	/** Stops the sounds that keep playing on their own. */
 	public void close() {
 		this.sounds.stopAll();
+		this.oilSlide.stop();
 	}
 
 	// ---- GroundCheck, WallCheck, ClimbStep ---------------------------------------------------
