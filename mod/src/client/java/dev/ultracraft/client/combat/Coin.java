@@ -9,6 +9,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
+import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -56,10 +57,12 @@ final class Coin implements Conductor.Zappable {
 	/** The enemies this chain of coins has hit already, which it won't target again. */
 	Set<Integer> chainHits = new HashSet<>();
 	/**
-	 * The beam the coin passes the shot on with: a piercing shot's own (Coin's altBeam), or for a single-target
-	 * shot the coin's own beam (its refBeam, {@link Effects.BeamStyle#COIN}).
+	 * The beam the coin passes a single-target shot on with: its own (its refBeam, {@link Effects.BeamStyle#COIN}),
+	 * or the Malicious railcannon's.
 	 */
 	Effects.BeamStyle beam = Effects.BeamStyle.COIN;
+	/** The piercing beam that shot it, which it fires on itself (Coin's altBeam). */
+	@Nullable PiercingBeam altBeam;
 	/** The coin keeps the camera's rotation from when it was thrown. */
 	final float yaw;
 	final float pitch;
@@ -131,6 +134,12 @@ final class Coin implements Conductor.Zappable {
 		this.chainHits = chainHits;
 		this.beam = beam;
 		this.reflectTimer = REFLECT_DELAY;
+	}
+
+	/** Shot by a piercing beam, which it fires on after a moment. */
+	void hit(float power, Set<Integer> chainHits, PiercingBeam altBeam) {
+		hit(power, chainHits, altBeam.type.style);
+		this.altBeam = altBeam;
 	}
 
 	/** Punched: no more flash or charge. */

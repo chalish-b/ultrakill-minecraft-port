@@ -117,8 +117,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private static final float WHIPLASH_DAMAGE = 0.2F;
 	/** Landed shells stay until there are more than this many (GoreZone's maxGibs at the default maxGore). */
 	private static final int MAX_SHELLS = 150;
-	/** The piercer's charged shot goes through up to this many blocks, as long as it breaks them. */
-	private static final int PIERCER_BLOCKS = 3;
+	/**
+	 * A piercing revolver beam sweeps a sphere this big along the shot. Each hit it lands on an enemy stops time for
+	 * a moment (TimeController.HitStop), and it lands the next a moment later.
+	 */
+	private static final double PIERCING_RADIUS = 0.6 * S;
+	private static final double BEAM_HITSTOP = 0.05;
+	private static final double BEAM_STEP = 0.05;
 	/** Shotgun.Shoot: pellets per shot, and how far each is turned about every axis, in degrees. */
 	private static final int PELLETS = 12;
 	private static final double PELLET_SPREAD = 10;
@@ -170,16 +175,14 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	/** A Feedbacker punch sends on punchable sawblades within a sphere this big, this far ahead. */
 	private static final double SAWBLADE_PUNCH_RADIUS = 3 * S;
 	/**
-	 * "Railcannon Beam" (RevolverBeam): a 1.2 unit sphere swept along the shot, hitting every enemy in its way up
-	 * to 4 times for 2 each. Each hit stops time for a moment (TimeController.HitStop), and the beam goes on to
-	 * the next a moment later, sooner past an enemy that's dead.
+	 * "Railcannon Beam" (RevolverBeam): a 1.2 unit sphere swept along the shot. Its hits come sooner than a
+	 * revolver beam's, and sooner still past an enemy that's dead.
 	 */
 	private static final double RAIL_RADIUS = 1.2 * S;
-	private static final float RAIL_DAMAGE = 2;
-	private static final int RAIL_HITS = 4;
-	private static final double RAIL_HITSTOP = 0.05;
 	private static final double RAIL_STEP = 0.025;
 	private static final double RAIL_STEP_DEAD = 0.01;
+	/** The Malicious railcannon's beam's damage. */
+	private static final float RAIL_DAMAGE = 2;
 	/** The Electric railcannon's beam bores through the blocks it breaks, up to this far past the first one it meets. */
 	private static final double RAIL_TUNNEL_DEPTH = 12;
 	/** The nails: the Overheat's, the Attractor's, and the burnout's heated ones. */
@@ -213,7 +216,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private final UltraSounds sounds = new UltraSounds();
 	private final Effects effects = new Effects();
 	private final SlideEffects slideEffects = new SlideEffects(this.effects);
-	private final Map<Revolver.Variant, Revolver> revolvers = new EnumMap<>(Revolver.Variant.class);
+	/** The revolvers, standard and slab, and the charges they share. */
+	private final Revolver.Charges revolverCharges = new Revolver.Charges();
+	private final Map<FirstPersonWeapons.Weapon, Revolver> revolvers = new EnumMap<>(FirstPersonWeapons.Weapon.class);
 	private final List<Coin> coins = new ArrayList<>();
 	private final List<Explosion> explosions = new ArrayList<>();
 	private final List<Shell> shells = new ArrayList<>();
@@ -236,8 +241,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private final Whiplash whiplash = new Whiplash(this.sounds, this);
 	private final Railcannon railcannon = new Railcannon(this.sounds);
 	private final RocketLauncher rocketLauncher = new RocketLauncher(this.sounds);
-	/** Railcannon beams still working their way through what they hit. */
-	private final List<RailShot> railShots = new ArrayList<>();
+	/** Piercing beams still working their way through what they hit. */
+	private final List<BeamShot> beamShots = new ArrayList<>();
 	/** The Screwdriver's drills. */
 	private final List<Drill> drills = new ArrayList<>();
 	/** The nailguns, and the charges they share. */
@@ -279,10 +284,6 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private FirstPersonWeapons.@Nullable Weapon held;
 	private boolean wasFire1;
 	private boolean wasFire2;
-	private double coinCharge = 400;
-	private int readyCoins = 4;
-	private double sharpshooterCharge = 300;
-	private int readyShots = 3;
 	private final List<Ricochet> ricochets = new ArrayList<>();
 	/** Coins punched this frame pop back up as new ones. */
 	private final List<Coin> respawned = new ArrayList<>();
@@ -305,7 +306,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			this.shotguns.put(variant, new Shotgun(variant, this.sounds));
 		}
 		for (Revolver.Variant variant : Revolver.Variant.values()) {
-			this.revolvers.put(variant, new Revolver(variant, this.sounds));
+			for (boolean slab : new boolean[]{false, true}) {
+				Revolver revolver = new Revolver(variant, slab, this.revolverCharges, this.sounds);
+				this.revolvers.put(viewmodel(revolver), revolver);
+			}
 		}
 		for (Nailgun.Variant variant : Nailgun.Variant.values()) {
 			this.nailguns.put(variant, new Nailgun(variant, this.nailgunCharges, this.sounds));
@@ -349,8 +353,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			this.shockwaves.clear();
 			this.slammed.clear();
 			this.whiplash.cancel();
-			this.railShots.forEach(shot -> this.effects.fade(shot.beam));
-			this.railShots.clear();
+			this.beamShots.forEach(shot -> this.effects.fade(shot.drawn));
+			this.beamShots.clear();
+			this.ricochets.clear();
 			this.drills.forEach(drill -> drill.drillSound.stop());
 			this.drills.clear();
 			this.nails.clear();
@@ -378,26 +383,15 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 		this.effects.update(dt, minecraft.level, player);
 		this.quietHealLeft -= dt;
+		this.revolverCharges.recharge(dt);
 		for (Revolver revolver : this.revolvers.values()) {
 			revolver.recharge(dt);
 		}
-		this.coinCharge = Math.min(this.coinCharge + 25 * dt, 400);
-		int coins = (int)(this.coinCharge / 100);
-		if (coins > this.readyCoins && this.held == FirstPersonWeapons.Weapon.REVOLVER_MARKSMAN) {
-			this.sounds.play("coin_ready", 1, 1 + (coins - 1) / 2F);
-		}
-		this.readyCoins = coins;
-		this.sharpshooterCharge = Math.min(this.sharpshooterCharge + 15 * dt, 300);
-		int shots = (int)(this.sharpshooterCharge / 100);
-		if (shots > this.readyShots && this.held == FirstPersonWeapons.Weapon.REVOLVER_SHARPSHOOTER) {
-			this.sounds.play("sharpshooter_ready", 1, 1 + (shots - 1) / 2F);
-		}
-		this.readyShots = shots;
 		this.railcannon.recharge(dt);
 		this.rocketLauncher.recharge(dt, this.rockets.size());
 		this.nailgunCharges.recharge(dt, this.magnets.size());
 		updateRicochets(dt, minecraft.level, player);
-		updateRailShots(dt, minecraft.level, player);
+		updateBeamShots(dt, minecraft.level, player);
 		this.punchStamina = Math.min(this.punchStamina + 1.25 * dt, 2);
 		this.fistCooldown = Math.max(this.fistCooldown - 2 * dt, 0);
 		if (this.punchActiveLeft > 0) {
@@ -533,7 +527,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		Revolver revolver = revolver(this.held);
 		FirstPersonWeapons.RevolverState display = revolver == null
 			? FirstPersonWeapons.RevolverState.NONE
-			: revolver.display(revolver.variant == Revolver.Variant.SHARPSHOOTER ? this.sharpshooterCharge : this.coinCharge);
+			: revolver.display();
 		Shotgun shotgun = shotgun(this.held);
 		FirstPersonWeapons.ShotgunState shotgunDisplay = shotgun == null
 			? FirstPersonWeapons.ShotgunState.NONE
@@ -595,6 +589,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 				this.rocketLauncher.equip(launcher);
 			}
 			FirstPersonWeapons.INSTANCE.equip(weapon);
+			Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon);
+			if (revolver != null && animator != null) {
+				animator.setBool("SlowPickup", revolver.slowPickup());
+			}
 		}
 	}
 
@@ -609,6 +607,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 				}
 				if (shotgun != null) {
 					shotgun.readyGun();
+				}
+			}
+			case "Click" -> {
+				if (revolver != null) {
+					revolver.click();
 				}
 			}
 			// Shotgun.ReleaseHeat: the heat sink cools with a hiss.
@@ -654,12 +657,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		if (weapon == null) {
 			return null;
 		}
-		return switch (weapon) {
-			case REVOLVER_PIERCER -> this.revolvers.get(Revolver.Variant.PIERCER);
-			case REVOLVER_MARKSMAN -> this.revolvers.get(Revolver.Variant.MARKSMAN);
-			case REVOLVER_SHARPSHOOTER -> this.revolvers.get(Revolver.Variant.SHARPSHOOTER);
-			default -> null;
-		};
+		return this.revolvers.get(weapon);
 	}
 
 	private @Nullable Nailgun nailgun(FirstPersonWeapons.@Nullable Weapon weapon) {
@@ -733,14 +731,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		this.sounds.play("revolver_click", 1, 1);
 	}
 
-	private static FirstPersonWeapons.@Nullable Weapon viewmodel(Revolver.@Nullable Variant variant) {
-		if (variant == null) {
-			return null;
-		}
-		return switch (variant) {
-			case PIERCER -> FirstPersonWeapons.Weapon.REVOLVER_PIERCER;
-			case MARKSMAN -> FirstPersonWeapons.Weapon.REVOLVER_MARKSMAN;
-			case SHARPSHOOTER -> FirstPersonWeapons.Weapon.REVOLVER_SHARPSHOOTER;
+	private static FirstPersonWeapons.Weapon viewmodel(Revolver revolver) {
+		return switch (revolver.variant) {
+			case PIERCER -> revolver.slab ? FirstPersonWeapons.Weapon.REVOLVER_SLAB_PIERCER : FirstPersonWeapons.Weapon.REVOLVER_PIERCER;
+			case MARKSMAN -> revolver.slab ? FirstPersonWeapons.Weapon.REVOLVER_SLAB_MARKSMAN : FirstPersonWeapons.Weapon.REVOLVER_MARKSMAN;
+			case SHARPSHOOTER -> revolver.slab ? FirstPersonWeapons.Weapon.REVOLVER_SLAB_SHARPSHOOTER : FirstPersonWeapons.Weapon.REVOLVER_SHARPSHOOTER;
 		};
 	}
 
@@ -753,6 +748,15 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 		if (stack.is(UltraItems.REVOLVER_SHARPSHOOTER)) {
 			return FirstPersonWeapons.Weapon.REVOLVER_SHARPSHOOTER;
+		}
+		if (stack.is(UltraItems.REVOLVER_SLAB_PIERCER)) {
+			return FirstPersonWeapons.Weapon.REVOLVER_SLAB_PIERCER;
+		}
+		if (stack.is(UltraItems.REVOLVER_SLAB_MARKSMAN)) {
+			return FirstPersonWeapons.Weapon.REVOLVER_SLAB_MARKSMAN;
+		}
+		if (stack.is(UltraItems.REVOLVER_SLAB_SHARPSHOOTER)) {
+			return FirstPersonWeapons.Weapon.REVOLVER_SLAB_SHARPSHOOTER;
 		}
 		if (stack.is(UltraItems.SHOTGUN_CORE_EJECT)) {
 			return FirstPersonWeapons.Weapon.SHOTGUN_CORE_EJECT;
@@ -877,7 +881,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	// ---- revolver ---------------------------------------------------------------------------
 
 	@Override
-	public void shoot(Revolver.Variant variant, boolean charged, int ricochets) {
+	public void shoot(Revolver revolver, boolean charged, int ricochets) {
 		Minecraft minecraft = Minecraft.getInstance();
 		LocalPlayer player = minecraft.player;
 		UltraMovement movement = UltraController.INSTANCE.movement();
@@ -886,81 +890,65 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 		Vec3 eye = movement.eyePosition();
 		Vec3 look = player.getLookAngle();
+		Revolver.Variant variant = revolver.variant;
 
-		// Revolver.Shoot: a normal shot plays a gunshot; a charged one its super shot sound (the sharpshooter's twirl shot).
+		// Revolver.Shoot: a normal shot plays a gunshot (the slab revolvers share one); a charged one its super shot
+		// sound, whose RandomPitch varies it by a tenth (the sharpshooter's twirl shot).
 		if (!charged) {
-			this.sounds.play("revolver_shoot." + variant.name().toLowerCase(), 0.55F, this.sounds.randomPitch());
+			this.sounds.play("revolver_shoot." + (revolver.slab ? "slab" : variant.name().toLowerCase()), 0.55F, this.sounds.randomPitch());
 		} else if (variant == Revolver.Variant.SHARPSHOOTER) {
 			this.sounds.play("revolver_twirl_shot", 1, 1);
 		} else {
-			this.sounds.play("revolver_super", 1, 1);
+			this.sounds.play(revolver.slab ? "revolver_super.slab" : "revolver_super", 1, this.sounds.randomPitch());
 		}
 		movement.kickFov(charged ? 1 / 20.0 : 1 / 40.0);
-		Animator animator = FirstPersonWeapons.INSTANCE.animator(viewmodel(variant));
+		FirstPersonWeapons.Weapon weapon = viewmodel(revolver);
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon);
 		if (animator != null) {
 			animator.setFloat("RandomChance", this.random.nextFloat());
 			animator.setTrigger(charged ? "ChargeShoot" : "Shoot");
 		}
-		FirstPersonWeapons.INSTANCE.turnCylinder(viewmodel(variant));
-
-		if (charged && variant == Revolver.Variant.SHARPSHOOTER) {
-			sharpshooterBeam(minecraft.level, player, eye, look, muzzle(eye, look, player), ricochets);
-			return;
+		if (!revolver.slab) {
+			FirstPersonWeapons.INSTANCE.turnCylinder(weapon);
 		}
-		int bodiesLeft = charged ? 3 : 1;
-		int blocksLeft = charged ? PIERCER_BLOCKS : 1;
-		float blockDamage = charged ? 2 : 1;
-		// Blocks the shot breaks on its way, and how far along it the last of them is.
-		Set<BlockPos> broken = new HashSet<>();
-		double passed = -1;
-		Vec3 end = eye;
-		shot:
-		while (true) {
-			for (Hitscan.Hit hit : Hitscan.cast(minecraft.level, player, eye, look, RANGE, this.coins, grenades(), broken)) {
-				boolean wall = hit.kind() == Hitscan.Kind.BLOCK || hit.kind() == Hitscan.Kind.END;
-				if (!wall && hit.distance() <= passed) {
-					continue;
-				}
-				if (hit.kind() == Hitscan.Kind.ENTITY) {
-					if (bodiesLeft-- <= 0) {
-						continue;
-					}
-					// The charged beam usually crosses two of an enemy's hitboxes; Minecraft mobs have one, so it
-					// counts twice, once with the head bonus.
-					float damage = charged ? (hit.head() ? 2.5F : 1) + 1 : (hit.head() ? 2 : 1);
-					damage(minecraft.level, hit.entity(), damage, hit.head(), hit.position());
-					movement.shake(charged ? 1 : 0.5);
-					if (!charged) {
-						end = hit.position();
-						break shot;
-					}
-				} else if (hit.kind() == Hitscan.Kind.COIN) {
-					hit.coin().hit(hit.coin().power, new HashSet<>(), charged ? Effects.BeamStyle.SUPER : Effects.BeamStyle.COIN);
-					end = hit.position();
-					break shot;
-				} else if (hit.kind() == Hitscan.Kind.GRENADE) {
-					grenadeShot(hit.grenade());
-					if (!charged) {
-						end = hit.position();
-						break shot;
-					}
-				} else {
-					end = hit.position();
-					if (hit.kind() == Hitscan.Kind.BLOCK) {
-						this.effects.impact(minecraft.level, hit.position());
-						hitBlock(hit.block(), blockDamage);
-						// The charged beam carries on through the blocks it breaks.
-						if (--blocksLeft > 0 && BlockDamage.breaksInOneHit(minecraft.level, hit.block(), blockDamage)) {
-							broken.add(hit.block());
-							passed = hit.distance();
-							continue shot;
-						}
-					}
-					break shot;
-				}
+
+		Vec3 drawFrom = muzzle(eye, look, player);
+		PiercingBeam.Type type = switch (variant) {
+			case PIERCER -> charged ? revolver.slab ? PiercingBeam.Type.SLAB_SUPER : PiercingBeam.Type.SUPER : null;
+			case SHARPSHOOTER -> charged ? revolver.slab ? PiercingBeam.Type.SLAB_SHARP : PiercingBeam.Type.SHARP : null;
+			case MARKSMAN -> null;
+		};
+		if (type == null && revolver.slab) {
+			type = PiercingBeam.Type.SLAB;
+		}
+		if (type == null) {
+			revolverShot(minecraft.level, player, movement, eye, look, drawFrom);
+		} else {
+			revolverBeam(minecraft.level, player, new PiercingBeam(type, revolver.slab ? revolver : null, ricochets), eye, look, drawFrom);
+		}
+	}
+
+	/**
+	 * "Revolver Beam", the standard revolver's shot: it stops at the first enemy, coin, core or rocket in its way, or
+	 * at the wall.
+	 */
+	private void revolverShot(Level level, LocalPlayer player, UltraMovement movement, Vec3 eye, Vec3 look, Vec3 drawFrom) {
+		Hitscan.Hit hit = Hitscan.cast(level, player, eye, look, RANGE, this.coins, grenades()).getFirst();
+		switch (hit.kind()) {
+			case ENTITY -> {
+				damage(level, hit.entity(), hit.head() ? 2 : 1, hit.head(), hit.position());
+				movement.shake(0.5);
+			}
+			case COIN -> hit.coin().hit(hit.coin().power, new HashSet<>(), Effects.BeamStyle.COIN);
+			case GRENADE -> grenadeShot(hit.grenade());
+			case BLOCK -> {
+				this.effects.impact(level, hit.position());
+				hitBlock(hit.block(), 1);
+			}
+			default -> {
 			}
 		}
-		beam(muzzle(eye, look, player), end, charged ? Effects.BeamStyle.SUPER : Effects.BeamStyle.REVOLVER);
+		beam(drawFrom, hit.position(), Effects.BeamStyle.REVOLVER);
 	}
 
 	/** A revolver beam (or a coin's, or a railcannon's) from one point to another: it breaks the magnets it goes through. */
@@ -977,53 +965,207 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	}
 
 	/**
-	 * The sharpshooter's charged beam ("Revolver Beam Sharp"): it pierces everything in its way, and while it has
-	 * ricochets left, a wall sends it on 0.1 s later, reflected and aimed at the nearest enemy near its path.
+	 * A piercing revolver beam: it goes through the blocks it breaks in one hit, as many as its type lets it, and
+	 * sweeps up everything in its way, 0.6 units wide, up to the block that stops it.
 	 */
-	private void sharpshooterBeam(Level level, LocalPlayer player, Vec3 from, Vec3 direction, Vec3 drawFrom, int ricochets) {
-		List<Hitscan.Hit> hits = Hitscan.cast(level, player, from, direction, RANGE, this.coins, grenades());
-		Vec3 end = hits.getLast().position();
-		for (Hitscan.Hit hit : hits) {
-			if (hit.kind() == Hitscan.Kind.GRENADE) {
-				grenadeShot(hit.grenade());
-			} else if (hit.kind() == Hitscan.Kind.ENTITY) {
-				damage(level, hit.entity(), hit.head() ? 2 : 1, hit.head(), hit.position());
+	private void revolverBeam(Level level, LocalPlayer player, PiercingBeam beam, Vec3 from, Vec3 direction, Vec3 drawFrom) {
+		List<Hitscan.Hit> hits = new ArrayList<>();
+		Set<BlockPos> broken = new HashSet<>();
+		Hitscan.Hit wall = Hitscan.cast(level, player, from, direction, RANGE, List.of(), List.of(), broken).getLast();
+		while (wall.kind() == Hitscan.Kind.BLOCK && broken.size() + 1 < beam.type.blocks && BlockDamage.breaksInOneHit(level, wall.block(), beam.blockDamage())) {
+			broken.add(wall.block());
+			hits.add(wall);
+			wall = Hitscan.cast(level, player, from, direction, RANGE, List.of(), List.of(), broken).getLast();
+		}
+		hits.add(wall);
+		hits.addAll(Hitscan.sweep(level, player, from, wall.position(), PIERCING_RADIUS, this.coins, grenades()));
+		fireBeam(beam, from, direction, hits, wall.position(), wall, drawFrom, level, player);
+	}
+
+	/**
+	 * Fires a piercing beam at what it reaches, nearest first: up to {@code end}, or to the first coin in the way, which
+	 * fires it on. It stays at full width until its hits are all in. A railcannon's zaps the water it goes through.
+	 *
+	 * @param wall the block that stops it, which a bouncing beam comes off
+	 */
+	private void fireBeam(
+		PiercingBeam beam, Vec3 from, Vec3 direction, List<Hitscan.Hit> hits, Vec3 end, Hitscan.@Nullable Hit wall, Vec3 drawFrom, Level level, LocalPlayer player
+	) {
+		hits.sort(Comparator.comparingDouble(Hitscan.Hit::distance));
+		for (int i = 0; i < hits.size(); i++) {
+			if (hits.get(i).kind() == Hitscan.Kind.COIN) {
+				end = hits.get(i).coin().position;
+				hits = hits.subList(0, i + 1);
+				wall = null;
+				break;
+			}
+		}
+		breakMagnets(drawFrom, end);
+		if (beam.type.railgun()) {
+			this.conductor.beamThroughWater(from, end, conductorWorld(level, player), this);
+		}
+		BeamShot shot = new BeamShot(beam, direction, hits, wall, this.effects.heldBeam(drawFrom, end, beam.type.style));
+		this.beamShots.add(shot);
+		advance(shot, level, player);
+	}
+
+	/** A piercing beam working its way through what it reached (RevolverBeam.PiercingShotCheck). */
+	private static final class BeamShot {
+		final PiercingBeam beam;
+		final Vec3 direction;
+		final List<Hitscan.Hit> hits;
+		final Hitscan.@Nullable Hit wall;
+		final Effects.Beam drawn;
+		/** Each enemy's health when the beam first reached it, and the health the beam has taken from it since. */
+		final Map<Integer, Float> health = new HashMap<>();
+		final Map<Integer, Float> taken = new HashMap<>();
+		/** The enemies it's done with (hitEids). */
+		final Set<Integer> done = new HashSet<>();
+		/** The hit it's on (enemiesPierced), and how often it has hit the enemy there (currentHits). */
+		int next;
+		int currentHits;
+		double wait;
+		boolean finished;
+
+		BeamShot(PiercingBeam beam, Vec3 direction, List<Hitscan.Hit> hits, Hitscan.@Nullable Hit wall, Effects.Beam drawn) {
+			this.beam = beam;
+			this.direction = direction;
+			this.hits = hits;
+			this.wall = wall;
+			this.drawn = drawn;
+		}
+	}
+
+	private void updateBeamShots(double dt, Level level, LocalPlayer player) {
+		for (BeamShot shot : List.copyOf(this.beamShots)) {
+			shot.wait -= dt;
+			advance(shot, level, player);
+		}
+		this.beamShots.removeIf(shot -> shot.finished);
+	}
+
+	/** Lands the shot's hits that are due, until one stops time; once they're all in, the beam fades. */
+	private void advance(BeamShot shot, Level level, LocalPlayer player) {
+		while (shot.wait <= 0 && shot.next < shot.hits.size() && this.hitstopLeft <= 0) {
+			shot.wait += beamHit(shot, level, player);
+		}
+		if (shot.next >= shot.hits.size() && !shot.finished) {
+			shot.finished = true;
+			this.effects.fade(shot.drawn);
+		}
+	}
+
+	/**
+	 * The beam's next hit, and how long until the one after. An enemy takes hit after hit, each with a hitstop, until
+	 * it has taken the beam's hits per target or it dies, and then the beam moves on; once it has landed all its
+	 * hits, it goes through the rest. A railcannon's hits come faster.
+	 */
+	private double beamHit(BeamShot shot, Level level, LocalPlayer player) {
+		PiercingBeam beam = shot.beam;
+		Hitscan.Hit hit = shot.hits.get(shot.next);
+		boolean railgun = beam.type.railgun();
+		boolean landing = beam.bodiesPierced < beam.hitAmount;
+		switch (hit.kind()) {
+			case ENTITY -> {
+				LivingEntity target = hit.entity();
+				int id = target.getId();
+				if (!landing || shot.done.contains(id)) {
+					shot.next++;
+					shot.currentHits = 0;
+					return 0;
+				}
+				float health = shot.health.computeIfAbsent(id, i -> target.getHealth() + target.getAbsorptionAmount());
+				float taken = shot.taken.getOrDefault(id, 0F);
+				float damage = beam.hitDamage(hit.head());
+				WeaponHitPayload.Kind kind = beam.type.strongAlt ? WeaponHitPayload.Kind.HIT_BURSTING : WeaponHitPayload.Kind.HIT;
+				if (taken >= health) {
+					// Most likely dead already: the server only applies the hit if it isn't.
+					ClientPlayNetworking.send(new WeaponHitPayload(id, damage, hit.head(), hit.position(), kind));
+					if (!railgun) {
+						shot.done.add(id);
+					}
+					shot.next++;
+					shot.currentHits = 0;
+					return railgun ? RAIL_STEP_DEAD : 0;
+				}
+				shot.taken.put(id, taken + damage * ServerCombat.HEALTH_PER_DAMAGE);
+				if (railgun) {
+					this.conductor.electrify(target, conductorWorld(level, player), this);
+				}
+				damage(level, target, damage, hit.head(), hit.position(), kind);
+				shot.currentHits++;
+				beam.bodiesPierced++;
+				this.hitstopLeft = Math.max(this.hitstopLeft, BEAM_HITSTOP);
+				ClientPlayNetworking.send(new HitstopPayload((int)(BEAM_HITSTOP * 1000)));
 				UltraMovement movement = UltraController.INSTANCE.movement();
 				if (movement != null) {
 					movement.shake(1);
 				}
-			} else if (hit.kind() == Hitscan.Kind.COIN) {
-				hit.coin().hit(hit.coin().power, new HashSet<>(), Effects.BeamStyle.SHARP);
-				end = hit.position();
-				break;
-			} else {
-				end = hit.position();
-				if (hit.kind() == Hitscan.Kind.BLOCK && hit.face() != null) {
-					this.effects.impact(level, end);
-					hitBlock(hit.block(), 1);
-					if (ricochets > 0) {
-						Vec3 normal = hit.face().getUnitVec3();
-						Vec3 reflected = direction.subtract(normal.scale(2 * direction.dot(normal)));
-						this.ricochets.add(new Ricochet(end.add(normal.scale(0.01)), reflected, ricochets - 1));
-					}
+				if (shot.currentHits >= beam.maxHitsPerTarget) {
+					shot.done.add(id);
+					shot.currentHits = 0;
+					shot.next++;
 				}
-				break;
+				return railgun ? RAIL_STEP : BEAM_STEP;
+			}
+			case COIN -> {
+				Coin coin = hit.coin();
+				if (landing && coin.hittable()) {
+					// Revolver.InstaClick: a slab beam on a coin that would split it fans the slab revolver's hammer.
+					if (beam.type.strongAlt && coin.hitTimes > 1 && beam.source != null) {
+						instaClick(beam.source);
+					}
+					coin.hit(Float.isNaN(beam.coinPower) ? coin.power : beam.coinPower, beam.chainHits, beam);
+				}
+			}
+			case GRENADE -> grenadeShot(hit.grenade());
+			case BLOCK -> {
+				if (hit.face() != null) {
+					this.effects.impact(level, hit.position());
+				}
+				hitBlock(hit.block(), beam.blockDamage());
+				if (hit == shot.wall && beam.ricochets > 0 && hit.face() != null) {
+					Vec3 direction = shot.direction;
+					Vec3 normal = hit.face().getUnitVec3();
+					Vec3 reflected = direction.subtract(normal.scale(2 * direction.dot(normal)));
+					this.ricochets.add(new Ricochet(hit.position().add(normal.scale(0.01)), reflected, beam.offWall()));
+				}
+			}
+			default -> {
 			}
 		}
-		beam(drawFrom, end, Effects.BeamStyle.SHARP);
+		shot.next++;
+		return 0;
 	}
 
-	/** A sharpshooter beam about to come off a wall. */
+	/**
+	 * Revolver.InstaClick, fanning the slab revolver's hammer: its shots are all finished, and if it's in hand its
+	 * Animator starts over in ShootTwirl, with the QuickTwirlEffect at its cylinder.
+	 */
+	private void instaClick(Revolver revolver) {
+		revolver.instaClick();
+		FirstPersonWeapons.Weapon weapon = viewmodel(revolver);
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon);
+		if (this.held != weapon || animator == null) {
+			return;
+		}
+		animator.reset();
+		animator.play("ShootTwirl", 0);
+		FirstPersonWeapons.INSTANCE.quickTwirl(weapon);
+		this.sounds.play("revolver_quick_twirl", 1, this.sounds.randomPitch());
+	}
+
+	/** A bouncing beam about to come off a wall. */
 	private static final class Ricochet {
 		final Vec3 from;
 		final Vec3 direction;
-		final int ricochetsLeft;
+		final PiercingBeam beam;
 		double delay = 0.1;
 
-		Ricochet(Vec3 from, Vec3 direction, int ricochetsLeft) {
+		Ricochet(Vec3 from, Vec3 direction, PiercingBeam beam) {
 			this.from = from;
 			this.direction = direction;
-			this.ricochetsLeft = ricochetsLeft;
+			this.beam = beam;
 		}
 	}
 
@@ -1038,16 +1180,17 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		this.ricochets.removeAll(due);
 		for (Ricochet ricochet : due) {
 			this.sounds.play("beam_ricochet.sharpshooter", 1, 1);
-			Vec3 direction = aimAssist(level, player, ricochet.from, ricochet.direction);
-			sharpshooterBeam(level, player, ricochet.from, direction, ricochet.from, ricochet.ricochetsLeft);
+			Vec3 direction = aimAssist(level, player, ricochet.from, ricochet.direction, ricochet.beam.aimsAtHead());
+			revolverBeam(level, player, ricochet.beam, ricochet.from, direction, ricochet.from);
 		}
 	}
 
 	/**
 	 * RevolverBeam.RicochetAimAssist: sweeps a 5 unit sphere along the beam and turns it towards the nearest thing
-	 * the sweep touches that it can see, coins before enemies, and an enemy's head when that's in view.
+	 * the sweep touches that it can see, coins before enemies, and with {@code aimAtHead} an enemy's head when that's
+	 * in view.
 	 */
-	private Vec3 aimAssist(Level level, LocalPlayer player, Vec3 from, Vec3 direction) {
+	private Vec3 aimAssist(Level level, LocalPlayer player, Vec3 from, Vec3 direction, boolean aimAtHead) {
 		double radius = 5 * S;
 		Vec3 target = null;
 		double nearest = Double.MAX_VALUE;
@@ -1089,20 +1232,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 				}
 				nearest = distance;
 				Vec3 head = entity.getEyePosition();
-				target = Hitscan.clear(level, player, from, head) ? head : point;
+				target = aimAtHead && Hitscan.clear(level, player, from, head) ? head : point;
 			}
 		}
 		return target == null ? direction : target.subtract(from).normalize();
-	}
-
-	@Override
-	public double sharpshooterCharge() {
-		return this.sharpshooterCharge;
-	}
-
-	@Override
-	public void spendSharpshooterCharge() {
-		this.sharpshooterCharge -= 100;
 	}
 
 	private static void hitBlock(@Nullable BlockPos block, float damage) {
@@ -1112,7 +1245,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	}
 
 	private void damage(Level level, LivingEntity target, float damage, boolean head, Vec3 at) {
-		ClientPlayNetworking.send(new WeaponHitPayload(target.getId(), damage, head, at));
+		damage(level, target, damage, head, at, WeaponHitPayload.Kind.HIT);
+	}
+
+	private void damage(Level level, LivingEntity target, float damage, boolean head, Vec3 at, WeaponHitPayload.Kind kind) {
+		ClientPlayNetworking.send(new WeaponHitPayload(target.getId(), damage, head, at, kind));
 		Gore gore = Gore.of(head, damage, false);
 		this.effects.blood(level, at, gore);
 		this.sounds.play("beam_hit", 1, 1);
@@ -1137,23 +1274,14 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 	}
 
-	@Override
-	public double coinCharge() {
-		return this.coinCharge;
-	}
-
-	@Override
-	public void spendCoin() {
-		this.coinCharge -= 100;
-	}
-
 	/**
 	 * Coin.ReflectRevolver: the shot goes on to the nearest coin, else the nearest enemy's head. A coin that's
 	 * flashing or charged splits the shot: it goes on a second time, 0.05 s later, to another target. That's any
-	 * shot the coin passes on with its own beam, and the piercer's charged shot; the sharpshooter's doesn't split.
+	 * shot the coin passes on with its own beam, and a piercing beam that splits on coins (the piercer's charged
+	 * shot).
 	 */
 	private void reflect(Coin coin, Level level, LocalPlayer player) {
-		boolean split = coin.hitTimes > 1 && (coin.beam == Effects.BeamStyle.COIN || coin.beam == Effects.BeamStyle.SUPER);
+		boolean split = coin.hitTimes > 1 && (coin.altBeam != null ? coin.altBeam.type.splitcoinable : coin.beam == Effects.BeamStyle.COIN);
 		passOn(coin, level, player);
 		coin.hitTimes--;
 		if (split && coin.hitTimes > 0) {
@@ -1167,8 +1295,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		float pitch = coin.power > 2 ? 1 + (coin.power - 2) / 5 : 1;
 		this.sounds.play("coin_hit", 1, pitch);
 		this.sounds.play("coin_hit_flip", 1, 1);
-		if (coin.beam == Effects.BeamStyle.RAILCANNON || coin.beam == Effects.BeamStyle.MALICIOUS) {
-			railPassOn(coin, level, player);
+		if (coin.altBeam != null || coin.beam == Effects.BeamStyle.MALICIOUS) {
+			beamPassOn(coin, level, player);
 			return;
 		}
 
@@ -1183,16 +1311,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 
 		// After coins, a core or rocket the coin can see within 100 units of the player: it goes off. The coin's own
-		// beam is only drawn, so the grenade just goes off; a piercing shot the coin passes on is a real shot at
-		// it, with the parry flash a revolver shot on a grenade brings.
+		// beam is only drawn, so the grenade just goes off, without the parry flash a shot on it brings.
 		Grenade grenade = grenadeTarget(coin, level, player);
 		if (grenade != null) {
 			beam(coin.position, grenade.position, coin.beam);
-			if (coin.beam == Effects.BeamStyle.COIN) {
-				shotExplode(grenade);
-			} else {
-				grenadeShot(grenade);
-			}
+			shotExplode(grenade);
 			return;
 		}
 
@@ -1742,7 +1865,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
 		if (variant == Railcannon.Variant.ELECTRIC) {
 			this.effects.beamFlash(drawFrom, camera, Effects.BeamStyle.RAILCANNON);
-			electricBeam(minecraft.level, player, eye, look, drawFrom, RAIL_DAMAGE, Float.NaN, new HashSet<>());
+			electricBeam(minecraft.level, player, new PiercingBeam(PiercingBeam.Type.RAILCANNON, null, 0), eye, look, drawFrom);
 		} else if (variant == Railcannon.Variant.SCREWDRIVER) {
 			UltraModel model = UltraModel.get(DRILL);
 			if (model != null) {
@@ -1765,115 +1888,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	/**
 	 * The Electric railcannon's beam ("Railcannon Beam", a piercing RevolverBeam): it bores through the blocks it
-	 * breaks, and sweeps up everything in its way to the block that stops it, or to a coin, which fires it on. Its
-	 * hits then land one after another, nearest first, and it stays at full width until they're done.
-	 *
-	 * @param damage each hit's, a block's being all four hits'
-	 * @param coinPower the power a coin it hits takes, or NaN for the coin to keep its own
-	 * @param chainHits the enemies coins have already sent this beam at
+	 * breaks, and sweeps up everything in its way to the block that stops it, or to a coin, which fires it on.
 	 */
-	private void electricBeam(Level level, LocalPlayer player, Vec3 from, Vec3 direction, Vec3 drawFrom, float damage, float coinPower, Set<Integer> chainHits) {
-		Tunnel tunnel = Tunnel.bore(level, player, from, direction, RANGE, damage * RAIL_HITS, RAIL_RADIUS, RAIL_TUNNEL_DEPTH);
+	private void electricBeam(Level level, LocalPlayer player, PiercingBeam beam, Vec3 from, Vec3 direction, Vec3 drawFrom) {
+		Tunnel tunnel = Tunnel.bore(level, player, from, direction, RANGE, beam.blockDamage(), RAIL_RADIUS, RAIL_TUNNEL_DEPTH);
 		List<Hitscan.Hit> hits = new ArrayList<>(tunnel.blocks());
-		for (Hitscan.Hit hit : Hitscan.sweep(level, player, from, tunnel.end(), RAIL_RADIUS, this.coins, grenades())) {
-			for (int i = 0; i < (hit.kind() == Hitscan.Kind.ENTITY ? RAIL_HITS : 1); i++) {
-				hits.add(hit);
-			}
-		}
-		hits.sort(Comparator.comparingDouble(Hitscan.Hit::distance));
-		Vec3 end = tunnel.end();
-		for (int i = 0; i < hits.size(); i++) {
-			if (hits.get(i).kind() == Hitscan.Kind.COIN) {
-				end = hits.get(i).coin().position;
-				hits = hits.subList(0, i + 1);
-				break;
-			}
-		}
-		breakMagnets(drawFrom, end);
-		this.conductor.beamThroughWater(from, end, conductorWorld(level, player), this);
-		RailShot shot = new RailShot(hits, this.effects.heldBeam(drawFrom, end, Effects.BeamStyle.RAILCANNON), damage, coinPower, chainHits);
-		this.railShots.add(shot);
-		advance(shot, level, player);
-	}
-
-	/** A railcannon beam working its way through its hits (RevolverBeam.PiercingShotCheck). */
-	private static final class RailShot {
-		final List<Hitscan.Hit> hits;
-		final Effects.Beam beam;
-		final float damage;
-		final float coinPower;
-		final Set<Integer> chainHits;
-		/** Each enemy's health when the beam first reached it, and the health the beam has taken from it since. */
-		final Map<Integer, Float> health = new HashMap<>();
-		final Map<Integer, Float> taken = new HashMap<>();
-		int next;
-		double wait;
-		boolean done;
-
-		RailShot(List<Hitscan.Hit> hits, Effects.Beam beam, float damage, float coinPower, Set<Integer> chainHits) {
-			this.hits = hits;
-			this.beam = beam;
-			this.damage = damage;
-			this.coinPower = coinPower;
-			this.chainHits = chainHits;
-		}
-	}
-
-	private void updateRailShots(double dt, Level level, LocalPlayer player) {
-		for (RailShot shot : List.copyOf(this.railShots)) {
-			shot.wait -= dt;
-			advance(shot, level, player);
-		}
-		this.railShots.removeIf(shot -> shot.done);
-	}
-
-	/** Lands the shot's hits that are due, until one stops time; once they're all in, the beam fades. */
-	private void advance(RailShot shot, Level level, LocalPlayer player) {
-		while (shot.wait <= 0 && shot.next < shot.hits.size() && this.hitstopLeft <= 0) {
-			shot.wait += railHit(shot, shot.hits.get(shot.next++), level, player);
-		}
-		if (shot.next >= shot.hits.size() && !shot.done) {
-			shot.done = true;
-			this.effects.fade(shot.beam);
-		}
-	}
-
-	/** One of a railcannon beam's hits, and how long until the next. */
-	private double railHit(RailShot shot, Hitscan.Hit hit, Level level, LocalPlayer player) {
-		switch (hit.kind()) {
-			case ENTITY -> {
-				LivingEntity target = hit.entity();
-				int id = target.getId();
-				float health = shot.health.computeIfAbsent(id, i -> target.getHealth() + target.getAbsorptionAmount());
-				float taken = shot.taken.getOrDefault(id, 0F);
-				if (taken >= health) {
-					// Most likely dead already: the server only applies the hit if it isn't.
-					ClientPlayNetworking.send(new WeaponHitPayload(id, shot.damage, hit.head(), hit.position()));
-					return RAIL_STEP_DEAD;
-				}
-				shot.taken.put(id, taken + shot.damage * ServerCombat.HEALTH_PER_DAMAGE);
-				this.conductor.electrify(target, conductorWorld(level, player), this);
-				damage(level, target, shot.damage, hit.head(), hit.position());
-				this.hitstopLeft = Math.max(this.hitstopLeft, RAIL_HITSTOP);
-				ClientPlayNetworking.send(new HitstopPayload((int)(RAIL_HITSTOP * 1000)));
-				UltraMovement movement = UltraController.INSTANCE.movement();
-				if (movement != null) {
-					movement.shake(1);
-				}
-				return RAIL_STEP;
-			}
-			case COIN -> hit.coin().hit(Float.isNaN(shot.coinPower) ? hit.coin().power : shot.coinPower, shot.chainHits, Effects.BeamStyle.RAILCANNON);
-			case GRENADE -> grenadeShot(hit.grenade());
-			case BLOCK -> {
-				if (hit.face() != null) {
-					this.effects.impact(level, hit.position());
-				}
-				hitBlock(hit.block(), shot.damage * RAIL_HITS);
-			}
-			default -> {
-			}
-		}
-		return 0;
+		hits.addAll(Hitscan.sweep(level, player, from, tunnel.end(), RAIL_RADIUS, this.coins, grenades()));
+		fireBeam(beam, from, direction, hits, tunnel.end(), null, drawFrom, level, player);
 	}
 
 	/**
@@ -2023,20 +2044,19 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	}
 
 	/**
-	 * Coin.ReflectRevolver with a railcannon's beam: the coin fires the beam again, at the nearest coin it can see,
-	 * else a core or rocket, else the nearest enemy's head, else anywhere. Going on to anything but a coin, it hits harder by a
-	 * quarter of the coin's power.
+	 * Coin.ReflectRevolver with a piercing beam (its altBeam) or the Malicious railcannon's: the coin fires the beam
+	 * itself on, at the nearest coin it can see, else a core or rocket, else the nearest enemy's head, else anywhere.
+	 * Going on to anything but a coin, it hits harder by a quarter of the coin's power (a piercing beam by what
+	 * {@link PiercingBeam#fromCoin} makes of it).
 	 */
-	private void railPassOn(Coin coin, Level level, LocalPlayer player) {
+	private void beamPassOn(Coin coin, Level level, LocalPlayer player) {
 		Coin next = this.coins.stream()
 			.filter(c -> c != coin && c.hittable() && Hitscan.clear(level, player, coin.position, c.position))
 			.min(Comparator.comparingDouble(c -> c.position.distanceToSqr(coin.position)))
 			.orElse(null);
 		Vec3 target = null;
-		float added = coin.power / 4;
 		if (next != null) {
 			target = next.position;
-			added = 0;
 		} else {
 			Grenade grenade = grenadeTarget(coin, level, player);
 			if (grenade != null) {
@@ -2052,10 +2072,18 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		Vec3 direction = target != null
 			? target.subtract(coin.position).normalize()
 			: new Vec3(this.random.nextGaussian(), this.random.nextGaussian(), this.random.nextGaussian()).normalize();
-		if (coin.beam == Effects.BeamStyle.RAILCANNON) {
-			electricBeam(level, player, coin.position, direction, coin.position, RAIL_DAMAGE + added, coin.power + 1, coin.chainHits);
-		} else {
+		if (coin.altBeam == null) {
+			float added = next != null ? 0 : coin.power / 4;
 			maliciousBeam(level, player, coin.position, direction, coin.position, added, coin.power + 1, coin.chainHits);
+			return;
+		}
+		PiercingBeam beam = coin.altBeam.fromCoin(coin.power, coin.hitTimes > 1, next != null);
+		beam.coinPower = coin.power + 1;
+		beam.chainHits = coin.chainHits;
+		if (beam.type.railgun()) {
+			electricBeam(level, player, beam, coin.position, direction, coin.position);
+		} else {
+			revolverBeam(level, player, beam, coin.position, direction, coin.position);
 		}
 	}
 

@@ -30,6 +30,8 @@ public record WeaponHitPayload(int entityId, float damage, boolean head, Vec3 po
 
 	public enum Kind {
 		HIT,
+		/** A slab revolver's shot: an enemy it kills bursts. */
+		HIT_BURSTING,
 		/** A tick of the Screwdriver's drill: the enemy doesn't flinch, and its blood is twice the size. */
 		DRILL,
 		/** The drill punched out of an enemy: an enemy it kills bursts. */

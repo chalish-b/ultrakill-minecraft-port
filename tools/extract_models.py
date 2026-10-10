@@ -42,6 +42,9 @@ MODELS = {
     "revolver_piercer": ("Revolver Pierce", "Revolver", (0, 0, 0)),
     "revolver_marksman": ("Revolver Ricochet", "Revolver", (0, 0, 0)),
     "revolver_sharpshooter": ("Revolver Twirl", "Revolver", (0, 0, 0)),
+    "revolver_slab_piercer": ("Alternative Revolver Pierce", "Revolver", (0, 0, 0)),
+    "revolver_slab_marksman": ("Alternative Revolver Ricochet", "Revolver", (0, 0, 0)),
+    "revolver_slab_sharpshooter": ("Alternative Revolver Twirl", "Revolver", (0, 0, 0)),
     "shotgun_core_eject": ("Shotgun Grenade", "Shotgun", (0, 0, 0)),
     "shotgun_pump_charge": ("Shotgun Pump", "Shotgun", (0, 0, 0)),
     "shotgun_sawed_on": ("Shotgun Saw", "Shotgun", (0, 0, 0)),
@@ -62,6 +65,8 @@ MODELS = {
     "core": ("Grenade", "Grenade", None),
     "explosion_wave_knuckleblaster": ("Explosion Wave Knuckleblaster", "RandomPitch", None),
 }
+# Models that are a weapon's alternate version (its script's altVersion); every other model is the standard one.
+ALTERNATE = {"revolver_slab_piercer", "revolver_slab_marksman", "revolver_slab_sharpshooter"}
 
 # Models drawn in the world that are only reachable through another prefab's field:
 # name -> (script, the GameObject it's on, the field naming the prefab). Prefabs named from inside another
@@ -91,6 +96,7 @@ REFERENCED = {
     "slide_particle": ("NewMovement", "Player", "slideParticle"),
     "rocket": ("RocketLauncher", "Rocket Launcher Freeze", "rocket"),
     "rocket_launcher_muzzle_flash": ("RocketLauncher", "Rocket Launcher Freeze", "muzzleFlash"),
+    "quick_twirl": ("Revolver", "Alternative Revolver Pierce", "quickTwirlEffect"),
     "cannonball": ("RocketLauncher", "Rocket Launcher Cannonball", "cannonBall"),
     "gasoline_projectile": ("RocketLauncher", "Rocket Launcher Napalm", "napalmProjectile"),
 }
@@ -1068,14 +1074,18 @@ def export_scripts(exporter, rig, colors, placed, rects, pivots):
             if kind == "Revolver":
                 revolver = obj.read()
                 tree = obj.read_typetree()
-                texture = lambda p: exporter.texture(p)[0] if p.path_id else None  # noqa: E731
+                # Only the piercer has a screen; the others' battery fields can hold stale references.
+                screen = bool(revolver.screenMR.path_id)
+                texture = lambda p: exporter.texture(p)[0] if p.path_id and screen else None  # noqa: E731
                 scripts["revolver"] = {
                     "variation": tree["gunVariation"],
+                    "altVersion": bool(tree["altVersion"]),
+                    "screen": go_name_of(revolver.screenMR),
                     "variationColor": list(colors[tree["gunVariation"]]),
                     "batteryLow": texture(revolver.batteryLow),
                     "batteryMid": texture(revolver.batteryMid),
                     "batteryFull": texture(revolver.batteryFull),
-                    "batteryCharges": [texture(p) for p in revolver.batteryCharges],
+                    "batteryCharges": [texture(p) for p in revolver.batteryCharges] if screen else [],
                     "coinPanels": [list(placed[p.path_id]) for p in revolver.coinPanels],
                     "twirlBone": rig.index[revolver.twirlBone.path_id] if revolver.twirlBone.path_id else None,
                     "twirlSprite": go_name_of(revolver.twirlSprite),
@@ -1617,7 +1627,7 @@ def find_roots(env):
             if go.m_Name != root_name:
                 continue
             tree = obj.read_typetree()
-            if tree.get("altVersion"):
+            if bool(tree.get("altVersion")) != (model in ALTERNATE):
                 continue
             found[model] = (go, offset)
     return found

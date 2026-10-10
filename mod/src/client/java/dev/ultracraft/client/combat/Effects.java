@@ -53,6 +53,8 @@ final class Effects {
 		SUPER(0.5, new float[][]{{0, 1, 1, 1}, {1, 0, 0.8344827F, 1}}),
 		/** "Revolver Beam Sharp", the sharpshooter's charged shot: 0.5 units wide, white to red. */
 		SHARP(0.5, new float[][]{{0, 1, 1, 1}, {1, 1, 0.23529413F, 0.23529413F}}),
+		/** "Revolver Beam Alternative", the slab revolvers' shot: 0.35 units wide, orange to white. */
+		SLAB(0.35, new float[][]{{0, 1, 0.7249701F, 0}, {1, 1, 1, 1}}),
 		/**
 		 * "ReflectedBeamPoint", the coin's own beam when it passes a shot on or is punched: 0.5 units wide, orange,
 		 * paler in the middle.

@@ -196,6 +196,13 @@ def combat(env, x):
     sharp_beam = next(s for s in components(sharpshooter.revolverBeamSuper.deref().read(), "MonoBehaviour") if hasattr(s, "ricochetSound"))
     x.add_source("beam_ricochet.sharpshooter", source_ref(sharp_beam.ricochetSound))
 
+    # The slab revolvers share one gunshot; the slab piercer's charged shot and its fan the hammer have their own.
+    # Their RandomPitch sets their pitch; the mod does too.
+    slab_piercer = find_class(env, "Revolver", "Alternative Revolver Pierce", altVersion=1)
+    x.add_clip("revolver_shoot.slab", slab_piercer.gunShots[0])
+    x.add_source("revolver_super.slab", source_ref(slab_piercer.superGunSound))
+    x.add_source("revolver_quick_twirl", next(audio_sources(slab_piercer.quickTwirlEffect.deref().read())))
+
     coin_go = marksman.coin.deref().read()
     coin = next(s for s in components(coin_go, "MonoBehaviour") if hasattr(s, "coinHitSound"))
     x.add_source("coin_throw", next(components(coin_go, "AudioSource")))

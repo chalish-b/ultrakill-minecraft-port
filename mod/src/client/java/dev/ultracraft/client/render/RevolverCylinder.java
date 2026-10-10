@@ -33,6 +33,10 @@ final class RevolverCylinder {
 		}
 	}
 
+	int bone() {
+		return this.bone;
+	}
+
 	/** DoTurn: on to the next chamber. */
 	void turn() {
 		this.target = (this.target + 1) % this.chambers.length;

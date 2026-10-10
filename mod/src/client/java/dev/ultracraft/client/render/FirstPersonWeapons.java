@@ -52,6 +52,8 @@ public final class FirstPersonWeapons {
 	private static final String HEAT_SINK = "HeatSinkHeat";
 	/** HeatSinkHeat's tint; its Legacy Particles/Additive shader adds twice the tint, by its alpha. */
 	private static final float[] HEAT_TINT = {1, 0.24F, 0};
+	/** The slab revolver's fan the hammer flash (Revolver.quickTwirlEffect). */
+	private static final String QUICK_TWIRL = "quick_twirl";
 	/** The Sawed-On's chainsaw and its blade, and the bone the chainsaw sits on. */
 	private static final String CHAINSAW = "ChainsawLit";
 	private static final String CHAINSAW_BLADE = "ChainsawLitBlade";
@@ -64,6 +66,9 @@ public final class FirstPersonWeapons {
 		REVOLVER_PIERCER("revolver_piercer"),
 		REVOLVER_MARKSMAN("revolver_marksman"),
 		REVOLVER_SHARPSHOOTER("revolver_sharpshooter"),
+		REVOLVER_SLAB_PIERCER("revolver_slab_piercer"),
+		REVOLVER_SLAB_MARKSMAN("revolver_slab_marksman"),
+		REVOLVER_SLAB_SHARPSHOOTER("revolver_slab_sharpshooter"),
 		SHOTGUN_CORE_EJECT("shotgun_core_eject"),
 		SHOTGUN_PUMP_CHARGE("shotgun_pump_charge"),
 		SHOTGUN_SAWED_ON("shotgun_sawed_on"),
@@ -361,6 +366,8 @@ public final class FirstPersonWeapons {
 	private RocketLauncherState rocketLauncher = RocketLauncherState.NONE;
 	/** How long the Firestarter's muzzle flash sprite has been spinning (seconds). */
 	private double napalmSpin;
+	/** The slab revolver's quick twirl flash, while it's out. */
+	private @Nullable QuickTwirl quickTwirl;
 	/** The HUD camera's field of view (degrees), and whether a zoom narrows it (CameraController.Zoom). */
 	private double weaponFov = WEAPON_FOV;
 	private boolean zooming;
@@ -591,6 +598,37 @@ public final class FirstPersonWeapons {
 	}
 
 	/**
+	 * Revolver.InstaClick's QuickTwirlEffect: spawned at the cylinder, turned as the revolver is, and carried along
+	 * with the cylinder from then on.
+	 */
+	public void quickTwirl(Weapon weapon) {
+		Viewmodel viewmodel = weapon(weapon);
+		if (viewmodel == null || viewmodel.cylinder == null) {
+			return;
+		}
+		Matrix4f[] world = viewmodel.model.boneMatrices(viewmodel.pose, new Quaternionf());
+		Matrix4f cylinder = world[viewmodel.cylinder.bone()];
+		Matrix4f spawned = new Matrix4f(world[0]).setTranslation(cylinder.getTranslation(new Vector3f()));
+		this.quickTwirl = new QuickTwirl(weapon, new Matrix4f(cylinder).invert().mul(spawned));
+	}
+
+	/**
+	 * QuickTwirlEffect's sprite, relative to the cylinder it's parented to: its ScaleTransform shrinks it from its
+	 * prefab scale to nothing at 100 units of scale a second.
+	 */
+	private static final class QuickTwirl {
+		private static final double SHRINK_SPEED = 100;
+		final Weapon weapon;
+		final Matrix4f fromCylinder;
+		double age;
+
+		QuickTwirl(Weapon weapon, Matrix4f fromCylinder) {
+			this.weapon = weapon;
+			this.fromCylinder = fromCylinder;
+		}
+	}
+
+	/**
 	 * Punch.PunchSuccess: the arm turns towards the point it hit, at most 45 degrees about each axis, and comes
 	 * back once the punch is over.
 	 */
@@ -648,6 +686,12 @@ public final class FirstPersonWeapons {
 		this.nailgun = nailgun;
 		this.railcannonCharge = railcannonCharge;
 		this.rocketLauncher = rocketLauncher;
+		if (this.quickTwirl != null) {
+			this.quickTwirl.age += dt;
+			if (this.quickTwirl.weapon != held) {
+				this.quickTwirl = null;
+			}
+		}
 		double fovTarget = this.zooming ? Minecraft.getInstance().options.fov().get() / 2.0 : WEAPON_FOV;
 		double fovStep = 300 * dt;
 		this.weaponFov = Math.abs(fovTarget - this.weaponFov) <= fovStep ? fovTarget : this.weaponFov + Math.signum(fovTarget - this.weaponFov) * fovStep;
@@ -749,15 +793,24 @@ public final class FirstPersonWeapons {
 		}
 	}
 
-	/** Revolver.LateUpdate turns the sharpshooter's twirl bone about its forward axis, on top of its animation. */
+	/**
+	 * Revolver.LateUpdate turns the sharpshooter's twirl bone on top of its animation, adding the angle to its Euler
+	 * angles: to z (its forward axis) on the standard revolver, and taking it from x on the slab.
+	 */
 	private static void twirl(Viewmodel weapon, double angle) {
 		JsonObject revolver = weapon.model.script("revolver");
 		if (revolver == null || angle == 0 || !revolver.has("twirlBone") || revolver.get("twirlBone").isJsonNull()) {
 			return;
 		}
 		int bone = revolver.get("twirlBone").getAsInt();
-		Quaternionf rotation = new Quaternionf(weapon.pose.qx(bone), weapon.pose.qy(bone), weapon.pose.qz(bone), weapon.pose.qw(bone))
-			.rotateZ((float)Math.toRadians(angle));
+		Quaternionf rotation = new Quaternionf(weapon.pose.qx(bone), weapon.pose.qy(bone), weapon.pose.qz(bone), weapon.pose.qw(bone));
+		if (revolver.get("altVersion").getAsBoolean()) {
+			// Quaternion.Euler: about z, then x, then y, as rotationYXZ composes them.
+			Vector3f euler = rotation.getEulerAnglesYXZ(new Vector3f());
+			rotation.rotationYXZ(euler.y, euler.x - (float)Math.toRadians(angle), euler.z);
+		} else {
+			rotation.rotateZ((float)Math.toRadians(angle));
+		}
 		weapon.pose.setRotation(bone, rotation.x, rotation.y, rotation.z, rotation.w);
 	}
 
@@ -1262,6 +1315,7 @@ public final class FirstPersonWeapons {
 			submitCoinPanels(poseStack, collector, weapon.model, world, revolver);
 			submitTwirlSprite(poseStack, collector, weapon.model, world, revolver);
 		}
+		submitQuickTwirl(poseStack, collector, weapon, world);
 		poseStack.popPose();
 	}
 
@@ -1289,7 +1343,7 @@ public final class FirstPersonWeapons {
 			? Identifier.parse(revolver.get(texture).getAsString())
 			: Identifier.parse(charges.get(s.pierceShotCharge() < 50 ? 0 : s.pierceShotCharge() < 100 ? 1 : 2).getAsString());
 		for (UltraModel.Quad quad : model.quads()) {
-			if (quad.name().equals("Monitor")) {
+			if (quad.name().equals(revolver.get("screen").getAsString())) {
 				ModelOverlays.quad(poseStack, collector, RenderTypes.text(screen), world[quad.bone()], color);
 			} else if (quad.name().equals("ChargeEffect") && quad.texture() != null && s.pierceShotCharge() > 0) {
 				float scale = (float)(s.pierceShotCharge() * 0.02);
@@ -1297,6 +1351,26 @@ public final class FirstPersonWeapons {
 				ModelOverlays.quad(poseStack, collector, RenderTypes.entityTranslucentEmissive(quad.texture()), matrix, new float[]{1, 1, 1, 1});
 			}
 		}
+	}
+
+	private void submitQuickTwirl(PoseStack poseStack, SubmitNodeCollector collector, Viewmodel weapon, Matrix4f[] world) {
+		UltraModel model = UltraModel.get(QUICK_TWIRL);
+		if (this.quickTwirl == null || weapon.cylinder == null || model == null || model.sprites().isEmpty()) {
+			return;
+		}
+		UltraModel.Sprite sprite = model.sprites().getFirst();
+		int bone = sprite.bone();
+		Pose rest = model.rest();
+		Vector3f full = new Vector3f(rest.sx(bone), rest.sy(bone), rest.sz(bone));
+		float shrunk = (float)Math.max(1 - this.quickTwirl.age * QuickTwirl.SHRINK_SPEED / full.length(), 0);
+		if (shrunk <= 0) {
+			return;
+		}
+		Matrix4f matrix = new Matrix4f(world[weapon.cylinder.bone()]).mul(this.quickTwirl.fromCylinder)
+			.translate(rest.px(bone), rest.py(bone), rest.pz(bone))
+			.rotate(new Quaternionf(rest.qx(bone), rest.qy(bone), rest.qz(bone), rest.qw(bone)))
+			.scale(full.mul(shrunk));
+		ModelOverlays.sprite(poseStack, collector, RenderTypes.beaconBeam(sprite.texture(), true), matrix, sprite.rect(), sprite.color());
 	}
 
 	/** The sharpshooter's spin blur, fading in with the charge. */
@@ -1315,8 +1389,8 @@ public final class FirstPersonWeapons {
 
 	/**
 	 * The marksman's coin panels and the sharpshooter's charge meters (Revolver.CheckCoinCharges): one per coin or
-	 * shot, filling as it recharges, red (the marksman's) or gray (the sharpshooter's) until full, then in the
-	 * variant's color.
+	 * shot (the slab sharpshooter's one for all three), filling as it recharges, red (the marksman's) or gray (the
+	 * sharpshooter's) until full, then in the variant's color.
 	 */
 	private void submitCoinPanels(PoseStack poseStack, SubmitNodeCollector collector, UltraModel model, Matrix4f[] world, JsonObject revolver) {
 		List<int[]> panels = new ArrayList<>();
@@ -1329,6 +1403,7 @@ public final class FirstPersonWeapons {
 		}
 		float[] variation = variationColor(revolver);
 		float[] charging = revolver.get("variation").getAsInt() == 1 ? RED : GRAY;
+		boolean slabSharpshooter = revolver.get("altVersion").getAsBoolean() && revolver.get("variation").getAsInt() == 2;
 		for (int c = 0; c < model.canvases().size(); c++) {
 			UltraModel.Canvas canvas = model.canvases().get(c);
 			Matrix4f matrix = world[canvas.bone()];
@@ -1338,7 +1413,7 @@ public final class FirstPersonWeapons {
 				float fill = image.fillAmount();
 				for (int p = 0; p < panels.size(); p++) {
 					if (panels.get(p)[0] == c && panels.get(p)[1] == i) {
-						fill = (float)(this.state.coinCharge() / 100 - p);
+						fill = slabSharpshooter ? (float)(this.state.coinCharge() / 300) : (float)(this.state.coinCharge() / 100 - p);
 						color = fill < 1 ? charging : variation;
 					}
 				}

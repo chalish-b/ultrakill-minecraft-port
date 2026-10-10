@@ -209,6 +209,7 @@ public final class ServerCombat {
 		}
 		switch (hit.kind()) {
 			case HIT -> damage(player, target, hit.damage(), hit.head(), hit.position(), false, false);
+			case HIT_BURSTING -> damage(player, target, hit.damage(), hit.head(), hit.position(), true, false);
 			case DRILL -> drillDamage(player, target, hit.damage(), hit.position());
 			case DRILL_PUNCH -> damage(player, target, hit.damage(), hit.head(), hit.position(), true, false);
 			case NAIL -> nailDamage(player, target, hit.damage(), hit.position(), false);
