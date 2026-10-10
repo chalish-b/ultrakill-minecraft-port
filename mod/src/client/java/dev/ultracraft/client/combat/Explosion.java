@@ -138,6 +138,14 @@ final class Explosion {
 			);
 		}
 
+		/** RevolverBeam's hit particle from a rocket's beam (isRocketBeam): it launches the player as a rocket's would. */
+		Settings rocketExploded() {
+			return new Settings(
+				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize, this.damage, this.enemyDamageMultiplier,
+				this.pushForceMultiplier, this.halved, this.canHit, true, this.playerDamageOverride, this.touchShake, this.ultrabooster, this.fup, this.ignite
+			);
+		}
+
 		Settings enemiesOnly() {
 			return new Settings(
 				this.scale, this.startScale, this.colliderRadius, this.speed, this.maxSize, this.damage, this.enemyDamageMultiplier,

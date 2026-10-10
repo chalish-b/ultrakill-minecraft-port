@@ -32,6 +32,8 @@ public record WeaponHitPayload(int entityId, float damage, boolean head, Vec3 po
 		HIT,
 		/** A slab revolver's shot: an enemy it kills bursts. */
 		HIT_BURSTING,
+		/** A zone's hit on the body (shotgunzone, hammerzone): it only lands if it kills. */
+		ZONE,
 		/** A tick of the Screwdriver's drill: the enemy doesn't flinch, and its blood is twice the size. */
 		DRILL,
 		/** The drill punched out of an enemy: an enemy it kills bursts. */

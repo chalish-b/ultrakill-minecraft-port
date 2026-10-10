@@ -20,7 +20,7 @@ import dev.ultracraft.combat.Gore;
 import dev.ultracraft.combat.ServerCombat;
 import dev.ultracraft.net.BlockHitPayload;
 import dev.ultracraft.net.BurnPayload;
-import dev.ultracraft.net.CannonballHitPayload;
+import dev.ultracraft.net.KnockbackHitPayload;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionBlocksPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
@@ -72,6 +72,7 @@ import org.joml.Vector3f;
 import org.joml.Vector3fc;
 import org.jspecify.annotations.Nullable;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
@@ -86,11 +87,11 @@ import java.util.function.UnaryOperator;
 
 /**
  * The client's side of ULTRAKILL combat: weapon input, the revolver's shots and coins, the shotgun's pellets, the
- * nailgun's nails, magnets and zapper and the electricity between enemies, the railcannon's beams, the rocket launcher's rockets and cannonballs, the arms' punches (and boosting pellets with them) and the
+ * Jackhammer's swings, the nailgun's nails, magnets and zapper and the electricity between enemies, the railcannon's beams, the rocket launcher's rockets and cannonballs, the arms' punches (and boosting pellets with them) and the
  * Knuckleblaster's blast, the Whiplash, explosions, weapon charges (WeaponCharges) and the hitstops after a parry
  * or a punch. Hits go to the server, which applies them.
  */
-public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Nailgun.Actions, Railcannon.Actions, RocketLauncher.Actions, Pellet.Hits, Core.Hits,
+public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Jackhammer.Actions, Nailgun.Actions, Railcannon.Actions, RocketLauncher.Actions, Pellet.Hits, Core.Hits,
 	Rocket.Hits, FirstPersonWeapons.Events, Explosion.Hits, SawZone.Hits, ThrownSaw.Hits, Sawblade.Hits, Shockwave.Hits, Whiplash.Hits, Drill.Hits, Nail.Hits, GasolineProjectile.Hits,
 	Magnet.Hits, Zapper.Hits, Conductor.Hits {
 	public static final ClientCombat INSTANCE = new ClientCombat();
@@ -99,6 +100,38 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private static final double COIN_TARGET_RANGE = 64;
 	/** TimeController.TrueStop after a parry. */
 	private static final double PARRY_HITSTOP = 0.25;
+	/**
+	 * ShotgunHammer.ImpactRoutine: the swing reaches this far along the aim; missing an enemy, it looks for one in a
+	 * sphere this big just ahead of the camera, and in the same sphere swept this much further on.
+	 */
+	private static final double HAMMER_REACH = 8 * S;
+	private static final double HAMMER_SPHERE = 2.5 * S;
+	private static final double HAMMER_SWEEP = 3 * S;
+	/** Physics.OverlapSphere's 0.01 unit sphere at the camera: the cores, rockets and chainsaws the camera is in. */
+	private static final double HAMMER_TOUCH = 0.01 * S;
+	/** By tier: the swing's damage, the hitstop (TrueStop) it lands on an enemy with, and its push on the enemy (units a second). */
+	private static final float[] HAMMER_DAMAGE = {3, 6, 10};
+	private static final double[] HAMMER_HITSTOP = {0.05, 0.25, 0.5};
+	private static final double[] HAMMER_PUSH = {50, 100, 150};
+	/** DeliverDamage: by tier, the player's launch back off an enemy (as NewMovement.Launch's direction). */
+	private static final double[] HAMMER_ENEMY_LAUNCH = {100, 400, 700};
+	/** A hammer jump's launch back off a wall, by tier, before each jump in a row weakens it. */
+	private static final double[] HAMMER_JUMP_LAUNCH = {300, 400, 500};
+	/** The hammer zone's hit on the enemy's body (hammerzone). */
+	private static final float HAMMER_ZONE_DAMAGE = 4;
+	/** TrueStop when the swing hits a core or rocket. */
+	private static final double HAMMER_GRENADE_HITSTOP = 0.25;
+	/** After each stop, the swing waits this much longer (WaitForSeconds(0.01), which a stopped clock holds back). */
+	private static final double HAMMER_WAIT = 0.01;
+	/** A hammer jump knocks this many bits off the wall it hits within 8 units (CreateEnviroGibs). */
+	private static final int HAMMER_GIBS = 10;
+	/** By tier, the swing's hit effect (hitImpactParticle), with its sound. */
+	private static final String[] HAMMER_HITS = {"hammer_hit_light", "hammer_hit_medium", "hammer_hit_heavy"};
+	/** The Pump Charge's swing explosion for one or two pumps ("Explosion Hammer Weak"), and its block powers by pumps. */
+	private static final String EXPLOSION_HAMMER_WEAK = "explosion_hammer_weak";
+	private static final float[] HAMMER_PUMP_BLOCK_POWER = {0, 1, 2};
+	/** Two pumps: the weak explosion goes off at full volume, its RandomPitch's pitch 0.4 lower. */
+	private static final float[] HAMMER_PUMP_PITCH = {0.35F, 0.85F};
 	/** TimeController.HitStop after a punch lands. */
 	private static final double PUNCH_HITSTOP = 0.1;
 	/** A split shot goes on from its coin the second time this long after the first (ReflectRevolver). */
@@ -163,6 +196,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	/** The chainsaw's hits land where the aim meets the enemy, if it does within this far. */
 	private static final double SAW_AIM_REACH = 15 * S;
 	private static final String SAWED_ON = "shotgun_sawed_on";
+	private static final String HAMMER_SAWED_ON = "shotgun_hammer_sawed_on";
 	/** The thrown chainsaw, and the sawblade it becomes off its chain. */
 	private static final String THROWN_SAW = "chainsaw_thrown";
 	private static final String SAWBLADE = "chainsaw_sawblade";
@@ -231,7 +265,12 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private final GasolineStains stains = new GasolineStains();
 	private final Revolver.Input input = new Revolver.Input();
 	private final RandomSource random = RandomSource.create();
+	/** The shotguns and Jackhammers, and the charges they share. */
+	private final Shotgun.Charges shotgunCharges = new Shotgun.Charges();
 	private final Map<Shotgun.Variant, Shotgun> shotguns = new EnumMap<>(Shotgun.Variant.class);
+	private final Map<Jackhammer.Variant, Jackhammer> hammers = new EnumMap<>(Jackhammer.Variant.class);
+	/** The Jackhammer's swing while it's still landing, through its hitstops. */
+	private @Nullable HammerSwing swing;
 	private final SawZone sawZone = new SawZone();
 	private final List<ThrownSaw> saws = new ArrayList<>();
 	private final List<Shockwave> shockwaves = new ArrayList<>();
@@ -303,7 +342,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	private ClientCombat() {
 		for (Shotgun.Variant variant : Shotgun.Variant.values()) {
-			this.shotguns.put(variant, new Shotgun(variant, this.sounds));
+			this.shotguns.put(variant, new Shotgun(variant, weapon(variant), this.shotgunCharges, this.sounds));
+		}
+		for (Jackhammer.Variant variant : Jackhammer.Variant.values()) {
+			this.hammers.put(variant, new Jackhammer(variant, weapon(variant), this.shotgunCharges, this.sounds));
 		}
 		for (Revolver.Variant variant : Revolver.Variant.values()) {
 			for (boolean slab : new boolean[]{false, true}) {
@@ -369,18 +411,24 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 				this.zapper = null;
 			}
 			this.conductor.clear();
+			this.swing = null;
 			return;
 		}
 		ScreenFlashes.INSTANCE.update(dt, this.hitstopLeft > 0);
+		Jackhammer held = hammer(this.held);
 		if (this.hitstopLeft > 0) {
 			this.hitstopLeft -= dt;
 			if (this.hitstopLeft <= 0 && this.soundsPaused) {
 				this.soundsPaused = false;
 				minecraft.getSoundManager().resume();
 			}
+			if (held != null) {
+				held.lateUpdate(dt, true);
+			}
 			updateViewmodels(0);
 			return;
 		}
+		landSwing(dt, minecraft.level, player);
 		this.effects.update(dt, minecraft.level, player);
 		this.quietHealLeft -= dt;
 		this.revolverCharges.recharge(dt);
@@ -493,6 +541,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			if (shotgun != null) {
 				shotgun.update(dt, this.input, this);
 			}
+			Jackhammer hammer = hammer(this.held);
+			if (hammer != null && movement != null) {
+				hammer.update(dt, this.input, playerSpeed(movement), movement.beingPulled(), this);
+			}
 			Nailgun nailgun = nailgun(this.held);
 			if (nailgun != null) {
 				nailgun.update(dt, this.input, this);
@@ -503,7 +555,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			if (rocketLauncherVariant(this.held) != null) {
 				this.rocketLauncher.update(dt, this.input, this);
 			}
-			saw(dt, minecraft.level, player, shotgun);
+			saw(dt, minecraft.level, player, mountedSaw(this.held));
 			slam(minecraft.level, player);
 			this.slideEffects.update(UltraController.INSTANCE.movement());
 		} else {
@@ -512,8 +564,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			saw(dt, minecraft.level, player, null);
 			this.whiplash.cancel();
 		}
+		this.shotgunCharges.recharge(dt, this.saws.size());
 		for (Shotgun shotgun : this.shotguns.values()) {
-			shotgun.cool(dt, this.saws.size());
+			shotgun.cool(dt);
+		}
+		held = hammer(this.held);
+		if (held != null) {
+			held.lateUpdate(dt, false);
 		}
 		// Animators run after gameplay code, as Unity's do, so what it set this frame plays this frame.
 		updateViewmodels(dt);
@@ -531,15 +588,16 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		Shotgun shotgun = shotgun(this.held);
 		FirstPersonWeapons.ShotgunState shotgunDisplay = shotgun == null
 			? FirstPersonWeapons.ShotgunState.NONE
-			: new FirstPersonWeapons.ShotgunState(shotgun.heat(), shotgun.meter(), shotgun.tint(), shotgun.reddening(), shotgun.jitter(), new FirstPersonWeapons.SawState(
-				shotgun.variant == Shotgun.Variant.SAWED_ON && shotgun.sawAttached(), shotgun.sawing(), shotgun.sawBroken(), shotgun.bladeScroll()
-			));
+			: new FirstPersonWeapons.ShotgunState(shotgun.heat(), shotgun.meter(), shotgun.tint(), shotgun.reddening(), shotgun.jitter(),
+				shotgun.saw != null ? shotgun.saw.display() : FirstPersonWeapons.SawState.NONE);
+		Jackhammer hammer = hammer(this.held);
+		FirstPersonWeapons.HammerState hammerDisplay = hammer == null ? FirstPersonWeapons.HammerState.NONE : hammer.display();
 		Nailgun nailgun = nailgun(this.held);
 		FirstPersonWeapons.NailgunState nailgunDisplay = nailgun == null ? FirstPersonWeapons.NailgunState.NONE : nailgun.display();
 		FirstPersonWeapons.RocketLauncherState rocketLauncherDisplay = rocketLauncherVariant(this.held) == null
 			? FirstPersonWeapons.RocketLauncherState.NONE
 			: this.rocketLauncher.display();
-		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, nailgunDisplay, this.railcannon.charge(), rocketLauncherDisplay, this);
+		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, hammerDisplay, nailgunDisplay, this.railcannon.charge(), rocketLauncherDisplay, this);
 	}
 
 	private void updateHeld(FirstPersonWeapons.@Nullable Weapon weapon) {
@@ -553,6 +611,14 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		Shotgun shotgun = shotgun(this.held);
 		if (shotgun != null) {
 			shotgun.holster();
+		}
+		Jackhammer hammer = hammer(this.held);
+		if (hammer != null) {
+			// ShotgunHammer.OnDisable: a swing still landing lands at once.
+			if (this.swing != null && this.swing.hammer == hammer) {
+				finishSwing(this.swing);
+			}
+			hammer.holster();
 		}
 		Nailgun nailgun = nailgun(this.held);
 		if (nailgun != null) {
@@ -575,6 +641,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			shotgun = shotgun(weapon);
 			if (shotgun != null) {
 				shotgun.equip();
+			}
+			hammer = hammer(weapon);
+			if (hammer != null) {
+				hammer.equip(Minecraft.getInstance().options.keyAttack.isDown());
 			}
 			nailgun = nailgun(weapon);
 			if (nailgun != null) {
@@ -680,6 +750,33 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		};
 	}
 
+	private @Nullable Jackhammer hammer(FirstPersonWeapons.@Nullable Weapon weapon) {
+		if (weapon == null) {
+			return null;
+		}
+		return switch (weapon) {
+			case SHOTGUN_HAMMER_CORE_EJECT -> this.hammers.get(Jackhammer.Variant.CORE_EJECT);
+			case SHOTGUN_HAMMER_PUMP_CHARGE -> this.hammers.get(Jackhammer.Variant.PUMP_CHARGE);
+			case SHOTGUN_HAMMER_SAWED_ON -> this.hammers.get(Jackhammer.Variant.SAWED_ON);
+			default -> null;
+		};
+	}
+
+	private static FirstPersonWeapons.Weapon weapon(Jackhammer.Variant variant) {
+		return switch (variant) {
+			case CORE_EJECT -> FirstPersonWeapons.Weapon.SHOTGUN_HAMMER_CORE_EJECT;
+			case PUMP_CHARGE -> FirstPersonWeapons.Weapon.SHOTGUN_HAMMER_PUMP_CHARGE;
+			case SAWED_ON -> FirstPersonWeapons.Weapon.SHOTGUN_HAMMER_SAWED_ON;
+		};
+	}
+
+	/** The chainsaw on the held Sawed-On, the shotgun's or the Jackhammer's. */
+	private @Nullable MountedSaw mountedSaw(FirstPersonWeapons.@Nullable Weapon weapon) {
+		Shotgun shotgun = shotgun(weapon);
+		Jackhammer hammer = hammer(weapon);
+		return shotgun != null ? shotgun.saw : hammer != null ? hammer.saw : null;
+	}
+
 	private @Nullable Shotgun shotgun(FirstPersonWeapons.@Nullable Weapon weapon) {
 		if (weapon == null) {
 			return null;
@@ -763,6 +860,15 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 		if (stack.is(UltraItems.SHOTGUN_PUMP_CHARGE)) {
 			return FirstPersonWeapons.Weapon.SHOTGUN_PUMP_CHARGE;
+		}
+		if (stack.is(UltraItems.SHOTGUN_HAMMER_CORE_EJECT)) {
+			return FirstPersonWeapons.Weapon.SHOTGUN_HAMMER_CORE_EJECT;
+		}
+		if (stack.is(UltraItems.SHOTGUN_HAMMER_PUMP_CHARGE)) {
+			return FirstPersonWeapons.Weapon.SHOTGUN_HAMMER_PUMP_CHARGE;
+		}
+		if (stack.is(UltraItems.SHOTGUN_HAMMER_SAWED_ON)) {
+			return FirstPersonWeapons.Weapon.SHOTGUN_HAMMER_SAWED_ON;
 		}
 		if (stack.is(UltraItems.NAILGUN_ATTRACTOR)) {
 			return FirstPersonWeapons.Weapon.NAILGUN_ATTRACTOR;
@@ -1295,7 +1401,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		float pitch = coin.power > 2 ? 1 + (coin.power - 2) / 5 : 1;
 		this.sounds.play("coin_hit", 1, pitch);
 		this.sounds.play("coin_hit_flip", 1, 1);
-		if (coin.altBeam != null || coin.beam == Effects.BeamStyle.MALICIOUS) {
+		if (coin.altBeam != null || coin.singleBeam != null) {
 			beamPassOn(coin, level, player);
 			return;
 		}
@@ -1873,7 +1979,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			}
 		} else {
 			this.effects.beamFlash(drawFrom, camera, Effects.BeamStyle.MALICIOUS);
-			maliciousBeam(minecraft.level, player, eye, look, drawFrom, 0, Float.NaN, new HashSet<>());
+			singleBeam(SingleBeam.MALICIOUS, minecraft.level, player, eye, look, drawFrom, 0, Float.NaN, new HashSet<>());
 		}
 	}
 
@@ -1898,14 +2004,43 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	}
 
 	/**
-	 * The Malicious railcannon's beam ("Railcannon Beam Malicious", a RevolverBeam with one hit): a 0.4 unit sphere
-	 * along the aim stops at the first enemy, coin, core or rocket in its way, else at the wall, and its hit
-	 * particle, an explosion, goes off there. A coin fires it on instead. A core or rocket goes off twice as big,
-	 * ultraboosting the player, and the beam's own explosion then spares the player.
+	 * A single-target railgun beam (a RevolverBeam of the Railgun type with one hit): what it looks like, and the
+	 * explosion its hit particle makes, with the Minecraft explosion power that breaks blocks for it.
+	 */
+	enum SingleBeam {
+		/** "Railcannon Beam Malicious", the Malicious railcannon's: "Explosion Malicious Railcannon". */
+		MALICIOUS(Effects.BeamStyle.MALICIOUS, EXPLOSION_MALICIOUS, MALICIOUS_BLOCK_POWER, MALICIOUS_PITCH, false),
+		/** "Grenade Beam" (Grenade.GrenadeBeam), from a core the Jackhammer hits: "Explosion Big". */
+		CORE(Effects.BeamStyle.GRENADE, EXPLOSION_CANNONBALL, CANNONBALL_BLOCK_POWER, EXPLOSION_PITCH, false),
+		/** A rocket's grenade beam: its explosion is a rocket's (isRocketBeam). */
+		ROCKET(Effects.BeamStyle.GRENADE, EXPLOSION_CANNONBALL, CANNONBALL_BLOCK_POWER, EXPLOSION_PITCH, true),
+		/** A levelled-up rocket's: its hit particle is the rocket's super explosion. */
+		ROCKET_SUPER(Effects.BeamStyle.GRENADE, EXPLOSION_SUPER, SUPER_BLOCK_POWER, EXPLOSION_PITCH, true);
+
+		final Effects.BeamStyle style;
+		final String explosion;
+		final float blockPower;
+		final float[] pitch;
+		final boolean rocket;
+
+		SingleBeam(Effects.BeamStyle style, String explosion, float blockPower, float[] pitch, boolean rocket) {
+			this.style = style;
+			this.explosion = explosion;
+			this.blockPower = blockPower;
+			this.pitch = pitch;
+			this.rocket = rocket;
+		}
+	}
+
+	/**
+	 * A single-target railgun beam, such as the Malicious railcannon's: a 0.4 unit sphere along the aim stops at the
+	 * first enemy, coin, core or rocket in its way, else at the wall, and its hit particle, an explosion, goes off
+	 * there. A coin fires it on instead. A core or rocket goes off twice as big, ultraboosting the player, and the
+	 * beam's own explosion then spares the player.
 	 *
 	 * @param added damage coins have added to the beam, which its explosion gets 20 times over
 	 */
-	private void maliciousBeam(Level level, LocalPlayer player, Vec3 from, Vec3 direction, Vec3 drawFrom, float added, float coinPower, Set<Integer> chainHits) {
+	private void singleBeam(SingleBeam kind, Level level, LocalPlayer player, Vec3 from, Vec3 direction, Vec3 drawFrom, float added, float coinPower, Set<Integer> chainHits) {
 		Hitscan.Hit wall = Hitscan.cast(level, player, from, direction, RANGE, List.of()).getLast();
 		List<Hitscan.Hit> hits = Hitscan.sweep(level, player, from, wall.position(), MALICIOUS_RADIUS, this.coins, grenades());
 		UltraMovement movement = UltraController.INSTANCE.movement();
@@ -1913,36 +2048,39 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			movement.shake(2);
 		}
 		Hitscan.Hit hit = hits.isEmpty() ? wall : hits.getFirst();
-		beam(drawFrom, hit.position(), Effects.BeamStyle.MALICIOUS);
+		beam(drawFrom, hit.position(), kind.style);
 		Vec3 back = direction.scale(-1);
 		switch (hit.kind()) {
-			case COIN -> hit.coin().hit(Float.isNaN(coinPower) ? hit.coin().power : coinPower, chainHits, Effects.BeamStyle.MALICIOUS);
+			case COIN -> hit.coin().hit(Float.isNaN(coinPower) ? hit.coin().power : coinPower, chainHits, kind);
 			case ENTITY -> {
 				damage(level, hit.entity(), RAIL_DAMAGE + added, hit.head(), hit.position());
 				if (movement != null) {
 					movement.shake(0.5);
 				}
-				maliciousExplosion(hit.position(), back, added, false);
+				beamExplosion(kind, hit.position(), back, added, false);
 			}
 			case GRENADE -> {
 				grenadeNuke(hit.grenade());
-				maliciousExplosion(hit.position(), back, added, !(hit.grenade() instanceof Cannonball));
+				beamExplosion(kind, hit.position(), back, added, !(hit.grenade() instanceof Cannonball));
 			}
 			case BLOCK -> {
 				this.effects.impact(level, hit.position());
 				hitBlock(hit.block(), RAIL_DAMAGE + added);
-				maliciousExplosion(hit.position(), hit.face() != null ? hit.face().getUnitVec3() : back, added, false);
+				beamExplosion(kind, hit.position(), hit.face() != null ? hit.face().getUnitVec3() : back, added, false);
 			}
 			default -> {
 			}
 		}
 	}
 
-	private void maliciousExplosion(Vec3 at, Vec3 facing, float added, boolean sparesPlayer) {
-		explode(EXPLOSION_MALICIOUS, at, facing, false, MALICIOUS_BLOCK_POWER, settings -> {
+	private void beamExplosion(SingleBeam kind, Vec3 at, Vec3 facing, float added, boolean sparesPlayer) {
+		explode(kind.explosion, at, facing, false, kind.blockPower, settings -> {
 			Explosion.Settings set = settings.withAddedDamage(added);
+			if (kind.rocket) {
+				set = set.rocketExploded();
+			}
 			return sparesPlayer ? set.enemiesOnly() : set;
-		}, MALICIOUS_PITCH);
+		}, kind.pitch);
 	}
 
 	/**
@@ -2044,7 +2182,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	}
 
 	/**
-	 * Coin.ReflectRevolver with a piercing beam (its altBeam) or the Malicious railcannon's: the coin fires the beam
+	 * Coin.ReflectRevolver with a piercing beam (its altBeam) or a single-target railgun beam: the coin fires the beam
 	 * itself on, at the nearest coin it can see, else a core or rocket, else the nearest enemy's head, else anywhere.
 	 * Going on to anything but a coin, it hits harder by a quarter of the coin's power (a piercing beam by what
 	 * {@link PiercingBeam#fromCoin} makes of it).
@@ -2074,7 +2212,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			: new Vec3(this.random.nextGaussian(), this.random.nextGaussian(), this.random.nextGaussian()).normalize();
 		if (coin.altBeam == null) {
 			float added = next != null ? 0 : coin.power / 4;
-			maliciousBeam(level, player, coin.position, direction, coin.position, added, coin.power + 1, coin.chainHits);
+			singleBeam(coin.singleBeam, level, player, coin.position, direction, coin.position, added, coin.power + 1, coin.chainHits);
 			return;
 		}
 		PiercingBeam beam = coin.altBeam.fromCoin(coin.power, coin.hitTimes > 1, next != null);
@@ -2290,15 +2428,19 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	private void parryFlash() {
 		this.sounds.play("parry", 1, 1);
 		this.sounds.play("parry_ricochet", 1, 1);
-		this.hitstopLeft = Math.max(this.hitstopLeft, PARRY_HITSTOP);
-		// TimeController.TrueStop stops the world's sounds and music; the player's own play on.
-		Minecraft.getInstance().getSoundManager().pauseAllExcept(SoundSource.PLAYERS);
-		this.soundsPaused = true;
+		trueStop(PARRY_HITSTOP);
 		ScreenFlashes.INSTANCE.parry();
 		UltraMovement movement = UltraController.INSTANCE.movement();
 		if (movement != null) {
 			movement.shake(0.5);
 		}
+	}
+
+	/** TimeController.TrueStop: the world stops, its sounds and music with it; the player's own play on. */
+	private void trueStop(double seconds) {
+		this.hitstopLeft = Math.max(this.hitstopLeft, seconds);
+		Minecraft.getInstance().getSoundManager().pauseAllExcept(SoundSource.PLAYERS);
+		this.soundsPaused = true;
 	}
 
 	// ---- shotgun --------------------------------------------------------------------------------
@@ -2381,6 +2523,391 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		};
 	}
 
+	// ---- jackhammer -----------------------------------------------------------------------------
+
+	/** PlayerTracker.GetPlayerVelocity's speed: a third of it while dashing, and with a ridden rocket's added. */
+	private double playerSpeed(UltraMovement movement) {
+		Vec3 velocity = movement.velocity();
+		if (movement.boosting() && !movement.sliding()) {
+			velocity = velocity.scale(1 / 3.0);
+		}
+		for (Rocket rocket : this.rockets) {
+			if (rocket.playerRiding && !rocket.removed) {
+				velocity = velocity.add(rocket.velocity());
+			}
+		}
+		return velocity.length();
+	}
+
+	/**
+	 * A stop the swing makes on its way in: {@code start} as it begins, and {@code then} once it's over (and the swing's
+	 * wait after it).
+	 */
+	private record SwingStop(Runnable start, double seconds, Runnable then) {
+	}
+
+	/** A Jackhammer swing landing (ShotgunHammer.ImpactRoutine), which waits out each hitstop it makes. */
+	private static final class HammerSwing {
+		final Jackhammer hammer;
+		final int tier;
+		/** The swing's way: the aim as it's swung, and again as it lands on an enemy. */
+		Vec3 direction;
+		/** Its stops still to come, and what to do once the one under way is over. */
+		final ArrayDeque<SwingStop> stops = new ArrayDeque<>();
+		@Nullable Runnable afterStop;
+		double wait;
+		/** hitGrenade: it hit a core or rocket, so it can't hammer jump. */
+		boolean hitGrenade;
+		/** What it hit (target), and where (hitPosition): an enemy, a block, or neither. */
+		@Nullable LivingEntity enemy;
+		boolean head;
+		@Nullable BlockPos block;
+		@Nullable Vec3 hitPosition;
+		/** The enemy it hit was alive, and the hit killed it (hitEnemy.dead). */
+		boolean killed;
+		/**
+		 * The launch off the enemy (units a second). NewMovement.Launch's impulse waits for the next physics step, so
+		 * a hammer jump launched before then adds to it.
+		 */
+		Vec3 kick = Vec3.ZERO;
+		/** It didn't land at its tier on a living enemy, so its effect is the light one. */
+		boolean forceWeakHit = true;
+
+		HammerSwing(Jackhammer hammer, Vec3 direction) {
+			this.hammer = hammer;
+			this.tier = hammer.tier();
+			this.direction = direction;
+		}
+	}
+
+	/**
+	 * ShotgunHammer.Impact: the swing's targets, found as it's swung. Cores and rockets the camera is in are hit,
+	 * chainsaws there or along the aim are knocked on, and the aim finds what's in reach: an enemy, a core or rocket
+	 * (hit too), or a block. Short of an enemy, it takes the one nearest the middle of a sphere ahead of the camera
+	 * that it can see, or one it can see further on as the sphere sweeps ahead. It lands each core and rocket and the
+	 * enemy after a hitstop of its own; a block it lands on straight away.
+	 */
+	@Override
+	public void swingHammer(Jackhammer hammer) {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (player == null || minecraft.level == null || movement == null) {
+			return;
+		}
+		Level level = minecraft.level;
+		Vec3 eye = movement.eyePosition();
+		Vec3 direction = player.getLookAngle();
+		HammerSwing swing = new HammerSwing(hammer, direction);
+		List<Grenade> grenades = new ArrayList<>(this.cores);
+		grenades.addAll(this.rockets);
+		for (Grenade grenade : grenades) {
+			if (!grenade.removed && grenade.hitCenter().distanceTo(eye) <= grenade.hitRadius() + HAMMER_TOUCH) {
+				hammerGrenade(swing, grenade, false);
+			}
+		}
+		List<ThrownSaw> punched = new ArrayList<>();
+		for (ThrownSaw saw : this.saws) {
+			OrientedBox box = saw.box();
+			if (!saw.removed && (box.distanceTo(eye) <= HAMMER_TOUCH || box.clip(eye, direction, HAMMER_REACH).isPresent())) {
+				punched.add(saw);
+			}
+		}
+		if (!punched.isEmpty()) {
+			Vec3 target = parryLookTarget(level, player, eye, direction);
+			for (ThrownSaw saw : punched) {
+				this.sounds.play("hammer_hit", 1, 1);
+				saw.punched(eye, direction, target);
+			}
+		}
+		Hitscan.Hit first = Hitscan.cast(level, player, eye, direction, HAMMER_REACH, List.of(), grenades).getFirst();
+		switch (first.kind()) {
+			case ENTITY -> {
+				swing.enemy = first.entity();
+				swing.head = first.head();
+			}
+			case GRENADE -> hammerGrenade(swing, first.grenade(), true);
+			case BLOCK -> swing.block = first.block();
+			default -> {
+			}
+		}
+		if (first.kind() != Hitscan.Kind.END) {
+			swing.hitPosition = first.position();
+		}
+		if (swing.enemy == null) {
+			hammerSphere(level, player, eye, swing);
+		}
+		if (swing.enemy != null) {
+			swing.block = null;
+			swing.forceWeakHit = false;
+			swing.stops.add(new SwingStop(() -> this.sounds.play("hammer_hit", 1, 1), HAMMER_HITSTOP[swing.tier], () -> deliverHammerHit(swing)));
+		} else if (swing.block != null) {
+			hitBlock(swing.block, HAMMER_DAMAGE[swing.tier]);
+		}
+		hammer.impacting();
+		this.swing = swing;
+		landSwing(0, level, player);
+	}
+
+	/** A core or rocket the swing hits: a hitstop, then it fires its grenade beam. */
+	private void hammerGrenade(HammerSwing swing, Grenade grenade, boolean fromAim) {
+		for (SwingStop stop : swing.stops) {
+			if (stop.then() instanceof GrenadeBeam beam && beam.grenade() == grenade) {
+				return;
+			}
+		}
+		swing.hitGrenade = true;
+		swing.stops.add(new SwingStop(() -> {
+			this.sounds.play("hammer_hit", 1, 1);
+			Animator animator = FirstPersonWeapons.INSTANCE.animator(swing.hammer.weapon);
+			if (fromAim && animator != null) {
+				animator.play("Fire", 0);
+			}
+		}, HAMMER_GRENADE_HITSTOP, new GrenadeBeam(grenade)));
+	}
+
+	/** ShotgunHammer.HitNade: a core's or rocket's grenade beam, to what the player aims at once its stop is over. */
+	private final class GrenadeBeam implements Runnable {
+		private final Grenade grenade;
+
+		GrenadeBeam(Grenade grenade) {
+			this.grenade = grenade;
+		}
+
+		Grenade grenade() {
+			return this.grenade;
+		}
+
+		@Override
+		public void run() {
+			grenadeBeam(this.grenade);
+		}
+	}
+
+	/**
+	 * Short of an enemy along the aim: the one whose nearest point is nearest the middle of the sphere ahead of the
+	 * camera, then any further on along the aim as the sphere sweeps ahead; only ones the camera can see.
+	 */
+	private static void hammerSphere(Level level, LocalPlayer player, Vec3 eye, HammerSwing swing) {
+		Vec3 center = eye.add(swing.direction.scale(HAMMER_SPHERE));
+		double nearest = HAMMER_SPHERE;
+		for (LivingEntity enemy : level.getEntitiesOfClass(LivingEntity.class, new AABB(center, center).inflate(HAMMER_SPHERE + 1), e -> e != player && e.isAlive() && !e.isSpectator())) {
+			AABB box = enemy.getBoundingBox();
+			Vec3 point = new Vec3(Math.clamp(center.x, box.minX, box.maxX), Math.clamp(center.y, box.minY, box.maxY), Math.clamp(center.z, box.minZ, box.maxZ));
+			double distance = center.distanceTo(point);
+			if (distance < nearest && Hitscan.clear(level, player, eye, point)) {
+				nearest = distance;
+				swing.enemy = enemy;
+				swing.head = Hitscan.isHead(enemy, point);
+				swing.hitPosition = point;
+			}
+		}
+		double furthest = swing.enemy != null ? swing.direction.dot(swing.hitPosition.subtract(eye)) : -1;
+		Vec3 end = center.add(swing.direction.scale(HAMMER_SWEEP));
+		for (Hitscan.Hit hit : Hitscan.sweep(level, player, center, end, HAMMER_SPHERE, List.of(), List.of())) {
+			// Physics.SphereCastAll gives no point for what's already in the sphere where it starts.
+			if (hit.kind() != Hitscan.Kind.ENTITY || hit.distance() <= 0 || !Hitscan.clear(level, player, eye, hit.position())) {
+				continue;
+			}
+			double along = swing.direction.dot(hit.position().subtract(eye));
+			if (along > furthest) {
+				furthest = along;
+				swing.enemy = hit.entity();
+				swing.head = hit.head();
+				swing.hitPosition = hit.position();
+			}
+		}
+	}
+
+	/** The swing's stops, each started once the last is over, and then how it lands. */
+	private void landSwing(double dt, Level level, LocalPlayer player) {
+		HammerSwing swing = this.swing;
+		if (swing == null) {
+			return;
+		}
+		swing.wait = Math.max(swing.wait - dt, 0);
+		while (this.swing == swing && this.hitstopLeft <= 0 && swing.wait <= 0) {
+			if (swing.afterStop != null) {
+				Runnable then = swing.afterStop;
+				swing.afterStop = null;
+				then.run();
+				continue;
+			}
+			SwingStop stop = swing.stops.pollFirst();
+			if (stop == null) {
+				this.swing = null;
+				swingLanded(swing, level, player, true);
+				break;
+			}
+			stop.start().run();
+			trueStop(stop.seconds());
+			ClientPlayNetworking.send(new HitstopPayload((int)Math.round(stop.seconds() * 1000)));
+			swing.wait = HAMMER_WAIT;
+			swing.afterStop = stop.then();
+		}
+	}
+
+	/** ShotgunHammer.OnDisable: a swing still landing lands at once, without its hammer jump. */
+	private void finishSwing(HammerSwing swing) {
+		Minecraft minecraft = Minecraft.getInstance();
+		this.swing = null;
+		if (swing.afterStop != null) {
+			swing.afterStop.run();
+		}
+		for (SwingStop stop : swing.stops) {
+			stop.then().run();
+		}
+		if (minecraft.level != null && minecraft.player != null) {
+			swingLanded(swing, minecraft.level, minecraft.player, false);
+		}
+	}
+
+	/**
+	 * ShotgunHammer.DeliverDamage: the player is launched back off the enemy, along the aim as it is now. Launch's
+	 * impulse only lands in the next physics step, so the velocity it's checked against is none: the player goes
+	 * back at their speed of late, with the launch on top. The enemy takes the hammer zone's hit on its body, then the
+	 * swing's, bursting if it dies, knocked along the aim; a living enemy's hit can overheat the hammer.
+	 */
+	private void deliverHammerHit(HammerSwing swing) {
+		Minecraft minecraft = Minecraft.getInstance();
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		LivingEntity enemy = swing.enemy;
+		if (minecraft.player == null || minecraft.level == null || movement == null || enemy == null) {
+			return;
+		}
+		Vec3 direction = minecraft.player.getLookAngle();
+		swing.direction = direction;
+		int tier = swing.tier;
+		movement.launchImpulse(direction.scale(-HAMMER_ENEMY_LAUNCH[tier]));
+		swing.kick = movement.velocity();
+		double stored = swing.hammer.storedSpeed();
+		if (stored > 0) {
+			movement.setVelocity(swing.kick.subtract(direction.scale(stored)));
+		}
+		if (!enemy.isAlive()) {
+			return;
+		}
+		Vec3 at = swing.hitPosition != null ? swing.hitPosition : enemy.getBoundingBox().getCenter();
+		float damage = HAMMER_DAMAGE[tier];
+		boolean zoneKilled = !swing.head && zoneHit(minecraft.level, enemy, HAMMER_ZONE_DAMAGE, at);
+		swing.killed = zoneKilled || kills(enemy, damage);
+		ClientPlayNetworking.send(new KnockbackHitPayload(enemy.getId(), damage, direction.scale(HAMMER_PUSH[tier]), at));
+		Gore gore = swing.killed ? Gore.HEAD : Gore.of(false, damage, false);
+		this.effects.blood(minecraft.level, at, gore);
+		this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
+		swing.hammer.hitLiving();
+	}
+
+	/**
+	 * The end of the swing. Off a block, or an enemy it killed, the player hammer jumps: launched back along the swing,
+	 * weaker with each jump in a row, on top of the launch off the enemy (both impulses land in the same physics
+	 * step), knocking bits off the wall it's aimed at. Then ImpactEffects: the Pump Charge's
+	 * pumps go off as an explosion a unit short of what it hit (or 2.5 units ahead), the gun plays its tier's swing,
+	 * and the tier's hit effect shows there (the light one unless it landed at its tier on a living enemy).
+	 */
+	private void swingLanded(HammerSwing swing, Level level, LocalPlayer player, boolean canJump) {
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		swing.hammer.landed();
+		if (movement == null) {
+			return;
+		}
+		Vec3 eye = movement.eyePosition();
+		if (canJump && !swing.hitGrenade && (swing.enemy == null && swing.block != null || swing.enemy != null && swing.killed)) {
+			int jumps = movement.hammerJump();
+			movement.launchImpulse(swing.direction.scale(-HAMMER_JUMP_LAUNCH[swing.tier] / ((jumps + 3) / 3.0)));
+			movement.addVelocity(swing.kick);
+			BlockHitResult wall = level.clip(new ClipContext(eye, eye.add(swing.direction.scale(HAMMER_REACH)), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+			if (wall.getType() != HitResult.Type.MISS && level instanceof ClientLevel client) {
+				for (int i = 0; i < HAMMER_GIBS; i++) {
+					client.addBreakingBlockEffects(wall.getBlockPos(), wall.getDirection(), false);
+				}
+			}
+		}
+		Vec3 at = swing.hitPosition != null ? swing.hitPosition.subtract(swing.hitPosition.subtract(eye).normalize().scale(S)) : eye.add(swing.direction.scale(HAMMER_SPHERE));
+		int pumps = swing.hammer.takePumps();
+		if (pumps == Jackhammer.MAX_PUMPS) {
+			explode(EXPLOSION_SUPER, at, swing.direction, false, SUPER_BLOCK_POWER);
+		} else if (pumps > 0) {
+			boolean doubled = pumps == 2;
+			explode(EXPLOSION_HAMMER_WEAK, at, swing.direction, false, HAMMER_PUMP_BLOCK_POWER[pumps],
+				settings -> doubled ? settings.overridden(2, settings.damage(), settings.enemyDamageMultiplier()) : settings,
+				doubled ? HAMMER_PUMP_PITCH : EXPLOSION_PITCH, false, doubled ? 2 : 1);
+		}
+		boolean weak = swing.forceWeakHit || swing.tier == 0;
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(swing.hammer.weapon);
+		if (animator != null) {
+			animator.play(weak ? "Fire" : swing.tier == 1 ? "FireStrong" : "FireStrongest", 0);
+		}
+		String effect = HAMMER_HITS[swing.forceWeakHit ? 0 : swing.tier];
+		UltraModel model = UltraModel.get(effect);
+		if (model != null) {
+			this.effects.explosion(new ExplosionLook(model, List.of(), at, Effects.facing(player.getLookAngle())));
+		}
+		this.sounds.play(effect, 1, 1);
+	}
+
+	/**
+	 * Grenade.GrenadeBeam: the core or rocket is gone, and in its place a single-target railgun beam goes from it to
+	 * what the player aims at; a rocket's is a rocket beam, and a levelled-up one's hit particle its super explosion.
+	 * The gasoline it aims at lights.
+	 */
+	private void grenadeBeam(Grenade grenade) {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (grenade.removed || player == null || minecraft.level == null || movement == null) {
+			return;
+		}
+		Vec3 target = Hitscan.cast(minecraft.level, player, movement.eyePosition(), player.getLookAngle(), RANGE, List.of()).getFirst().position();
+		grenade.removed = true;
+		ClientPlayNetworking.send(new IgnitePayload(target, Gasoline.CHECK_SIZE));
+		SingleBeam kind = grenade instanceof Rocket rocket ? rocket.levelledUp ? SingleBeam.ROCKET_SUPER : SingleBeam.ROCKET : SingleBeam.CORE;
+		Vec3 direction = target.subtract(grenade.position).normalize();
+		this.effects.beamFlash(grenade.position, Effects.facing(direction), Effects.BeamStyle.GRENADE);
+		singleBeam(kind, minecraft.level, player, grenade.position, direction, grenade.position, 0, Float.NaN, new HashSet<>());
+	}
+
+	/**
+	 * ShotgunHammer.ThrowNade: a core two units ahead of the camera and half a unit below it, tumbling, lobbed forward
+	 * and up on top of the player's own velocity (or their rocket's); the gun's NadeSpawn, with its sound.
+	 */
+	@Override
+	public void throwHammerCore(Jackhammer hammer) {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		if (player == null || movement == null) {
+			return;
+		}
+		Vec3 look = player.getLookAngle();
+		Vec3 at = movement.eyePosition().add(look.scale(2 * S)).subtract(cameraUp().scale(0.5 * S));
+		Vec3 carried = movement.velocity();
+		for (Rocket rocket : this.rockets) {
+			if (rocket.playerRiding && !rocket.removed) {
+				carried = rocket.velocity();
+			}
+		}
+		Vec3 velocity = look.scale(3).add(0, 7.5, 0).add(carried);
+		Quaternionf tumble = new Quaternionf().rotateXYZ(this.random.nextFloat() * 6.2831855F, this.random.nextFloat() * 6.2831855F, this.random.nextFloat() * 6.2831855F);
+		this.cores.add(new Core(at, velocity, tumble, new Vector3f()));
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(hammer.weapon);
+		if (animator != null) {
+			animator.play("NadeSpawn", 0);
+		}
+		this.sounds.play("hammer_core_throw", 1, 1);
+	}
+
+	/** ShotgunHammer.Pump: the pump's charge tone, higher with each pump, its first slide, and the gun's Pump. */
+	@Override
+	public void pumpHammer(Jackhammer hammer) {
+		this.sounds.play("shotgun_pump_charge", 1, 1 + hammer.pumps() / 5F);
+		this.sounds.play("shotgun_pump1", 1, this.sounds.randomPitch(0.95F, 1.05F));
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(hammer.weapon);
+		if (animator != null) {
+			animator.play("Pump", 0);
+		}
+	}
+
 	// ---- slam -----------------------------------------------------------------------------------
 
 	/**
@@ -2454,30 +2981,27 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	// ---- chainsaw -------------------------------------------------------------------------------
 
 	/**
-	 * The Sawed-On's chainsaw: it idles on the gun while charged; revving, its zone hits enemies in front of the
+	 * The held Sawed-On's chainsaw: it idles on the gun while charged; revving, its zone hits enemies in front of the
 	 * gun, and it grinds walls the aim meets close by.
 	 */
-	private void saw(double dt, Level level, LocalPlayer player, @Nullable Shotgun shotgun) {
-		boolean sawedOn = shotgun != null && shotgun.variant == Shotgun.Variant.SAWED_ON;
-		if (sawedOn && shotgun.sawAttached()) {
+	private void saw(double dt, Level level, LocalPlayer player, @Nullable MountedSaw saw) {
+		if (saw != null && saw.attached()) {
 			this.sawIdle.update("chainsaw_idle", 1, 1);
 		} else {
 			this.sawIdle.stop();
 		}
-		boolean sawing = sawedOn && shotgun.sawing();
 		UltraMovement movement = UltraController.INSTANCE.movement();
-		if (!sawing || movement == null) {
+		if (saw == null || !saw.revving() || movement == null) {
 			this.sawZone.clear();
 			stopGrinding();
 			return;
 		}
-		UltraModel model = UltraModel.get(SAWED_ON);
-		JsonObject script = model == null ? null : model.script("shotgun");
+		JsonObject script = sawedOnScript(saw);
 		if (script == null || !script.has("sawZone")) {
 			return;
 		}
 		JsonObject zone = script.getAsJsonObject("sawZone");
-		Matrix4f bone = FirstPersonWeapons.INSTANCE.weaponBoneMatrix(FirstPersonWeapons.Weapon.SHOTGUN_SAWED_ON, zone.get("bone").getAsInt());
+		Matrix4f bone = FirstPersonWeapons.INSTANCE.weaponBoneMatrix(saw.weapon, zone.get("bone").getAsInt());
 		if (bone != null) {
 			// The trigger's capsule: its height along one of the bone's axes, its radius scaled by the larger of the other two.
 			JsonArray c = zone.getAsJsonArray("center");
@@ -2504,13 +3028,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	@Override
 	public void sawHit(LivingEntity enemy) {
 		Minecraft minecraft = Minecraft.getInstance();
-		UltraModel model = UltraModel.get(SAWED_ON);
-		Shotgun shotgun = this.shotguns.get(Shotgun.Variant.SAWED_ON);
+		MountedSaw saw = mountedSaw(this.held);
+		JsonObject script = saw == null ? null : sawedOnScript(saw);
 		UltraMovement movement = UltraController.INSTANCE.movement();
-		if (minecraft.level == null || minecraft.player == null || model == null || movement == null) {
+		if (minecraft.level == null || minecraft.player == null || script == null || movement == null) {
 			return;
 		}
-		float damage = model.script("shotgun").getAsJsonObject("sawZone").get("enemyDamage").getAsFloat();
+		float damage = script.getAsJsonObject("sawZone").get("enemyDamage").getAsFloat();
 		Vec3 eye = movement.eyePosition();
 		AABB box = enemy.getBoundingBox();
 		Vec3 at = box.clip(eye, eye.add(minecraft.player.getLookAngle().scale(SAW_AIM_REACH)))
@@ -2521,8 +3045,15 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		boolean survives = enemy.getHealth() > damage * ServerCombat.HEALTH_PER_DAMAGE;
 		shotgunHit(minecraft.level, enemy, damage, at);
 		if (survives) {
-			shotgun.sawHit();
+			saw.hit();
 		}
+	}
+
+	/** The script with the Sawed-On's chainsaw values: the shotgun's or the Jackhammer's. */
+	private static @Nullable JsonObject sawedOnScript(MountedSaw saw) {
+		boolean hammer = saw.weapon == FirstPersonWeapons.Weapon.SHOTGUN_HAMMER_SAWED_ON;
+		UltraModel model = UltraModel.get(hammer ? HAMMER_SAWED_ON : SAWED_ON);
+		return model == null ? null : model.script(hammer ? "shotgunHammer" : "shotgun");
 	}
 
 	/**
@@ -2562,20 +3093,32 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	}
 
 	/**
-	 * Shotgun.ShootSaw: thrown, the chainsaw goes with the throw's sounds (the gun's louder the harder it's
-	 * thrown); either way the gun plays its shot without reloading and the camera shakes.
+	 * ShootSaw. Thrown off the shotgun, the chainsaw goes with the throw's sounds (the gun's louder the harder it's
+	 * thrown), and the gun plays its shot without reloading; thrown off the Jackhammer, it goes with the core's
+	 * throw, and the gun plays its SawingShot. Either way the camera shakes.
 	 */
 	@Override
-	public void shootSaw(Shotgun.Variant variant, double force, boolean thrown) {
+	public void shootSaw(MountedSaw saw, double force, boolean thrown) {
+		boolean hammer = hammer(saw.weapon) != null;
 		if (thrown) {
-			throwSaw(force);
-			double share = force / Shotgun.MAX_FORCE;
-			this.sounds.play("shotgun_core_throw", (float)(0.45 * Math.sqrt(1 - share * share)), this.sounds.randomPitch(0.95F, 1.05F));
-			this.sounds.play("shotgun_shoot", (float)(0.45 * Math.max(0.5, share)), this.sounds.randomPitch(0.75F, 0.85F));
+			Minecraft minecraft = Minecraft.getInstance();
+			UltraMovement movement = UltraController.INSTANCE.movement();
+			if (minecraft.player != null && minecraft.level != null && movement != null) {
+				Vec3 eye = movement.eyePosition();
+				Vec3 look = minecraft.player.getLookAngle();
+				throwSaw(force, hammer ? hammerSawStart(minecraft.level, minecraft.player, eye, look) : shotgunSawStart(minecraft.level, minecraft.player, eye, look));
+			}
+			if (hammer) {
+				this.sounds.play("hammer_core_throw", 1, 1);
+			} else {
+				double share = force / Shotgun.MAX_FORCE;
+				this.sounds.play("shotgun_core_throw", (float)(0.45 * Math.sqrt(1 - share * share)), this.sounds.randomPitch(0.95F, 1.05F));
+				this.sounds.play("shotgun_shoot", (float)(0.45 * Math.max(0.5, share)), this.sounds.randomPitch(0.75F, 0.85F));
+			}
 		}
-		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon(variant));
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(saw.weapon);
 		if (animator != null) {
-			animator.play("FireNoReload", 0);
+			animator.play(hammer ? "SawingShot" : "FireNoReload", 0);
 		}
 		UltraMovement movement = UltraController.INSTANCE.movement();
 		if (movement != null) {
@@ -2583,23 +3126,31 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		}
 	}
 
+	/** Shotgun.ShootSaw: the chainsaw starts half a unit out of the camera, or as far as a wall allows. */
+	private static Vec3 shotgunSawStart(Level level, LocalPlayer player, Vec3 eye, Vec3 look) {
+		Vec3 reach = eye.add(look.scale(0.5 * S));
+		BlockHitResult wall = level.clip(new ClipContext(eye, reach, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+		return wall.getType() == HitResult.Type.MISS ? reach : eye.add(look.scale(Math.max(eye.distanceTo(wall.getLocation()) - 0.5 * S, 0)));
+	}
+
 	/**
-	 * Shotgun.ShootSaw's chainsaw: half a unit out of the camera (or as far as a wall allows), thrown along the aim
-	 * at 15 to 105 units a second with the charge.
+	 * ShotgunHammer.ShootSaw: the chainsaw starts half a unit out of the camera; with a wall within 5 units, it
+	 * starts 5 units back from where the aim meets it.
 	 */
-	private void throwSaw(double force) {
+	private static Vec3 hammerSawStart(Level level, LocalPlayer player, Vec3 eye, Vec3 look) {
+		BlockHitResult wall = level.clip(new ClipContext(eye, eye.add(look.scale(5 * S)), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+		return wall.getType() == HitResult.Type.MISS ? eye.add(look.scale(0.5 * S)) : wall.getLocation().subtract(look.scale(5 * S));
+	}
+
+	/** ShootSaw's chainsaw: from {@code at}, thrown along the aim at 15 to 105 units a second with the charge. */
+	private void throwSaw(double force, Vec3 at) {
 		Minecraft minecraft = Minecraft.getInstance();
 		LocalPlayer player = minecraft.player;
-		UltraMovement movement = UltraController.INSTANCE.movement();
 		UltraModel model = UltraModel.get(THROWN_SAW);
-		if (player == null || minecraft.level == null || movement == null || model == null) {
+		if (player == null || minecraft.level == null || model == null) {
 			return;
 		}
-		Vec3 eye = movement.eyePosition();
 		Vec3 look = player.getLookAngle();
-		Vec3 reach = eye.add(look.scale(0.5 * S));
-		BlockHitResult wall = minecraft.level.clip(new ClipContext(eye, reach, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
-		Vec3 at = wall.getType() == HitResult.Type.MISS ? reach : eye.add(look.scale(Math.max(eye.distanceTo(wall.getLocation()) - 0.5 * S, 0)));
 		ThrownSaw saw = new ThrownSaw(model.script("chainsaw"), at, this.sounds.loop());
 		saw.launch(minecraft.level, player, look.scale((force + 10) * 1.5), this);
 		this.saws.add(saw);
@@ -2635,8 +3186,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 	}
 
 	/**
-	 * Where the chain starts: the chainsaw's place on the Sawed-On while it's held, or else the player
-	 * (Shotgun.OnEnable and OnDisable).
+	 * Where the chain starts: the chainsaw's place on a Sawed-On while it's held, or else the player (OnEnable and
+	 * OnDisable).
 	 */
 	private @Nullable Vec3 chainStart() {
 		Minecraft minecraft = Minecraft.getInstance();
@@ -2644,7 +3195,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 		if (this.saws.isEmpty() || movement == null) {
 			return null;
 		}
-		if (this.held == FirstPersonWeapons.Weapon.SHOTGUN_SAWED_ON) {
+		if (this.held == FirstPersonWeapons.Weapon.SHOTGUN_SAWED_ON || this.held == FirstPersonWeapons.Weapon.SHOTGUN_HAMMER_SAWED_ON) {
 			FirstPersonWeapons.Frame point = FirstPersonWeapons.INSTANCE.weaponBone(this.held, "ChainSawAttachPoint");
 			if (point != null) {
 				Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
@@ -2852,9 +3403,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	/** The chainsaw's break effect where its blade is: a screech, sparks and their ricochet. */
 	@Override
-	public void sawBreaks(Shotgun.Variant variant, double shake) {
+	public void sawBreaks(MountedSaw saw, double shake) {
 		Minecraft minecraft = Minecraft.getInstance();
-		FirstPersonWeapons.Frame blade = FirstPersonWeapons.INSTANCE.weaponBone(weapon(variant), "Chainsaw_Blade");
+		FirstPersonWeapons.Frame blade = FirstPersonWeapons.INSTANCE.weaponBone(saw.weapon, "Chainsaw_Blade");
 		if (blade != null) {
 			Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
 			this.effects.particles("chainsaw_break", null, world(camera, blade.position()).scale(S).add(minecraft.gameRenderer.mainCamera().position()));
@@ -2878,15 +3429,37 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	/**
 	 * The shotgun's point-blank zone (Shotgun.Shoot): every enemy body the first 4 units of the aim pass
-	 * through, walls or not, takes 4 damage.
+	 * through, walls or not, takes a zone hit of 4.
 	 */
 	private void pointBlank(Level level, LocalPlayer player, Vec3 eye, Vec3 look) {
 		Vec3 end = eye.add(look.scale(POINT_BLANK_REACH));
 		for (LivingEntity enemy : level.getEntitiesOfClass(LivingEntity.class, new AABB(eye, end).inflate(1), e -> e != player && e.isAlive() && !e.isSpectator())) {
 			AABB box = enemy.getBoundingBox();
 			Optional<Vec3> entry = box.contains(eye) ? Optional.of(eye) : box.clip(eye, end);
-			entry.ifPresent(at -> shotgunHit(level, enemy, POINT_BLANK_DAMAGE, at));
+			entry.ifPresent(at -> zoneHit(level, enemy, POINT_BLANK_DAMAGE, at));
 		}
+	}
+
+	/**
+	 * A zone's hit on an enemy's body (the shotgun's shotgunzone, the Jackhammer's hammerzone): Machine.GetHurt only
+	 * lets it land if it kills.
+	 *
+	 * @return whether it landed
+	 */
+	private boolean zoneHit(Level level, LivingEntity enemy, float damage, Vec3 at) {
+		if (!kills(enemy, damage)) {
+			return false;
+		}
+		ClientPlayNetworking.send(new WeaponHitPayload(enemy.getId(), damage, false, at, WeaponHitPayload.Kind.ZONE));
+		Gore gore = Gore.of(false, damage, true);
+		this.effects.blood(level, at, gore);
+		this.sounds.play("gore." + gore.name().toLowerCase(), 1, this.sounds.randomPitch(0.75F, 1.5F));
+		return true;
+	}
+
+	/** Whether {@code damage} is enough to kill the enemy, as far as the client knows its health. */
+	private static boolean kills(LivingEntity enemy, float damage) {
+		return enemy.getHealth() + enemy.getAbsorptionAmount() <= damage * ServerCombat.HEALTH_PER_DAMAGE;
 	}
 
 	private void shotgunHit(Level level, LivingEntity enemy, float damage, Vec3 at) {
@@ -3121,6 +3694,13 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	/** Like the others; an explosion that {@code ignites} lights the gasoline around it (its ExplosionController). */
 	private void explode(String prefab, Vec3 at, @Nullable Vec3 facing, boolean boosted, float blockPower, UnaryOperator<Explosion.Settings> setUp, float[] pitch, boolean ignites) {
+		explode(prefab, at, facing, boosted, blockPower, setUp, pitch, ignites, 1);
+	}
+
+	/** Like the others, its sound {@code volume} times as loud as its prefab's. */
+	private void explode(
+		String prefab, Vec3 at, @Nullable Vec3 facing, boolean boosted, float blockPower, UnaryOperator<Explosion.Settings> setUp, float[] pitch, boolean ignites, float volume
+	) {
 		UltraModel model = UltraModel.get(prefab);
 		if (model == null) {
 			return;
@@ -3148,7 +3728,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 			}
 			movement.shake(shake);
 		}
-		this.sounds.play(prefab, 1, this.sounds.randomPitch(pitch[0], pitch[1]));
+		this.sounds.play(prefab, volume, this.sounds.randomPitch(pitch[0], pitch[1]));
 	}
 
 	/**
@@ -3456,7 +4036,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	@Override
 	public void cannonballHitEnemy(LivingEntity enemy, float damage, Vec3 push, Vec3 at) {
-		ClientPlayNetworking.send(new CannonballHitPayload(enemy.getId(), damage, push, at));
+		ClientPlayNetworking.send(new KnockbackHitPayload(enemy.getId(), damage, push, at));
 		Level level = Minecraft.getInstance().level;
 		if (level != null) {
 			Gore gore = Gore.of(false, damage, false);
@@ -3615,12 +4195,16 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Na
 
 	// ---- whiplash -------------------------------------------------------------------------------
 
-	/** HookArm.FixedUpdate, in each of the player's physics steps. */
-	public void whiplashFixedUpdate() {
+	/** HookArm.FixedUpdate and ShotgunHammer.FixedUpdate, in each of the player's physics steps. */
+	public void fixedUpdate() {
 		Minecraft minecraft = Minecraft.getInstance();
 		UltraMovement movement = UltraController.INSTANCE.movement();
 		if (minecraft.level != null && minecraft.player != null && movement != null) {
 			this.whiplash.fixedUpdate(minecraft.level, minecraft.player, movement);
+			Jackhammer hammer = hammer(this.held);
+			if (hammer != null) {
+				hammer.fixedUpdate(UltraMovement.FIXED_DT, playerSpeed(movement));
+			}
 		}
 	}
 

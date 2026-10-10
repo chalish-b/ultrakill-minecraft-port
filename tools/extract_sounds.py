@@ -299,6 +299,7 @@ def combat(env, x):
     nailgun(env, x)
     jumpstart(env, x)
     rocket_launcher(env, x)
+    jackhammer(env, x)
 
     ground = next(g for g in (o.read() for o in env.objects if o.type.name == "MonoBehaviour" and script_class(o) == "GroundCheck") if g.shockwave.path_id)
     shockwave = next(m for m in components(ground.shockwave.deref().read(), "MonoBehaviour") if hasattr(m, "soundEffect"))
@@ -446,6 +447,43 @@ def rocket_launcher(env, x):
     x.add_source("rocket_ride", ride)
     cannonball(env, x)
     firestarter(env, x)
+
+
+def jackhammer(env, x):
+    """The Jackhammer (ShotgunHammer): its hit, the impact effects by speed tier, the hammer being pulled back, the
+    motor, the overheat's hiss, the core's throw and its ready sound, and the weak pump explosion. Its pumps, beeps
+    and chainsaw are the shotgun's; the extraction checks they still are. The code sets the loops' volumes and
+    pitches."""
+    hammer = find_class(env, "ShotgunHammer", "Hammer Grenade", variation=0)
+    x.add_source("hammer_hit", source_ref(hammer.hitSound))
+    for event, pptr in zip(("hammer_hit_light", "hammer_hit_medium", "hammer_hit_heavy"), hammer.hitImpactParticle):
+        x.add_source(event, next(audio_sources(pptr.deref().read())))
+    x.add_clip("hammer_pull", source_ref(hammer.hammerPullSound).m_audioClip)
+    x.add_clip("hammer_motor", source_ref(hammer.motorSound).m_audioClip)
+    x.add_source("hammer_overheat", source_ref(hammer.overheatAud))
+    x.add_source("hammer_core_throw", source_ref(hammer.nadeSpawnSound))
+    x.add_source("hammer_core_ready", source_ref(hammer.nadeReadySound))
+    pump = find_class(env, "ShotgunHammer", "Hammer Pump", variation=1)
+    x.add_source("explosion_hammer_weak", next(audio_sources(pump.pumpExplosion.deref().read())))
+
+    def clip(source):
+        return source.m_audioClip.deref().read().m_Name
+
+    shotgun = find_class(env, "Shotgun", "Shotgun Pump", variation=1)
+    saw = find_class(env, "Shotgun", "Shotgun Saw", variation=2)
+    hammer_saw = find_class(env, "ShotgunHammer", "Hammer Saw", variation=2)
+    shared = [
+        (source_ref(pump.pumpChargeSound), source_ref(shotgun.pumpChargeSound)),
+        (source_ref(pump.warningBeep), source_ref(shotgun.warningBeep)),
+        (source_ref(hammer_saw.chargeSoundBubble), source_ref(saw.chargeSoundBubble)),
+        (source_ref(hammer_saw.environmentalSawSound), source_ref(saw.environmentalSawSound)),
+    ]
+    for ours, theirs in shared:
+        if clip(ours) != clip(theirs):
+            raise LookupError(f"the Jackhammer's {clip(ours)} isn't the shotgun's {clip(theirs)}")
+    for ours, theirs in ((source_ref(pump.pump1Sound), shotgun.pump1sound), (source_ref(pump.pump2Sound), shotgun.pump2sound)):
+        if clip(ours) != theirs.deref().read().m_Name:
+            raise LookupError(f"the Jackhammer's {clip(ours)} isn't the shotgun's pump")
 
 
 def cannonball(env, x):

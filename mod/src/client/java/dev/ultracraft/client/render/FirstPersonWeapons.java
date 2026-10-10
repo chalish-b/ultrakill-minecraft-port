@@ -30,7 +30,7 @@ import java.util.Set;
 import java.util.function.IntPredicate;
 
 /**
- * The first-person viewmodels: the held revolver, shotgun, nailgun, railcannon or rocket launcher, the current arm (the Feedbacker or the
+ * The first-person viewmodels: the held revolver, shotgun, Jackhammer, nailgun, railcannon or rocket launcher, the current arm (the Feedbacker or the
  * Knuckleblaster) and the Whiplash's arm, each played by its own Animator. The arm is always there; its idle pose
  * keeps it below the screen until it punches or flips a coin. The Whiplash's arm shows from a throw until it has
  * caught its hook again.
@@ -47,6 +47,7 @@ public final class FirstPersonWeapons {
 	private static final float[] YELLOW = {1, 0.92156863F, 0.015686275F, 1};
 	private static final float[] BLACK = {0, 0, 0, 1};
 	private static final float[] GRAY = {0.5F, 0.5F, 0.5F, 1};
+	private static final float[] WHITE = {1, 1, 1, 1};
 
 	/** The shotgun's heat sink glow (HeatSinkHeat). */
 	private static final String HEAT_SINK = "HeatSinkHeat";
@@ -72,6 +73,9 @@ public final class FirstPersonWeapons {
 		SHOTGUN_CORE_EJECT("shotgun_core_eject"),
 		SHOTGUN_PUMP_CHARGE("shotgun_pump_charge"),
 		SHOTGUN_SAWED_ON("shotgun_sawed_on"),
+		SHOTGUN_HAMMER_CORE_EJECT("shotgun_hammer_core_eject"),
+		SHOTGUN_HAMMER_PUMP_CHARGE("shotgun_hammer_pump_charge"),
+		SHOTGUN_HAMMER_SAWED_ON("shotgun_hammer_sawed_on"),
 		NAILGUN_ATTRACTOR("nailgun_attractor"),
 		NAILGUN_OVERHEAT("nailgun_overheat"),
 		NAILGUN_JUMPSTART("nailgun_jumpstart"),
@@ -103,6 +107,10 @@ public final class FirstPersonWeapons {
 		boolean rocketLauncher() {
 			return this.model.startsWith("rocket_launcher_");
 		}
+
+		boolean hammer() {
+			return this.model.startsWith("shotgun_hammer_");
+		}
 	}
 
 	/**
@@ -122,12 +130,14 @@ public final class FirstPersonWeapons {
 		public static final RevolverState NONE = new RevolverState(0, 100, true, 400, 0, false, 0, 0, 0);
 	}
 
-	/** The shotgun meter fill's color: its variant's (reddened by some amount), or red, black or gray. */
+	/** A shotgun or Jackhammer meter fill's color: its variant's (reddened by some amount), or red, black, gray, white or yellow. */
 	public enum MeterTint {
 		VARIANT,
 		RED,
 		BLACK,
-		GRAY
+		GRAY,
+		WHITE,
+		YELLOW
 	}
 
 	/**
@@ -167,6 +177,28 @@ public final class FirstPersonWeapons {
 
 	public record ShotgunState(double heat, double meter, MeterTint tint, double reddening, Vec3 jitter, SawState saw) {
 		public static final ShotgunState NONE = new ShotgunState(0, 60, MeterTint.VARIANT, 0, Vec3.ZERO, SawState.NONE);
+	}
+
+	/**
+	 * What the held Jackhammer shows (ShotgunHammer.UpdateMeter and LateUpdate).
+	 *
+	 * @param tier the speed tier, whose glow texture the dial shows
+	 * @param glow the dial glow's intensity, 0 or 1
+	 * @param needle degrees the dial's needle is turned about its up axis
+	 * @param pull how far down the hammer is pulled back, in units
+	 * @param motorAngle degrees the motor has turned
+	 * @param motorSpriteAlpha how visible the motor's spin blur is
+	 * @param meterFill the secondary meter's radial fill amount, 0 to 1
+	 * @param reddening how far a {@link MeterTint#VARIANT} meter has reddened, 0 to 1
+	 * @param overheated whether it's overheated: it vents steam
+	 * @param jitter how far the gun shakes from its place while the hammer's pulled back, in units
+	 * @param sawJitter how far the gun shakes while its chainsaw revs, in units
+	 */
+	public record HammerState(
+		int tier, double glow, double needle, double pull, double motorAngle, double motorSpriteAlpha, double meterFill, MeterTint meterTint, double reddening,
+		boolean overheated, Vec3 jitter, Vec3 sawJitter, SawState saw
+	) {
+		public static final HammerState NONE = new HammerState(0, 1, 170, 0, 0, 0, 1, MeterTint.WHITE, 0, false, Vec3.ZERO, Vec3.ZERO, SawState.NONE);
 	}
 
 	/**
@@ -280,6 +312,8 @@ public final class FirstPersonWeapons {
 		final List<ViewmodelParticles> fullChargeParticles = new ArrayList<>();
 		/** A nailgun's heat steam. */
 		final List<ViewmodelParticles> steamParticles = new ArrayList<>();
+		/** The Jackhammer's overheat steam. */
+		final List<ViewmodelParticles> overheatParticles = new ArrayList<>();
 		/** The Firestarter's spray, off its muzzle flash, and its particles' start color. */
 		final List<ViewmodelParticles> napalmParticles = new ArrayList<>();
 		final List<float[]> napalmParticleColors = new ArrayList<>();
@@ -309,6 +343,16 @@ public final class FirstPersonWeapons {
 			if (model.script("nailgun") != null) {
 				for (JsonElement system : model.particles()) {
 					this.steamParticles.add(new ViewmodelParticles(system.getAsJsonObject(), model.rest().sx(system.getAsJsonObject().get("bone").getAsInt())));
+				}
+			}
+			JsonObject hammer = model.script("shotgunHammer");
+			if (hammer != null) {
+				int overheat = hammer.get("overheatParticle").getAsInt();
+				for (JsonElement element : model.particles()) {
+					JsonObject system = element.getAsJsonObject();
+					if (system.get("bone").getAsInt() == overheat) {
+						this.overheatParticles.add(new ViewmodelParticles(system, model.rest().sx(overheat)));
+					}
 				}
 			}
 			JsonObject rocketLauncher = model.script("rocketLauncher");
@@ -346,6 +390,7 @@ public final class FirstPersonWeapons {
 	private @Nullable Weapon held;
 	private RevolverState state = RevolverState.NONE;
 	private ShotgunState shotgun = ShotgunState.NONE;
+	private HammerState hammer = HammerState.NONE;
 	private NailgunState nailgun = NailgunState.NONE;
 	/** The arm's parent (FistControl's "Punch"), turned towards what it last hit. */
 	private final Quaternionf armRotation = new Quaternionf();
@@ -530,6 +575,7 @@ public final class FirstPersonWeapons {
 		if (viewmodel != null) {
 			viewmodel.fullChargeParticles.forEach(ViewmodelParticles::stop);
 			viewmodel.steamParticles.forEach(ViewmodelParticles::stop);
+			viewmodel.overheatParticles.forEach(ViewmodelParticles::stop);
 		}
 	}
 
@@ -677,12 +723,13 @@ public final class FirstPersonWeapons {
 	 * @param rocketLauncher what the rocket launcher's dial shows
 	 */
 	public void update(
-		double dt, @Nullable Weapon held, RevolverState state, ShotgunState shotgun, NailgunState nailgun, double railcannonCharge, RocketLauncherState rocketLauncher,
-		Events events
+		double dt, @Nullable Weapon held, RevolverState state, ShotgunState shotgun, HammerState hammer, NailgunState nailgun, double railcannonCharge,
+		RocketLauncherState rocketLauncher, Events events
 	) {
 		this.held = held;
 		this.state = state;
 		this.shotgun = shotgun;
+		this.hammer = hammer;
 		this.nailgun = nailgun;
 		this.railcannonCharge = railcannonCharge;
 		this.rocketLauncher = rocketLauncher;
@@ -703,6 +750,9 @@ public final class FirstPersonWeapons {
 					weapon.animator.setFloat("TwirlSpeed", (float)state.twirlSpeed());
 				} else if (held.nailgun()) {
 					weapon.animator.setLayerWeight(1, nailgun.layerWeight());
+				} else if (held.hammer()) {
+					weapon.animator.setBool("Cooldown", hammer.overheated());
+					weapon.animator.setBool("Sawing", hammer.saw().sawing());
 				} else if (!held.railcannon() && !held.rocketLauncher()) {
 					weapon.animator.setBool("Sawing", shotgun.saw().sawing());
 				}
@@ -725,7 +775,13 @@ public final class FirstPersonWeapons {
 					}
 				}
 				napalmFlash(dt, weapon, rocketLauncher);
-				shakeSaw(dt, weapon, shotgun.saw().broken());
+				if (held.hammer()) {
+					placeHammer(weapon, hammer);
+					for (ViewmodelParticles system : weapon.overheatParticles) {
+						system.update(dt, hammer.overheated());
+					}
+				}
+				shakeSaw(dt, weapon, held.hammer() ? hammer.saw().broken() : shotgun.saw().broken());
 				if (weapon.cylinder != null && weapon.cylinder.update(dt, state.cylinderSpin(), weapon.pose)) {
 					events.cylinderClicked();
 				}
@@ -778,6 +834,31 @@ public final class FirstPersonWeapons {
 		for (ViewmodelParticles system : weapon.napalmParticles) {
 			system.update(dt, state.spraying());
 		}
+	}
+
+	/**
+	 * ShotgunHammer.Update and LateUpdate on the Jackhammer's bones: the gun shakes while the hammer's pulled back, the
+	 * hammer comes down as it's pulled, the dial's needle points at the speed (or the overheat left), and the motor
+	 * turns.
+	 */
+	private static void placeHammer(Viewmodel weapon, HammerState state) {
+		JsonObject script = weapon.model.script("shotgunHammer");
+		if (script == null) {
+			return;
+		}
+		Pose rest = weapon.model.rest();
+		int model = script.get("model").getAsInt();
+		Vec3 jitter = state.jitter();
+		weapon.pose.setPosition(model, rest.px(model) + (float)jitter.x, rest.py(model) + (float)jitter.y, rest.pz(model) + (float)jitter.z);
+		int hammer = script.get("hammer").getAsInt();
+		weapon.pose.setPosition(hammer, rest.px(hammer), rest.py(hammer) - (float)state.pull(), rest.pz(hammer));
+		int dial = script.get("dial").getAsInt();
+		// Quaternion.Euler(0, needle, -90): about z, then y.
+		Quaternionf needle = new Quaternionf().rotateY((float)Math.toRadians(state.needle())).rotateZ((float)Math.toRadians(-90));
+		weapon.pose.setRotation(dial, needle.x, needle.y, needle.z, needle.w);
+		int motor = script.get("motor").getAsInt();
+		Quaternionf turned = new Quaternionf(rest.qx(motor), rest.qy(motor), rest.qz(motor), rest.qw(motor)).rotateY((float)Math.toRadians(state.motorAngle()));
+		weapon.pose.setRotation(motor, turned.x, turned.y, turned.z, turned.w);
 	}
 
 	/** Spin on the nailgun's barrels: each turned about its own axis by how far they've spun. */
@@ -878,6 +959,8 @@ public final class FirstPersonWeapons {
 			submitNailgun(poseStack, collector, light, weapon);
 		} else if (weapon != null && this.held.rocketLauncher()) {
 			submitRocketLauncher(poseStack, collector, light, weapon);
+		} else if (weapon != null && this.held.hammer()) {
+			submitHammer(poseStack, collector, light, weapon);
 		} else if (weapon != null) {
 			submitShotgun(poseStack, collector, light, weapon);
 		}
@@ -895,14 +978,7 @@ public final class FirstPersonWeapons {
 		poseStack.translate(jitter.x, jitter.y, -jitter.z);
 		Matrix4f[] world = weapon.model.boneMatrices(weapon.pose, new Quaternionf());
 		weapon.model.submit(poseStack, collector, light, world, Set.of(HEAT_SINK, CHAINSAW, CHAINSAW_BLADE));
-		JsonObject script = weapon.model.script("shotgun");
-		SawState saw = this.shotgun.saw();
-		if (saw.attached() && script != null && script.has("brokenTexture")) {
-			Identifier broken = Identifier.parse(script.get("brokenTexture").getAsString());
-			Identifier blur = Identifier.parse(script.get("bladeMotionTexture").getAsString());
-			weapon.model.submitMaterial(poseStack, collector, world, CHAINSAW, texture -> RenderTypes.entityCutout(saw.broken() ? broken : texture), 0xFFFFFFFF, light);
-			weapon.model.submitMaterial(poseStack, collector, world, CHAINSAW_BLADE, texture -> RenderTypes.entityCutout(saw.sawing() ? blur : texture), 0xFFFFFFFF, light, (float)saw.bladeScroll());
-		}
+		submitSaw(poseStack, collector, light, weapon, world, weapon.model.script("shotgun"), this.shotgun.saw());
 		float heat = (float)Math.clamp(this.shotgun.heat(), 0, 1);
 		if (heat > 0) {
 			int color = 0xFF000000 | channel(2 * HEAT_TINT[0] * heat) << 16 | channel(2 * HEAT_TINT[1] * heat) << 8 | channel(2 * HEAT_TINT[2] * heat);
@@ -918,6 +994,66 @@ public final class FirstPersonWeapons {
 				}
 				ModelOverlays.image(poseStack, collector, RenderTypes.text(image.texture()), world[canvas.bone()], image, color, image.fillAmount(), i);
 			}
+		}
+		poseStack.popPose();
+	}
+
+	/** The Sawed-On chainsaw while it's on the gun: its blade blurs and runs while revving, and it looks worn out once worn. */
+	private static void submitSaw(PoseStack poseStack, SubmitNodeCollector collector, int light, Viewmodel weapon, Matrix4f[] world, @Nullable JsonObject script, SawState saw) {
+		if (!saw.attached() || script == null || !script.has("brokenTexture")) {
+			return;
+		}
+		Identifier broken = Identifier.parse(script.get("brokenTexture").getAsString());
+		Identifier blur = Identifier.parse(script.get("bladeMotionTexture").getAsString());
+		weapon.model.submitMaterial(poseStack, collector, world, CHAINSAW, texture -> RenderTypes.entityCutout(saw.broken() ? broken : texture), 0xFFFFFFFF, light);
+		weapon.model.submitMaterial(poseStack, collector, world, CHAINSAW_BLADE, texture -> RenderTypes.entityCutout(saw.sawing() ? blur : texture), 0xFFFFFFFF, light, (float)saw.bladeScroll());
+	}
+
+	/**
+	 * The Jackhammer: its dial glowing with the speed tier's texture (dark while overheated, blinking while a tier is
+	 * held), the motor's spin blur fading in with its speed, the secondary meter, the overheat's steam and the
+	 * Sawed-On's chainsaw. Revving shakes it.
+	 */
+	private void submitHammer(PoseStack poseStack, SubmitNodeCollector collector, int light, Viewmodel weapon) {
+		JsonObject script = weapon.model.script("shotgunHammer");
+		if (script == null) {
+			return;
+		}
+		HammerState state = this.hammer;
+		Vec3 jitter = state.sawJitter();
+		poseStack.pushPose();
+		poseStack.translate(jitter.x, jitter.y, -jitter.z);
+		Matrix4f[] world = weapon.model.boneMatrices(weapon.pose, new Quaternionf());
+		String dial = script.get("dialMaterial").getAsString();
+		weapon.model.submit(poseStack, collector, light, world, Set.of(dial, CHAINSAW, CHAINSAW_BLADE));
+		weapon.model.submitMaterial(poseStack, collector, world, dial, RenderTypes::entityCutout, 0xFFFFFFFF, light);
+		if (state.glow() > 0) {
+			Identifier glow = Identifier.parse(script.getAsJsonArray("dialGlows").get(state.tier()).getAsString());
+			int channel = channel((float)state.glow());
+			int color = 0xFF000000 | channel << 16 | channel << 8 | channel;
+			weapon.model.submitMaterial(poseStack, collector, world, dial, texture -> RenderTypes.energySwirl(glow, 0, 0), color, LightCoordsUtil.FULL_BRIGHT);
+		}
+		submitSaw(poseStack, collector, light, weapon, world, script, state.saw());
+		String spin = script.get("motorSprite").getAsString();
+		for (UltraModel.Sprite sprite : weapon.model.sprites()) {
+			if (sprite.name().equals(spin) && state.motorSpriteAlpha() > 0) {
+				float[] color = {1, 1, 1, (float)state.motorSpriteAlpha()};
+				ModelOverlays.sprite(poseStack, collector, RenderTypes.text(sprite.texture()), world[sprite.bone()], sprite.rect(), color);
+			}
+		}
+		float[] variation = variationColor(script);
+		for (int c = 0; c < weapon.model.canvases().size(); c++) {
+			UltraModel.Canvas canvas = weapon.model.canvases().get(c);
+			for (int i = 0; i < canvas.images().size(); i++) {
+				UltraModel.Image image = canvas.images().get(i);
+				boolean meter = at(script.get("secondaryMeter"), c, i);
+				float[] color = meter ? tinted(state.meterTint(), state.reddening(), variation) : image.color();
+				float fill = meter ? (float)state.meterFill() : image.fillAmount();
+				ModelOverlays.image(poseStack, collector, RenderTypes.text(image.texture()), world[canvas.bone()], image, color, fill, i);
+			}
+		}
+		for (ViewmodelParticles system : weapon.overheatParticles) {
+			system.submit(poseStack, collector, world[system.bone], STEAM_COLOR);
 		}
 		poseStack.popPose();
 	}
@@ -1272,12 +1408,19 @@ public final class FirstPersonWeapons {
 
 	/** Shotgun.UpdateMeter's color. */
 	private float[] meterColor(float[] variation) {
-		return switch (this.shotgun.tint()) {
+		return tinted(this.shotgun.tint(), this.shotgun.reddening(), variation);
+	}
+
+	/** A meter's color: one of Unity's, or the variant's reddened by {@code reddening} (0 to 1). */
+	private static float[] tinted(MeterTint tint, double reddening, float[] variation) {
+		return switch (tint) {
 			case RED -> RED;
 			case BLACK -> BLACK;
 			case GRAY -> GRAY;
+			case WHITE -> WHITE;
+			case YELLOW -> YELLOW;
 			case VARIANT -> {
-				float t = (float)Math.clamp(this.shotgun.reddening(), 0, 1);
+				float t = (float)Math.clamp(reddening, 0, 1);
 				float[] color = new float[4];
 				for (int c = 0; c < 4; c++) {
 					color[c] = variation[c] + (METER_CHARGED[c] - variation[c]) * t;

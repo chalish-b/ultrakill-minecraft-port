@@ -63,7 +63,9 @@ final class Effects {
 		/** "Railcannon Beam", the Electric railcannon's: 1 unit wide, white to blue, with its arcs and glow over it. */
 		RAILCANNON(1, new float[][]{{0, 1, 1, 1}, {1, 0, 0.8344827F, 1}}, "railcannon_beam"),
 		/** "Railcannon Beam Malicious": 1 unit wide, white to orange, with a glow over it. */
-		MALICIOUS(1, new float[][]{{0, 1, 1, 1}, {1, 1, 0.6308285F, 0}}, "railcannon_beam_malicious");
+		MALICIOUS(1, new float[][]{{0, 1, 1, 1}, {1, 1, 0.6308285F, 0}}, "railcannon_beam_malicious"),
+		/** "Grenade Beam", a core's or rocket's the Jackhammer hits: 1 unit wide, white to orange, with a narrower line over it. */
+		GRENADE(1, new float[][]{{0, 1, 1, 1}, {1, 1, 0.6308285F, 0}}, "grenade_beam");
 
 		/** Blocks. */
 		final double width;

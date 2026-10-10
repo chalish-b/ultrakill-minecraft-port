@@ -38,7 +38,9 @@ public final class UltraMovement {
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
 	/** The player's Rigidbody mass. */
 	private static final double MASS = 100;
-	private static final double DT = UltraBody.FIXED_DT;
+	/** The player's physics step, in seconds. */
+	public static final double FIXED_DT = UltraBody.FIXED_DT;
+	private static final double DT = FIXED_DT;
 	private static final Vec3 UP = UltraBody.UP;
 	private static final Vec3 G = UltraBody.GRAVITY_DIRECTION;
 	private static final int MAX_STEPS_PER_FRAME = 12;
@@ -142,6 +144,10 @@ public final class UltraMovement {
 	private double jumpReadyTimer;
 	/** Rocket jumps since the player last stood on the ground or stepped on an enemy. */
 	private int rocketJumps;
+	/** Jackhammer jumps since the player last stood on the ground or stepped on an enemy (NewMovement.hammerJumps). */
+	private int hammerJumps;
+	/** NewMovement.explosionLaunchResistance: no explosion launches the player until this runs out. */
+	private double explosionLaunchResistance;
 	/** Rockets ridden since the player last stood on the ground or stepped on an enemy (NewMovement.rocketRides). */
 	private int rocketRides;
 	/** Riding a rocket, which carries the player: their own physics moves them nowhere. */
@@ -358,6 +364,7 @@ public final class UltraMovement {
 		if (this.onGround && !this.jumping) {
 			this.currentWallJumps = 0;
 			this.rocketJumps = 0;
+			this.hammerJumps = 0;
 			this.rocketRides = 0;
 		}
 		if (this.onGround && this.friction > 0 && !this.jumping) {
@@ -887,6 +894,7 @@ public final class UltraMovement {
 	private void enemyStepResets() {
 		this.currentWallJumps = 0;
 		this.rocketJumps = 0;
+		this.hammerJumps = 0;
 		this.rocketRides = 0;
 		this.clingFade = 0;
 	}
@@ -916,7 +924,7 @@ public final class UltraMovement {
 	 * @param harmful whether the explosion also hurts the player
 	 */
 	public void explosionLaunch(Vec3 origin, double pushForceMultiplier, double maxSize, boolean rocketExplosion, boolean boosted, boolean fup, boolean harmful) {
-		if (this.explodedTime > 0 || (this.safeExplosionLaunchCooldown > 0 && !harmful)) {
+		if (this.explodedTime > 0 || this.explosionLaunchResistance > 0 || (this.safeExplosionLaunchCooldown > 0 && !harmful)) {
 			return;
 		}
 		double strength = 200;
@@ -967,8 +975,19 @@ public final class UltraMovement {
 	}
 
 	/** NewMovement.Launch: an impulse of {@code direction} × 8 on the player's 100 kg body, replacing its velocity. */
-	private void launchImpulse(Vec3 direction) {
+	public void launchImpulse(Vec3 direction) {
 		launchImpulse(direction, 8, false);
+	}
+
+	/**
+	 * A Jackhammer jump (ShotgunHammer.ImpactRoutine): one more since the player last stood on the ground or stepped
+	 * on an enemy, and explosions can't launch them for half a second.
+	 *
+	 * @return how many came before it
+	 */
+	public int hammerJump() {
+		this.explosionLaunchResistance = 0.5;
+		return this.hammerJumps++;
 	}
 
 	/**
@@ -1012,6 +1031,7 @@ public final class UltraMovement {
 
 	private void runTimers(double dt) {
 		this.safeExplosionLaunchCooldown = U.moveTowards(this.safeExplosionLaunchCooldown, 0, dt);
+		this.explosionLaunchResistance = U.moveTowards(this.explosionLaunchResistance, 0, dt);
 		this.explodedTime = U.moveTowards(this.explodedTime, 0, dt);
 		if (this.notJumpingTimer > 0) {
 			this.notJumpingTimer -= dt;
@@ -1462,6 +1482,10 @@ public final class UltraMovement {
 	/** HookArm.beingPulled: while the Whiplash pulls the player, slides end and can't start, and slams keep the pull. */
 	public void setBeingPulled(boolean pulled) {
 		this.beingPulled = pulled;
+	}
+
+	public boolean beingPulled() {
+		return this.beingPulled;
 	}
 
 	// ---- for rocket riding (Grenade) ------------------------------------------------------------

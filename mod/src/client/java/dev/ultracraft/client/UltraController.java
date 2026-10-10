@@ -103,7 +103,7 @@ public final class UltraController {
 	private void take(Minecraft minecraft, LocalPlayer player) {
 		this.driven = player;
 		this.movement = new UltraMovement(player);
-		this.movement.setHookFixedUpdate(ClientCombat.INSTANCE::whiplashFixedUpdate);
+		this.movement.setHookFixedUpdate(ClientCombat.INSTANCE::fixedUpdate);
 		this.lastDeltaMovement = player.getDeltaMovement();
 		this.input.discard(minecraft.options);
 		player.setSprinting(false);

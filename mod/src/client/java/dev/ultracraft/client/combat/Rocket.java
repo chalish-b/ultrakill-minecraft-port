@@ -158,6 +158,11 @@ final class Rocket extends Grenade {
 	void launch(Vec3 velocity) {
 	}
 
+	/** Units per second. */
+	Vec3 velocity() {
+		return this.velocity;
+	}
+
 	/**
 	 * Grenade.Update, FixedUpdate and LateUpdate. Frozen, it stays put (counting toward its level-up) and only turns
 	 * to face a magnet; otherwise it turns toward a magnet and flies on, until its capsule meets a wall or an

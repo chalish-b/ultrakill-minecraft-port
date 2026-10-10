@@ -48,6 +48,9 @@ MODELS = {
     "shotgun_core_eject": ("Shotgun Grenade", "Shotgun", (0, 0, 0)),
     "shotgun_pump_charge": ("Shotgun Pump", "Shotgun", (0, 0, 0)),
     "shotgun_sawed_on": ("Shotgun Saw", "Shotgun", (0, 0, 0)),
+    "shotgun_hammer_core_eject": ("Hammer Grenade", "ShotgunHammer", (0, 0, 0)),
+    "shotgun_hammer_pump_charge": ("Hammer Pump", "ShotgunHammer", (0, 0, 0)),
+    "shotgun_hammer_sawed_on": ("Hammer Saw", "ShotgunHammer", (0, 0, 0)),
     "railcannon_electric": ("Railcannon Electric", "Railcannon", (0, 0, 0)),
     "railcannon_screwdriver": ("Railcannon Harpoon", "Railcannon", (0, 0, 0)),
     "railcannon_malicious": ("Railcannon Malicious", "Railcannon", (0, 0, 0)),
@@ -99,6 +102,11 @@ REFERENCED = {
     "quick_twirl": ("Revolver", "Alternative Revolver Pierce", "quickTwirlEffect"),
     "cannonball": ("RocketLauncher", "Rocket Launcher Cannonball", "cannonBall"),
     "gasoline_projectile": ("RocketLauncher", "Rocket Launcher Napalm", "napalmProjectile"),
+    "hammer_hit_light": ("ShotgunHammer", "Hammer Grenade", "hitImpactParticle[0]"),
+    "hammer_hit_medium": ("ShotgunHammer", "Hammer Grenade", "hitImpactParticle[1]"),
+    "hammer_hit_heavy": ("ShotgunHammer", "Hammer Grenade", "hitImpactParticle[2]"),
+    "explosion_hammer_weak": ("ShotgunHammer", "Hammer Pump", "pumpExplosion"),
+    "grenade_beam": ("Grenade", "Grenade", "grenadeBeam"),
 }
 # FootstepSet's per-surface prefabs: model name prefix -> the list field. Each surface it lists is written as
 # <prefix>_<surface>.
@@ -215,7 +223,7 @@ def code_shown_images(rig):
 
 
 def referenced_roots(env):
-    """The REFERENCED prefabs, found through the field that names them."""
+    """The REFERENCED prefabs, found through the field that names them (`field[i]` for an array's ith)."""
     found = {}
     for obj in env.objects:
         if obj.type.name != "MonoBehaviour":
@@ -227,7 +235,9 @@ def referenced_roots(env):
             component = obj.read()
             if component.m_GameObject.read().m_Name != go_name:
                 continue
-            found[model] = (prefab(getattr(component, field)), None)
+            name, _, index = field.partition("[")
+            value = getattr(component, name)
+            found[model] = (prefab(value[int(index.rstrip("]"))] if index else value), None)
     for model, (parent, script, field) in NESTED.items():
         def walk(t):
             for c in t.m_GameObject.read().m_Component:
@@ -1096,6 +1106,27 @@ def export_scripts(exporter, rig, colors, placed, rects, pivots):
                 shotgun = obj.read()
                 if shotgun.sawZone.path_id:
                     scripts["shotgun"].update(chainsaw_values(exporter, rig, shotgun))
+            elif kind == "ShotgunHammer":
+                hammer = obj.read()
+                variation = obj.read_typetree()["variation"]
+                bone = lambda p: rig.index[p.path_id]  # noqa: E731
+                meter = hammer.meter.deref().read()
+                scripts["shotgunHammer"] = {
+                    "variation": variation,
+                    "variationColor": list(colors[variation]),
+                    "model": bone(hammer.modelTransform),
+                    "hammer": bone(hammer.hammerPullable),
+                    "motor": bone(hammer.rotatingMotor),
+                    "motorSprite": go_name_of(hammer.motorSprite),
+                    "dial": bone(hammer.meterHand),
+                    # The meter's second material (the dial), whose glow texture shows the speed tier.
+                    "dialMaterial": meter.m_Materials[1].deref().read().m_Name,
+                    "dialGlows": [exporter.texture(p)[0] for p in hammer.meterEmissives],
+                    "secondaryMeter": list(placed[hammer.secondaryMeter.path_id]),
+                    "overheatParticle": rig.index[transform_of(hammer.overheatParticle.deref().read().m_GameObject.read()).object_reader.path_id],
+                }
+                if hammer.sawZone.path_id:
+                    scripts["shotgunHammer"].update(chainsaw_values(exporter, rig, hammer))
             elif kind == "Railcannon":
                 railcannon = obj.read()
                 tree = obj.read_typetree()

@@ -58,11 +58,13 @@ final class Coin implements Conductor.Zappable {
 	Set<Integer> chainHits = new HashSet<>();
 	/**
 	 * The beam the coin passes a single-target shot on with: its own (its refBeam, {@link Effects.BeamStyle#COIN}),
-	 * or the Malicious railcannon's.
+	 * or the single-target railgun beam's that shot it.
 	 */
 	Effects.BeamStyle beam = Effects.BeamStyle.COIN;
 	/** The piercing beam that shot it, which it fires on itself (Coin's altBeam). */
 	@Nullable PiercingBeam altBeam;
+	/** The single-target railgun beam that shot it (the Malicious railcannon's or a grenade's), which it fires on itself. */
+	ClientCombat.@Nullable SingleBeam singleBeam;
 	/** The coin keeps the camera's rotation from when it was thrown. */
 	final float yaw;
 	final float pitch;
@@ -134,6 +136,12 @@ final class Coin implements Conductor.Zappable {
 		this.chainHits = chainHits;
 		this.beam = beam;
 		this.reflectTimer = REFLECT_DELAY;
+	}
+
+	/** Shot by a single-target railgun beam, which it fires on after a moment. */
+	void hit(float power, Set<Integer> chainHits, ClientCombat.SingleBeam singleBeam) {
+		hit(power, chainHits, singleBeam.style);
+		this.singleBeam = singleBeam;
 	}
 
 	/** Shot by a piercing beam, which it fires on after a moment. */

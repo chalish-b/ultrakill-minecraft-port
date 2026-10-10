@@ -6,7 +6,7 @@ import dev.ultracraft.combat.ServerCombat;
 import dev.ultracraft.combat.ServerWhiplash;
 import dev.ultracraft.net.BlockHitPayload;
 import dev.ultracraft.net.BurnPayload;
-import dev.ultracraft.net.CannonballHitPayload;
+import dev.ultracraft.net.KnockbackHitPayload;
 import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionBlocksPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
@@ -56,7 +56,7 @@ public class Ultracraft implements ModInitializer {
 		PayloadTypeRegistry.serverboundPlay().register(WhiplashPayload.TYPE, WhiplashPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(MagnetPullPayload.TYPE, MagnetPullPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(ZapHurtPayload.TYPE, ZapHurtPayload.CODEC);
-		PayloadTypeRegistry.serverboundPlay().register(CannonballHitPayload.TYPE, CannonballHitPayload.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(KnockbackHitPayload.TYPE, KnockbackHitPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(GasolineStainPayload.TYPE, GasolineStainPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(GasolineSoakPayload.TYPE, GasolineSoakPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(BurnPayload.TYPE, BurnPayload.CODEC);

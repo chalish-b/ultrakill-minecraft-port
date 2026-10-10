@@ -9,7 +9,7 @@ import dev.ultracraft.mixin.AbstractArrowAccessor;
 import dev.ultracraft.mixin.LivingEntityAccessor;
 import dev.ultracraft.net.BurnPayload;
 import dev.ultracraft.net.CycleVariantPayload;
-import dev.ultracraft.net.CannonballHitPayload;
+import dev.ultracraft.net.KnockbackHitPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
 import dev.ultracraft.net.GasolineSoakPayload;
@@ -76,6 +76,8 @@ public final class ServerCombat {
 	private static final int PUNCH_ACTIVE_TICKS = 4;
 	/** TimeController.TrueStop after a parry. */
 	private static final long PARRY_HITSTOP_MILLIS = 250;
+	/** The longest stop a client asks for: the Jackhammer's red hit's. */
+	private static final long MAX_HITSTOP_MILLIS = 500;
 	/** TimeController.HitStop after a punch lands. */
 	private static final long PUNCH_HITSTOP_MILLIS = 100;
 	/** A slam's hit, and its push down: DeliverDamage's force of 50000 comes to this many units a second. */
@@ -113,12 +115,12 @@ public final class ServerCombat {
 		ServerPlayNetworking.registerGlobalReceiver(ExplosionHitPayload.TYPE, (payload, context) -> onExplosionHit(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(ExplosionHurtPayload.TYPE, (payload, context) -> onExplosionHurt(context.player(), payload.damage()));
 		ServerPlayNetworking.registerGlobalReceiver(SlamHitPayload.TYPE, (payload, context) -> onSlamHit(context.player(), payload));
-		ServerPlayNetworking.registerGlobalReceiver(CannonballHitPayload.TYPE, (payload, context) -> onCannonballHit(context.player(), payload));
+		ServerPlayNetworking.registerGlobalReceiver(KnockbackHitPayload.TYPE, (payload, context) -> onKnockbackHit(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(MagnetPullPayload.TYPE, (payload, context) -> onMagnetPull(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(ZapHurtPayload.TYPE, (payload, context) -> onZapHurt(context.player()));
 		ServerPlayNetworking.registerGlobalReceiver(HitstopPayload.TYPE, (payload, context) -> {
 			if (active(context.player())) {
-				hitstop(context.player().level().getServer(), Math.clamp(payload.millis(), 0, PARRY_HITSTOP_MILLIS));
+				hitstop(context.player().level().getServer(), Math.clamp(payload.millis(), 0, MAX_HITSTOP_MILLIS));
 			}
 		});
 		ServerPlayNetworking.registerGlobalReceiver(GasolineStainPayload.TYPE, (payload, context) -> {
@@ -175,10 +177,10 @@ public final class ServerCombat {
 	}
 
 	/**
-	 * Cannonball.Collide on an enemy: it takes the hit, bursting if it dies (DeliverDamage's tryForExplode), and is
-	 * knocked along the cannonball's way.
+	 * Cannonball.Collide or the Jackhammer's swing on an enemy: it takes the hit, bursting if it dies (DeliverDamage's
+	 * tryForExplode), and is knocked along the push.
 	 */
-	private static void onCannonballHit(ServerPlayer player, CannonballHitPayload hit) {
+	private static void onKnockbackHit(ServerPlayer player, KnockbackHitPayload hit) {
 		if (!active(player) || !(player.level().getEntity(hit.entityId()) instanceof LivingEntity target) || target == player || !target.isAlive()) {
 			return;
 		}
@@ -210,6 +212,12 @@ public final class ServerCombat {
 		switch (hit.kind()) {
 			case HIT -> damage(player, target, hit.damage(), hit.head(), hit.position(), false, false);
 			case HIT_BURSTING -> damage(player, target, hit.damage(), hit.head(), hit.position(), true, false);
+			case ZONE -> {
+				// Machine.GetHurt: a zone's hit on an enemy it doesn't kill does nothing.
+				if (hit.damage() * HEALTH_PER_DAMAGE >= target.getHealth() + target.getAbsorptionAmount()) {
+					damage(player, target, hit.damage(), false, hit.position(), false, false);
+				}
+			}
 			case DRILL -> drillDamage(player, target, hit.damage(), hit.position());
 			case DRILL_PUNCH -> damage(player, target, hit.damage(), hit.head(), hit.position(), true, false);
 			case NAIL -> nailDamage(player, target, hit.damage(), hit.position(), false);
