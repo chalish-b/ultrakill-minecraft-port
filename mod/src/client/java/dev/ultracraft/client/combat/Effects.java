@@ -190,6 +190,9 @@ final class Effects {
 		final Vec3 from;
 		final Vec3 to;
 		final double start;
+		/** ElectricityLine.minWidth and maxWidth. */
+		final double minWidth;
+		final double maxWidth;
 		/** Its current pick, swapped every 0.05 s: the arc frame, the width (units) and the colors at either end. */
 		double cooldown;
 		int frame;
@@ -197,10 +200,12 @@ final class Effects {
 		float[] startColor = {1, 1, 1, 1};
 		float[] endColor = {1, 1, 1, 1};
 
-		Arc(Vec3 from, Vec3 to, double start) {
+		Arc(Vec3 from, Vec3 to, double start, double minWidth, double maxWidth) {
 			this.from = from;
 			this.to = to;
 			this.start = start;
+			this.minWidth = minWidth;
+			this.maxWidth = maxWidth;
 		}
 	}
 
@@ -357,7 +362,16 @@ final class Effects {
 		if (electricity == null) {
 			return;
 		}
-		Arc arc = new Arc(from, to, this.clock);
+		arc(from, to, electricity.get("minWidth").getAsDouble(), electricity.get("maxWidth").getAsDouble());
+	}
+
+	/** An arc from {@code from} to {@code to}, between these widths. */
+	void arc(Vec3 from, Vec3 to, double minWidth, double maxWidth) {
+		JsonObject electricity = electricityLine();
+		if (electricity == null) {
+			return;
+		}
+		Arc arc = new Arc(from, to, this.clock, minWidth, maxWidth);
 		pickArc(arc, electricity);
 		this.arcs.add(arc);
 	}
@@ -371,8 +385,7 @@ final class Effects {
 	private void pickArc(Arc arc, JsonObject electricity) {
 		arc.cooldown = ARC_INTERVAL;
 		arc.frame = this.random.nextInt(electricity.getAsJsonArray("frames").size());
-		double min = electricity.get("minWidth").getAsDouble();
-		arc.width = min + this.random.nextDouble() * (electricity.get("maxWidth").getAsDouble() - min);
+		arc.width = arc.minWidth + this.random.nextDouble() * (arc.maxWidth - arc.minWidth);
 		arc.startColor = gradientAt(electricity.getAsJsonObject("colors"), this.random.nextDouble());
 		arc.endColor = gradientAt(electricity.getAsJsonObject("colors"), this.random.nextDouble());
 	}
@@ -619,26 +632,24 @@ final class Effects {
 	}
 
 	/**
-	 * The thrown chainsaws and sawblades: each one's trail and model, its blade running. A chainsaw also has its
-	 * chain from {@code chainStart} and its spinning glint, which is all that shows (and smaller) while it's back
-	 * at the player.
+	 * The thrown chainsaws and sawblades: each one's trail and model, a chainsaw's blade running and a Sawblade
+	 * Launcher's saw spinning. A chainsaw also has its chain from {@code chainStart} and its spinning glint, which is
+	 * all that shows (and smaller) while it's back at the player.
 	 */
 	void renderSaws(LevelRenderContext context, List<ThrownSaw> saws, List<Sawblade> sawblades, @Nullable Vec3 chainStart) {
 		Minecraft minecraft = Minecraft.getInstance();
 		UltraModel thrown = UltraModel.get("chainsaw_thrown");
-		UltraModel blade = UltraModel.get("chainsaw_sawblade");
-		if (minecraft.level == null || thrown == null || blade == null || saws.isEmpty() && sawblades.isEmpty()) {
+		if (minecraft.level == null || thrown == null || saws.isEmpty() && sawblades.isEmpty()) {
 			return;
 		}
 		Vec3 camera = minecraft.gameRenderer.mainCamera().position();
 		JsonObject thrownTrail = thrown.script("chainsaw").getAsJsonObject("trail");
-		JsonObject bladeTrail = blade.script("sawblade").getAsJsonObject("trail");
 		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), RenderTypes.lightning(), (pose, buffer) -> {
 			for (ThrownSaw saw : saws) {
 				sawTrail(pose, buffer, saw.position, saw.trail, camera, thrownTrail);
 			}
 			for (Sawblade sawblade : sawblades) {
-				sawTrail(pose, buffer, sawblade.position, sawblade.trail, camera, bladeTrail);
+				sawTrail(pose, buffer, sawblade.position, sawblade.trail, camera, sawblade.script.getAsJsonObject("trail"));
 			}
 		});
 		if (chainStart != null) {
@@ -655,8 +666,48 @@ final class Effects {
 			submitSaw(context, thrown, saw.position, saw.forward, saw.bladeScroll, camera, !saw.inPlayer, saw.inPlayer ? SAW_GLINT_SHRUNK : 1, saw.age());
 		}
 		for (Sawblade sawblade : sawblades) {
-			submitSaw(context, blade, sawblade.position, sawblade.forward(), sawblade.bladeScroll, camera, true, 0, sawblade.age());
+			UltraModel model = UltraModel.get(sawblade.model);
+			if (model == null) {
+				continue;
+			}
+			if (model.quads().isEmpty()) {
+				submitSaw(context, model, sawblade.position, sawblade.forward(), sawblade.bladeScroll, camera, true, 0, sawblade.age());
+			} else {
+				submitSawblade(context, model, sawblade, camera);
+			}
 		}
+	}
+
+	/** A Sawblade Launcher's saw: its hub, and its blade (a quad) spinning about it (Spin). */
+	private static void submitSawblade(LevelRenderContext context, UltraModel model, Sawblade sawblade, Vec3 camera) {
+		PoseStack poseStack = context.poseStack();
+		float units = (float)PlayerShape.BLOCKS_PER_UNIT;
+		int light = LightCoordsUtil.getLightCoords(Minecraft.getInstance().level, BlockPos.containing(sawblade.position));
+		poseStack.pushPose();
+		poseStack.translate(sawblade.position.x - camera.x, sawblade.position.y - camera.y, sawblade.position.z - camera.z);
+		poseStack.rotate(facing(sawblade.forward()));
+		poseStack.scale(units, units, units);
+		Pose pose = model.rest().copy();
+		for (JsonElement element : model.scripts("spins")) {
+			JsonObject spin = element.getAsJsonObject();
+			int bone = spin.get("bone").getAsInt();
+			JsonArray axis = spin.getAsJsonArray("axis");
+			Quaternionf rotation = new Quaternionf(pose.qx(bone), pose.qy(bone), pose.qz(bone), pose.qw(bone))
+				.rotateAxis((float)Math.toRadians(spin.get("speed").getAsDouble() * sawblade.age() % 360), axis.get(0).getAsFloat(), axis.get(1).getAsFloat(), axis.get(2).getAsFloat());
+			pose.setRotation(bone, rotation.x, rotation.y, rotation.z, rotation.w);
+		}
+		Matrix4f[] world = model.boneMatrices(pose, new Quaternionf());
+		model.submit(poseStack, context.submitNodeCollector(), light, world);
+		for (UltraModel.Quad quad : model.quads()) {
+			if (quad.texture() == null) {
+				continue;
+			}
+			poseStack.pushPose();
+			poseStack.mulPose(world[quad.bone()]);
+			quad(context, RenderTypes.entityCutout(quad.texture()), new float[]{-0.5F, -0.5F, 0.5F, 0.5F}, 1, 1, 1, 1, light);
+			poseStack.popPose();
+		}
+		poseStack.popPose();
 	}
 
 	/**
@@ -1485,17 +1536,22 @@ final class Effects {
 
 	/** Like {@link #quad(LevelRenderContext, Identifier, float[], float, float, float, float)}, in a render type that takes a texture. */
 	static void quad(LevelRenderContext context, RenderType type, float[] r, float red, float green, float blue, float alpha) {
+		quad(context, type, r, red, green, blue, alpha, LightCoordsUtil.FULL_BRIGHT);
+	}
+
+	/** Like {@link #quad(LevelRenderContext, RenderType, float[], float, float, float, float)}, lit by {@code light}. */
+	static void quad(LevelRenderContext context, RenderType type, float[] r, float red, float green, float blue, float alpha, int light) {
 		context.submitNodeCollector().submitCustomGeometry(context.poseStack(), type, (pose, buffer) -> {
 			float[][] corners = {{r[0], r[1], 0, 1}, {r[2], r[1], 1, 1}, {r[2], r[3], 1, 0}, {r[0], r[3], 0, 0}};
 			for (int i = 0; i < 4; i++) {
 				float[] c = corners[i];
 				buffer.addVertex(pose, c[0], c[1], 0).setColor(red, green, blue, alpha).setUv(c[2], c[3])
-					.setOverlay(OverlayTexture.NO_OVERLAY).setLight(LightCoordsUtil.FULL_BRIGHT).setNormal(pose, 0, 0, 1);
+					.setOverlay(OverlayTexture.NO_OVERLAY).setLight(light).setNormal(pose, 0, 0, 1);
 			}
 			for (int i = 3; i >= 0; i--) {
 				float[] c = corners[i];
 				buffer.addVertex(pose, c[0], c[1], 0).setColor(red, green, blue, alpha).setUv(c[2], c[3])
-					.setOverlay(OverlayTexture.NO_OVERLAY).setLight(LightCoordsUtil.FULL_BRIGHT).setNormal(pose, 0, 0, 1);
+					.setOverlay(OverlayTexture.NO_OVERLAY).setLight(light).setNormal(pose, 0, 0, 1);
 			}
 		});
 	}

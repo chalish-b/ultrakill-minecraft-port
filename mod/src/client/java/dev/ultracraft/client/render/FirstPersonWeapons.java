@@ -24,6 +24,7 @@ import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -79,6 +80,9 @@ public final class FirstPersonWeapons {
 		NAILGUN_ATTRACTOR("nailgun_attractor"),
 		NAILGUN_OVERHEAT("nailgun_overheat"),
 		NAILGUN_JUMPSTART("nailgun_jumpstart"),
+		NAILGUN_SAW_ATTRACTOR("nailgun_saw_attractor"),
+		NAILGUN_SAW_OVERHEAT("nailgun_saw_overheat"),
+		NAILGUN_SAW_JUMPSTART("nailgun_saw_jumpstart"),
 		RAILCANNON_ELECTRIC("railcannon_electric"),
 		RAILCANNON_SCREWDRIVER("railcannon_screwdriver"),
 		RAILCANNON_MALICIOUS("railcannon_malicious"),
@@ -612,6 +616,22 @@ public final class FirstPersonWeapons {
 		return frame(weapon(weapon), new Quaternionf(), name);
 	}
 
+	/** The JumpStart's zapperAttachTransform, where the zapper's cable starts, as it's posed now. */
+	public @Nullable Frame zapperAttach(Weapon weapon) {
+		Viewmodel viewmodel = weapon(weapon);
+		JsonObject script = viewmodel == null ? null : viewmodel.model.script("nailgun");
+		if (script == null || !script.has("zapperAttach")) {
+			return null;
+		}
+		Matrix4f matrix = viewmodel.model.boneMatrices(viewmodel.pose, new Quaternionf())[script.get("zapperAttach").getAsInt()];
+		return new Frame(
+			matrix.getTranslation(new Vector3f()),
+			matrix.getColumn(0, new Vector3f()).normalize(),
+			matrix.getColumn(1, new Vector3f()).normalize(),
+			matrix.getColumn(2, new Vector3f()).normalize()
+		);
+	}
+
 	private static @Nullable Frame frame(@Nullable Viewmodel viewmodel, Quaternionf rotation, String name) {
 		int bone = viewmodel == null ? -1 : viewmodel.model.bone(name);
 		if (bone < 0) {
@@ -1113,17 +1133,15 @@ public final class FirstPersonWeapons {
 		poseStack.popPose();
 	}
 
-	/** The nailgun's barrels' heat glow. */
-	private static final String BARREL_HEAT = "BarrelHeat";
 	/** The steam's start color, which its material's tint (0.5, doubled) leaves as it is. */
 	private static final float[] STEAM_COLOR = {0.35849059F, 0.35849059F, 0.35849059F, 1};
 
 	/**
-	 * The nailgun, its barrels glowing with their heat (BarrelHeat's color, its alpha the heat, adds its orange), and
-	 * its screen: the Overheat's heat meter over a background going from gray to orange, its heat sinks and the
-	 * Attractor's magnet charges filling up gray and showing in the variant's color once full, the Attractor's nail
-	 * count, the JumpStart's status, distance meter, zap meter, warning X and recharge overlay, and the Overheat's
-	 * steam.
+	 * The nailgun, its barrels glowing with their heat (barrelHeats: their material's color, its alpha the heat, adds
+	 * its orange), and its screen: the Overheat's heat meter over a background going from gray to orange, its heat
+	 * sinks and the Attractor's magnet charges filling up gray and showing in the variant's color once full, the
+	 * Attractor's nail count, the JumpStart's status, distance meter, zap meter, warning X and recharge overlay, and
+	 * the Overheat's steam.
 	 */
 	private void submitNailgun(PoseStack poseStack, SubmitNodeCollector collector, int light, Viewmodel weapon) {
 		JsonObject script = weapon.model.script("nailgun");
@@ -1132,11 +1150,22 @@ public final class FirstPersonWeapons {
 		}
 		NailgunState state = this.nailgun;
 		Matrix4f[] world = weapon.model.boneMatrices(weapon.pose, new Quaternionf());
-		weapon.model.submit(poseStack, collector, light, world, Set.of(BARREL_HEAT));
+		Set<String> heats = new HashSet<>();
+		JsonArray barrelHeats = script.getAsJsonArray("barrelHeats");
+		for (int i = 0; i < weapon.model.meshCount(); i++) {
+			for (JsonElement barrel : barrelHeats) {
+				if (barrel.getAsString().equals(weapon.model.meshObjectName(i))) {
+					heats.add(weapon.model.meshMaterialName(i));
+				}
+			}
+		}
+		weapon.model.submit(poseStack, collector, light, world, heats);
 		float heat = (float)Math.clamp(state.heat(), 0, 1);
 		if (heat > 0) {
 			int color = 0xFF000000 | channel(heat) << 16 | channel(heat) << 8 | channel(heat);
-			weapon.model.submitMaterial(poseStack, collector, world, BARREL_HEAT, texture -> RenderTypes.energySwirl(texture, 0, 0), color, LightCoordsUtil.FULL_BRIGHT);
+			for (String material : heats) {
+				weapon.model.submitMaterial(poseStack, collector, world, material, texture -> RenderTypes.energySwirl(texture, 0, 0), color, LightCoordsUtil.FULL_BRIGHT);
+			}
 		}
 		float[] variation = variationColor(script);
 		float[] empty = color(script.getAsJsonArray("emptyColor"));

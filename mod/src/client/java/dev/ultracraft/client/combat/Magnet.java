@@ -137,6 +137,11 @@ final class Magnet implements Conductor.Zappable {
 		this.trail.addFirst(new Pellet.TrailPoint(position, 0));
 	}
 
+	/** The sawblades in its field. */
+	List<Sawblade> sawblades() {
+		return this.sawblades;
+	}
+
 	/** Where the magnet itself is: on its harpoon, or at the middle of the enemy it's stuck in. */
 	Vec3 center() {
 		if (this.onEnemy != null) {

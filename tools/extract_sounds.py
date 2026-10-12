@@ -297,6 +297,7 @@ def combat(env, x):
 
     railcannon(env, x)
     nailgun(env, x)
+    sawblade_launcher(env, x)
     jumpstart(env, x)
     rocket_launcher(env, x)
     jackhammer(env, x)
@@ -528,12 +529,27 @@ def firestarter(env, x):
     x.add_source("rocket_napalm_no_ammo", source_ref(launcher.napalmNoAmmoSound))
 
 
+def sawblade_launcher(env, x):
+    """The Sawblade Launcher's shot (its muzzle flash's; its RandomPitch sets the pitch, and the mod does too), and the
+    super saw's, which plays a second sound over it; the super saw's hum, from where it is (its pitch is set by the
+    code)."""
+    overheat = find_class(env, "Nailgun", "Sawblade Launcher Overheat", altVersion=1)
+    shot = next(components(overheat.muzzleFlash.deref().read(), "AudioSource"))
+    x.add_clip("nailgun_saw_shoot", shot.m_audioClip, shot.m_Volume)
+    x.add_source("nailgun_saw_super", named_source(overheat.muzzleFlash2.deref().read(), "MuzzleFlash"))
+    saw_go = overheat.heatedNail.deref().read()
+    saw = next(s for s in components(saw_go, "MonoBehaviour") if hasattr(s, "zapMaterial"))
+    hum = saw.stoppedAud.deref()
+    x.add_clip("sawblade_hum", hum.read().m_audioClip, mono=True)
+    x.events["sawblade_hum"]["sounds"][0]["attenuation_distance"] = round(hum.read_typetree()["MaxDistance"] * BLOCKS_PER_UNIT)
+
+
 def jumpstart(env, x):
     """The JumpStart's chime when the zapper has recharged (its pitch is set on its AudioSource); the zapper's hum while
     it's attached (its pitch is set by its code), its pulse orb's crackle, its attach sound, its two warnings while the
-    cable is too long or blocked (their pitch is set by its code) and the cable snapping. A zap's sparks, and the
-    electric arc the zap goes along. Those that come from somewhere in the world fade out over their AudioSource's
-    range."""
+    cable is too long or blocked (their pitch is set by its code), the cable snapping and a sawblade boosting its
+    charge. A zap's sparks, and the electric arc the zap goes along. Those that come from somewhere in the world fade
+    out over their AudioSource's range."""
     jumpstart = find_class(env, "Nailgun", "Nailgun Zapper", altVersion=0)
     x.add_source("jumpstart_ready", next(components(jumpstart.m_GameObject.read(), "AudioSource")))
     zapper_go = jumpstart.zapper.deref().read().m_GameObject.read()
@@ -554,6 +570,8 @@ def jumpstart(env, x):
     x.add_clip("zapper_warning", warning.m_audioClip, warning.m_Volume)
     snap_go = zapper.cableSnap.deref().read().m_GameObject.read()
     placed("zapper_snap", snap_go, next(components(snap_go, "AudioSource")))
+    boost = source_ref(zapper.boostSound)
+    placed("zapper_boost", boost.m_GameObject.read(), boost)
     sparks = next(components(zapper.zapParticle.deref().read(), "AudioSource"))
     x.add_clip("zap", sparks.m_audioClip, sparks.m_Volume)
     references = next(o.read() for o in env.objects if o.type.name == "MonoBehaviour" and script_class(o) == "DefaultReferenceManager")

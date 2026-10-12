@@ -60,6 +60,9 @@ MODELS = {
     "nailgun_attractor": ("Nailgun Magnet", "Nailgun", (0, 0, 0)),
     "nailgun_overheat": ("Nailgun Overheat", "Nailgun", (0, 0, 0)),
     "nailgun_jumpstart": ("Nailgun Zapper", "Nailgun", (0, 0, 0)),
+    "nailgun_saw_attractor": ("Sawblade Launcher Magnet", "Nailgun", (0, 0, 0)),
+    "nailgun_saw_overheat": ("Sawblade Launcher Overheat", "Nailgun", (0, 0, 0)),
+    "nailgun_saw_jumpstart": ("Sawblade Launcher Zapper", "Nailgun", (0, 0, 0)),
     "feedbacker": ("Arm Blue", "Punch", (0, -0.225, 0)),
     "knuckleblaster": ("Arm Red", "Punch", (0, -0.225, 0)),
     "whiplash": ("Hook Arm", "HookArm", (0, -0.225, 0)),
@@ -69,7 +72,8 @@ MODELS = {
     "explosion_wave_knuckleblaster": ("Explosion Wave Knuckleblaster", "RandomPitch", None),
 }
 # Models that are a weapon's alternate version (its script's altVersion); every other model is the standard one.
-ALTERNATE = {"revolver_slab_piercer", "revolver_slab_marksman", "revolver_slab_sharpshooter"}
+ALTERNATE = {"revolver_slab_piercer", "revolver_slab_marksman", "revolver_slab_sharpshooter",
+             "nailgun_saw_attractor", "nailgun_saw_overheat", "nailgun_saw_jumpstart"}
 
 # Models drawn in the world that are only reachable through another prefab's field:
 # name -> (script, the GameObject it's on, the field naming the prefab). Prefabs named from inside another
@@ -94,6 +98,11 @@ REFERENCED = {
     "nailgun_muzzle_flash": ("Nailgun", "Nailgun Overheat", "muzzleFlash"),
     "nailgun_muzzle_flash_heated": ("Nailgun", "Nailgun Overheat", "muzzleFlash2"),
     "zapper": ("Nailgun", "Nailgun Zapper", "zapper"),
+    "sawblade": ("Nailgun", "Sawblade Launcher Overheat", "nail"),
+    "sawblade_fodder": ("Nailgun", "Sawblade Launcher Magnet", "nail"),
+    "sawblade_heated": ("Nailgun", "Sawblade Launcher Overheat", "heatedNail"),
+    "nailgun_saw_muzzle_flash": ("Nailgun", "Sawblade Launcher Overheat", "muzzleFlash"),
+    "nailgun_saw_muzzle_flash_heated": ("Nailgun", "Sawblade Launcher Overheat", "muzzleFlash2"),
     "zap_sparks": ("Zapper", "Zapper", "zapParticle"),
     "electric_line": ("DefaultReferenceManager", "DefaultReferenceManager", "electricLine"),
     "slide_particle": ("NewMovement", "Player", "slideParticle"),
@@ -115,6 +124,7 @@ NESTED = {
     "explosion_chunk": ("explosion", "Explosion", "explosionChunk"),
     "chainsaw_ricochet": ("chainsaw_thrown", "Chainsaw", "ricochetEffect"),
     "chainsaw_sawblade": ("chainsaw_thrown", "Chainsaw", "sawbladeVersion"),
+    "sawblade_break": ("sawblade", "Nail", "sawBreakEffect"),
     "explosion_malicious_railcannon": ("railcannon_beam_malicious", "RevolverBeam", "hitParticle"),
     "drill_beeper": ("drill", "TimeBomb", "beepLight"),
     "drill_break": ("drill", "TimeBomb", "explosion"),
@@ -604,6 +614,42 @@ def cube_part(exporter, renderer, bone):
     return part
 
 
+def probuilder_part(exporter, renderer, probuilder, bone):
+    """A ProBuilderMesh (which builds its mesh when the game runs) as a part on `bone`, with its renderer's first
+    material: its faces' triangles over its positions and UVs, each vertex taking the normal of the faces it's on."""
+    material_pptr = renderer.m_Materials[0]
+    tex_pptr, scale, offset = texture_name(material_pptr.deref().read())
+    if tex_pptr is None:
+        return None
+    texture, tex_file = exporter.texture(tex_pptr)
+    tree = probuilder.read_typetree()
+    positions = np.array([[p["x"], p["y"], p["z"]] for p in tree["m_Positions"]], dtype=float)
+    uv = np.array([[t["x"], t["y"]] for t in tree["m_Textures0"]], dtype=float)
+    triangles = [face["m_Indexes"][i:i + 3] for face in tree["m_Faces"] for i in range(0, len(face["m_Indexes"]), 3)]
+    normals = np.zeros_like(positions)
+    for a, b, c in triangles:
+        # Unity's face normal, as Mesh.RecalculateNormals takes it.
+        normals[[a, b, c]] += np.cross(positions[b] - positions[a], positions[c] - positions[a])
+    lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+    normals = np.divide(normals, lengths, out=np.zeros_like(normals), where=lengths > 0)
+    count = len(positions)
+    part = {
+        "texture": texture, "textureFile": tex_file, "material": material_pptr.deref().read().m_Name,
+        "materialValues": material_values(material_pptr, exporter.textures[tex_file]),
+        "positions": np.round(positions, 5).flatten().tolist(),
+        "normals": np.round(normals, 4).flatten().tolist(),
+        "uvs": np.round(np.stack([uv[:, 0] * scale[0] + offset[0], 1 - (uv[:, 1] * scale[1] + offset[1])], axis=1), 5).flatten().tolist(),
+        # Reversed winding: the mod flips z, which changes handedness.
+        "indices": [x for a, b, c in triangles for x in (a, c, b)],
+        "joints": [bone], "binds": [np.eye(4).flatten().tolist()], "influences": 1,
+        "jointIndices": [0] * count, "jointWeights": [1.0] * count,
+    }
+    emissive = exporter.emissive(material_pptr)
+    if emissive:
+        part["emissive"] = emissive
+    return part
+
+
 def export_parts(exporter, rig, glow_colors):
     """The rig's meshes, and the built-in quads (screens, glows) as their bone and texture.
 
@@ -661,7 +707,16 @@ def export_parts(exporter, rig, glow_colors):
                 if not r.m_Enabled:
                     continue
                 mesh_filter = next((x.component.deref().read() for x in go.m_Component if x.component.deref().type.name == "MeshFilter"), None)
-                if mesh_filter is None or not mesh_filter.m_Mesh.path_id:
+                if mesh_filter is None:
+                    continue
+                if not mesh_filter.m_Mesh.path_id:
+                    probuilder = next((x.component.deref() for x in go.m_Component if x.component.deref().type.name == "MonoBehaviour"
+                                       and script_name(x.component.deref()) == "ProBuilderMesh"), None)
+                    if probuilder is not None and r.m_Materials and r.m_Materials[0].path_id:
+                        part = probuilder_part(exporter, r, probuilder, rig.index[transform_of(go).object_reader.path_id])
+                        if part is not None:
+                            part["name"] = go.m_Name
+                            parts.append(part)
                     continue
                 try:
                     mesh = mesh_filter.m_Mesh.deref().read()
@@ -959,6 +1014,25 @@ def box_values(go):
     """The object's BoxCollider, in its own space."""
     box = next(c.component.deref().read() for c in go.m_Component if c.component.deref().type.name == "BoxCollider")
     return {"center": [box.m_Center.x, box.m_Center.y, box.m_Center.z], "size": [box.m_Size.x, box.m_Size.y, box.m_Size.z]}
+
+
+def sawblade_box(go):
+    """A sawblade's collider, in its own space: its BoxCollider, or the bounds of the ProBuilder disc under it that
+    its MeshCollider is made of."""
+    if any(c.component.deref().type.name == "BoxCollider" for c in go.m_Component):
+        return box_values(go)
+    for child in transform_of(go).m_Children:
+        t = child.deref().read()
+        child_go = t.m_GameObject.read()
+        if not any(c.component.deref().type.name == "MeshCollider" for c in child_go.m_Component):
+            continue
+        probuilder = next(c.component.deref() for c in child_go.m_Component
+                          if c.component.deref().type.name == "MonoBehaviour" and script_name(c.component.deref()) == "ProBuilderMesh")
+        points = np.array([[p["x"], p["y"], p["z"]] for p in probuilder.read_typetree()["m_Positions"]], dtype=float)
+        s, at = t.m_LocalScale, t.m_LocalPosition
+        low, high = points.min(axis=0) * [s.x, s.y, s.z], points.max(axis=0) * [s.x, s.y, s.z]
+        return {"center": ((low + high) / 2 + [at.x, at.y, at.z]).tolist(), "size": (high - low).tolist()}
+    raise LookupError(f"no collider on {go.m_Name}")
 
 
 def trail_values(exporter, go):
@@ -1370,8 +1444,9 @@ def export_scripts(exporter, rig, colors, placed, rects, pivots):
             elif kind == "Nail" and obj.read_typetree()["sawblade"]:
                 tree = obj.read_typetree()
                 body = next(c.component.deref().read() for c in go.m_Component if c.component.deref().type.name == "Rigidbody")
-                scripts["sawblade"] = {**{k: tree[k] for k in ("damage", "hitAmount", "multiHitAmount", "chainsaw")}, "mass": body.m_Mass}
-                scripts["sawblade"]["box"] = box_values(go)
+                scripts["sawblade"] = {**{k: tree[k] for k in ("damage", "hitAmount", "multiHitAmount", "chainsaw", "heated", "bounceToSurfaceNormal")},
+                                       "mass": body.m_Mass, "scale": transform_of(go).m_LocalScale.x, "hitEffect": bool(obj.read().sawHitEffect.path_id)}
+                scripts["sawblade"]["box"] = sawblade_box(go)
                 scripts["sawblade"]["trail"] = trail_values(exporter, go)
             elif kind == "PhysicalShockwave":
                 tree = obj.read_typetree()

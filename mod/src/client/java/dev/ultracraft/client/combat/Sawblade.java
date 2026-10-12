@@ -24,10 +24,11 @@ import java.util.Deque;
 import java.util.List;
 
 /**
- * A chainsaw off its chain (Nail, as a sawblade): it flies straight on at its speed, bouncing off walls, and stops
- * on each enemy it meets to hit it four times. Hits and bounces wear it down until it breaks. A Feedbacker punch
- * after it has bounced sends it where the player aims, hitting twice as hard for a while. A magnet holding it
- * keeps it circling the magnet, and its bounces wear it less.
+ * A sawblade (Nail, as a sawblade): the Sawblade Launcher's, or a chainsaw off its chain. It flies straight on at its
+ * speed, bouncing off walls, and cuts through each enemy it meets, or (one that hits more than once, as the
+ * chainsaw's and a charged super saw do) stops on it to hit it that many times. Hits and bounces wear it down until
+ * it breaks. A Feedbacker punch after it has bounced sends it where the player aims, hitting twice as hard for a
+ * while. A magnet holding it keeps it circling the magnet, and its bounces wear it less.
  */
 final class Sawblade {
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
@@ -43,8 +44,15 @@ final class Sawblade {
 	/** Hits on an enemy it stopped on come this often; the same enemy can't stop it again this soon. */
 	private static final double MULTI_HIT_COOLDOWN = 0.15;
 	private static final double SAME_ENEMY_COOLDOWN = 0.15;
-	/** It hits enemies within this many units of it. */
+	/** It hits enemies within this many units of it, and starts out on the first within this many. */
 	private static final double TOUCH_RADIUS = 0.5;
+	private static final double START_RADIUS = 1.5;
+	/** Shot, it bounces off up to this many walls within this many units ahead, wearing down this much for each. */
+	private static final int START_BOUNCES = 3;
+	private static final double START_REACH = 5;
+	private static final double START_BOUNCE_WEAR = 0.125;
+	/** Stopped on an enemy, its hum plays at this pitch. */
+	private static final float STOPPED_HUM_PITCH = 0.5F;
 	/** A bounce wears it down this much (this much while a magnet holds it), and a further bounce in the same step this much. */
 	private static final double BOUNCE_WEAR = 0.25;
 	private static final double MAGNET_BOUNCE_WEAR = 0.1;
@@ -59,20 +67,26 @@ final class Sawblade {
 	private static final double BLADE_SCROLL = -10;
 
 	interface Hits {
+		/** Nail.HitEnemy: it cut into an enemy, which it's about to damage. */
+		void sawbladeStruck(Sawblade sawblade, LivingEntity enemy);
+
 		/** Nail.DamageEnemy, twice as hard if punched. */
-		void sawbladeEnemy(LivingEntity enemy, boolean punched);
+		void sawbladeEnemy(Sawblade sawblade, LivingEntity enemy);
 
 		/** It bounced off a wall here, facing out of it, with a sound if it's the step's first, and maybe bits. */
 		void sawRicochet(Vec3 at, Direction face, boolean sound, boolean gibs);
 
 		/** It hit a block on a bounce, twice as hard if punched. */
-		void sawbladeWall(BlockPos block, boolean punched);
+		void sawbladeWall(Sawblade sawblade, BlockPos block);
 
 		/** Nail.SawBreak. */
 		void sawbladeBroke(Sawblade sawblade);
 	}
 
+	/** Its prefab, its Nail script, and its hum (stoppedAud), if it has one. */
+	final String model;
 	final JsonObject script;
+	final @Nullable String hum;
 	final UltraSounds.Loop spin;
 	Vec3 position;
 	/** Units per second. */
@@ -81,10 +95,10 @@ final class Sawblade {
 	private boolean stopped;
 	/** It has bounced, so a punch can send it on. */
 	boolean punchable;
-	private boolean punched;
+	boolean punched;
 	private double punchedTimer;
-	private double hitAmount;
-	private final int multiHitAmount;
+	double hitAmount;
+	int multiHitAmount;
 	private int currentMultiHitAmount;
 	private double multiHitCooldown;
 	private @Nullable LivingEntity hitTarget;
@@ -105,8 +119,13 @@ final class Sawblade {
 	/** Trail points, newest first. */
 	final Deque<Pellet.TrailPoint> trail = new ArrayDeque<>();
 
-	Sawblade(JsonObject script, Vec3 position, Vec3 velocity, UltraSounds.Loop spin) {
+	/**
+	 * @param velocity units per second
+	 */
+	Sawblade(String model, JsonObject script, Vec3 position, Vec3 velocity, @Nullable String hum, UltraSounds.Loop spin) {
+		this.model = model;
 		this.script = script;
+		this.hum = hum;
 		this.position = position;
 		this.start = position;
 		this.velocity = velocity;
@@ -114,6 +133,38 @@ final class Sawblade {
 		this.hitAmount = script.get("hitAmount").getAsDouble();
 		this.multiHitAmount = script.get("multiHitAmount").getAsInt();
 		this.trail.addFirst(new Pellet.TrailPoint(position, 0));
+	}
+
+	/**
+	 * Nail.ForceCheckSawbladeRicochet, as it's shot: it bounces off the walls just ahead, then starts out on the
+	 * first enemy near it.
+	 */
+	void start(Level level, LocalPlayer player, Hits hits) {
+		for (int i = 0; i < START_BOUNCES; i++) {
+			BlockHitResult wall = level.clip(new ClipContext(this.position, this.position.add(this.velocity.normalize().scale(START_REACH * S)),
+				ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+			if (wall.getType() == HitResult.Type.MISS) {
+				break;
+			}
+			deflect(wall, this.velocity.length());
+			this.hitAmount -= START_BOUNCE_WEAR;
+			hits.sawRicochet(wall.getLocation(), wall.getDirection(), i == 0, false);
+			hits.sawbladeWall(this, wall.getBlockPos());
+		}
+		AABB near = new AABB(this.position, this.position).inflate(START_RADIUS * S);
+		for (Entity entity : level.getEntities(player, near, ThrownSaw::isEnemy)) {
+			if (distance(entity.getBoundingBox(), this.position) <= START_RADIUS * S) {
+				touchEnemy((LivingEntity)entity, hits);
+				break;
+			}
+		}
+	}
+
+	/** The physics steps a sawblade shot in a physics step takes before the frame it's shot in is drawn. */
+	void fly(int steps, Level level, LocalPlayer player, Hits hits) {
+		for (int i = 0; i < steps && !this.removed; i++) {
+			step(level, player, hits);
+		}
 	}
 
 	void update(double dt, Level level, LocalPlayer player, Hits hits) {
@@ -140,30 +191,45 @@ final class Sawblade {
 				this.punched = false;
 			}
 		}
-		if (this.multiHitCooldown > 0) {
-			this.multiHitCooldown = Math.max(this.multiHitCooldown - dt, 0);
-		} else if (this.stopped) {
-			boolean alive = this.currentHitEnemy != null && this.currentHitEnemy.isAlive();
-			if (alive && this.currentMultiHitAmount > 0) {
-				this.currentMultiHitAmount--;
-				this.hitAmount--;
-				hits.sawbladeEnemy(this.hitTarget, this.punched);
-				alive = this.currentHitEnemy.isAlive();
-			}
-			if (!alive || this.currentMultiHitAmount <= 0) {
-				this.stopped = false;
-				this.velocity = this.originalVelocity;
-				if (this.hitAmount <= 0) {
-					breakApart(hits);
-					return;
-				}
-			} else {
-				this.multiHitCooldown = MULTI_HIT_COOLDOWN;
+		if (this.multiHitAmount > 1) {
+			multiHit(dt, hits);
+			if (this.removed) {
+				return;
 			}
 		}
 		updateTrail();
 		if (this.age > this.removeAt || this.age > MASTER_LIFETIME || this.position.distanceTo(this.start) / S > FAR_AWAY) {
 			this.removed = true;
+		}
+	}
+
+	/**
+	 * Nail.Update for a sawblade that hits more than once: stopped on an enemy, it hits it every so often until it has
+	 * hit it as many times as it does, or the enemy dies; then it flies on as it was, unless it's worn out.
+	 */
+	private void multiHit(double dt, Hits hits) {
+		if (this.multiHitCooldown > 0) {
+			this.multiHitCooldown = Math.max(this.multiHitCooldown - dt, 0);
+			return;
+		}
+		if (!this.stopped) {
+			return;
+		}
+		boolean alive = this.currentHitEnemy != null && this.currentHitEnemy.isAlive();
+		if (alive && this.currentMultiHitAmount > 0) {
+			this.currentMultiHitAmount--;
+			this.hitAmount--;
+			hits.sawbladeEnemy(this, this.hitTarget);
+			alive = this.currentHitEnemy.isAlive();
+		}
+		if (!alive || this.currentMultiHitAmount <= 0) {
+			this.stopped = false;
+			this.velocity = this.originalVelocity;
+			if (this.hitAmount <= 0) {
+				breakApart(hits);
+			}
+		} else {
+			this.multiHitCooldown = MULTI_HIT_COOLDOWN;
 		}
 	}
 
@@ -183,7 +249,10 @@ final class Sawblade {
 		AABB near = new AABB(this.position, this.position).inflate(TOUCH_RADIUS * S);
 		for (Entity entity : level.getEntities(player, near, ThrownSaw::isEnemy)) {
 			if (distance(entity.getBoundingBox(), this.position) <= TOUCH_RADIUS * S) {
-				touchEnemy((LivingEntity)entity);
+				touchEnemy((LivingEntity)entity, hits);
+			}
+			if (this.removed) {
+				return;
 			}
 		}
 		double speed = this.velocity.length();
@@ -202,7 +271,10 @@ final class Sawblade {
 			.sorted(Comparator.comparingDouble(e -> e.distanceToSqr(this.position)))
 			.toList();
 		for (Entity entity : touched) {
-			touchEnemy((LivingEntity)entity);
+			touchEnemy((LivingEntity)entity, hits);
+			if (this.removed) {
+				return;
+			}
 		}
 		if (wall.getType() != HitResult.Type.MISS) {
 			if (this.hitAmount <= 0) {
@@ -229,18 +301,26 @@ final class Sawblade {
 
 	/** Off a wall at its full speed: bits of the wall, a spark, and it can be punched now. */
 	private void bounce(BlockHitResult wall, double speed, double wear, boolean first, Hits hits) {
-		this.position = wall.getLocation();
-		this.velocity = ThrownSaw.reflect(this.velocity.normalize(), wall.getDirection()).scale(speed);
+		deflect(wall, speed);
 		boolean gibs = this.sinceLastGibs > GIB_INTERVAL;
 		if (gibs) {
 			this.sinceLastGibs = 0;
 		}
 		hits.sawRicochet(wall.getLocation(), wall.getDirection(), first, gibs);
-		hits.sawbladeWall(wall.getBlockPos(), this.punched);
+		hits.sawbladeWall(this, wall.getBlockPos());
 		this.punchable = true;
 		this.sameEnemyHitCooldown = 0;
 		this.currentHitEnemy = null;
 		this.hitAmount -= wear;
+	}
+
+	/** It goes on from where it meets the wall: reflected off it, or (bounceToSurfaceNormal) straight out of it. */
+	private void deflect(BlockHitResult wall, double speed) {
+		this.position = wall.getLocation();
+		Vec3 direction = this.script.get("bounceToSurfaceNormal").getAsInt() != 0
+			? wall.getDirection().getUnitVec3()
+			: ThrownSaw.reflect(this.velocity.normalize(), wall.getDirection());
+		this.velocity = direction.scale(speed);
 	}
 
 	/**
@@ -322,7 +402,26 @@ final class Sawblade {
 		return this.script.get("mass").getAsDouble();
 	}
 
-	private void touchEnemy(LivingEntity enemy) {
+	/** Its damage a hit, twice as much while punched. */
+	float damage() {
+		return this.script.get("damage").getAsFloat() * (this.punched ? 2 : 1);
+	}
+
+	boolean heated() {
+		return this.script.get("heated").getAsInt() != 0;
+	}
+
+	/** Its hum's pitch: lower while it's stopped on an enemy. */
+	float humPitch() {
+		return this.stopped && this.multiHitAmount > 1 ? STOPPED_HUM_PITCH : 1;
+	}
+
+	/** Nail.TouchEnemy: one that hits more than once stops on the enemy; else it cuts through it. */
+	private void touchEnemy(LivingEntity enemy, Hits hits) {
+		if (this.multiHitAmount <= 1) {
+			hitEnemy(enemy, hits);
+			return;
+		}
 		if (this.stopped || !enemy.isAlive()) {
 			return;
 		}
@@ -341,6 +440,24 @@ final class Sawblade {
 		}
 		this.originalVelocity = this.velocity;
 		this.sameEnemyHitCooldown = SAME_ENEMY_COOLDOWN;
+	}
+
+	/**
+	 * Nail.HitEnemy: an enemy it hasn't just cut wears it down, and takes the hit; it breaks once it's worn below
+	 * one hit.
+	 */
+	private void hitEnemy(LivingEntity enemy, Hits hits) {
+		if (!enemy.isAlive() || this.sameEnemyHitCooldown > 0 && enemy == this.currentHitEnemy) {
+			return;
+		}
+		this.sameEnemyHitCooldown = SAME_ENEMY_COOLDOWN;
+		this.currentHitEnemy = enemy;
+		this.hitAmount--;
+		hits.sawbladeStruck(this, enemy);
+		hits.sawbladeEnemy(this, enemy);
+		if (this.hitAmount < 1) {
+			breakApart(hits);
+		}
 	}
 
 	private void breakApart(Hits hits) {
@@ -364,9 +481,32 @@ final class Sawblade {
 		}
 	}
 
-	/** Its BoxCollider. It faces back the way it's going (Transform.LookAt behind it). */
+	/**
+	 * A Feedbacker punch reaching into a magnet's field: it's brought to {@code from} and sent on towards
+	 * {@code target}, hitting twice as hard for a while. Sent away from the magnet it circles, it's let go of.
+	 */
+	void pulledAndPunched(Vec3 from, Vec3 target) {
+		this.position = from;
+		Vec3 toward = target.subtract(from).normalize();
+		double speed = (this.stopped ? this.originalVelocity : this.velocity).length();
+		this.stopped = false;
+		this.velocity = toward.scale(speed);
+		this.punched = true;
+		this.punchedTimer = PUNCHED_TIME;
+		if (!this.magnets.isEmpty()) {
+			Magnet magnet = targetMagnet();
+			Vec3 center = magnet.center();
+			if (this.position.add(toward.scale(S)).distanceTo(center) > this.position.distanceTo(center)) {
+				released(magnet);
+			} else {
+				this.punchDistance = this.position.distanceTo(center) / S;
+			}
+		}
+	}
+
+	/** Its collider. It faces back the way it's going (Transform.LookAt behind it). */
 	OrientedBox box() {
-		return OrientedBox.of(this.position, forward(), this.script.getAsJsonObject("box"), 0.1 * S);
+		return OrientedBox.of(this.position, forward(), this.script.getAsJsonObject("box"), this.script.get("scale").getAsDouble() * S);
 	}
 
 	Vec3 forward() {

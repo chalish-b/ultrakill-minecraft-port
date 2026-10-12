@@ -196,17 +196,28 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 	private static final double SAW_AIM_REACH = 15 * S;
 	private static final String SAWED_ON = "shotgun_sawed_on";
 	private static final String HAMMER_SAWED_ON = "shotgun_hammer_sawed_on";
-	/** The thrown chainsaw, and the sawblade it becomes off its chain. */
+	/** The thrown chainsaw, and the sawblade it becomes off its chain, humming as the chainsaw does. */
 	private static final String THROWN_SAW = "chainsaw_thrown";
 	private static final String SAWBLADE = "chainsaw_sawblade";
-	/** The sawblade's chainsaw hums at this volume (its AudioSource's). */
+	private static final String SAWBLADE_HUM = "chainsaw_spin";
+	/** A sawblade hums at this volume (Nail.Update's). */
 	private static final float SAWBLADE_SPIN_VOLUME = 0.25F;
+	/** A sawblade breaking (Nail.sawBreakEffect). */
+	private static final String SAWBLADE_BREAK = "sawblade_break";
 	/** Punches find a thrown chainsaw within this far of the camera, and along the aim within the punch's reach. */
 	private static final double SAW_PUNCH_TOUCH = 0.01 * S;
 	private static final double SAW_HEAVY_PUNCH_TOUCH = 0.1 * S;
 	private static final double SAW_PUNCH_BOX = 0.3 * S;
 	/** A Feedbacker punch sends on punchable sawblades within a sphere this big, this far ahead. */
 	private static final double SAWBLADE_PUNCH_RADIUS = 3 * S;
+	/**
+	 * Finding none, it sends on a sawblade of a magnet whose field it's in, within a unit of a point a unit ahead,
+	 * if the magnet is between 6 and 12 units from that point and within 3 of its height.
+	 */
+	private static final double MAGNET_PUNCH_RADIUS = 1;
+	private static final double MAGNET_PUNCH_NEAR = 6;
+	private static final double MAGNET_PUNCH_FAR = 12;
+	private static final double MAGNET_PUNCH_HEIGHT = 3;
 	/**
 	 * "Railcannon Beam" (RevolverBeam): a 1.2 unit sphere swept along the shot. Its hits come sooner than a
 	 * revolver beam's, and sooner still past an enemy that's dead.
@@ -230,6 +241,21 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 	private static final double NAILGUN_MUZZLE_FLASH_SIZE = 0.5;
 	/** Nail.HitEnemy and OnCollisionEnter play their sounds at this volume. */
 	private static final float NAIL_HIT_VOLUME = 0.2F;
+	/** The Sawblade Launcher's saws: the Overheat's and the JumpStart's, the Attractor's, and the super saw. */
+	private static final String SAW = "sawblade";
+	private static final String SAW_FODDER = "sawblade_fodder";
+	private static final String SAW_HEATED = "sawblade_heated";
+	/** The super saw hums (its stoppedAud). */
+	private static final String SAW_HEATED_HUM = "sawblade_hum";
+	/** The Sawblade Launcher's muzzle flashes, the super saw's bigger, each gone after its RemoveOnTime. */
+	private static final String SAW_MUZZLE_FLASH = "nailgun_saw_muzzle_flash";
+	private static final String SAW_MUZZLE_FLASH_HEATED = "nailgun_saw_muzzle_flash_heated";
+	private static final double SAW_MUZZLE_FLASH_LIFETIME = 1;
+	/** A sawblade cutting the zapped enemy adds this much to the zap's damage and its charge, with an arc this wide. */
+	private static final float ZAPPER_BOOST_DAMAGE = 0.5F;
+	private static final double ZAPPER_BOOST_CHARGE = 0.5;
+	private static final double ZAPPER_BOOST_MIN_WIDTH = 8;
+	private static final double ZAPPER_BOOST_MAX_WIDTH = 15;
 	/** An enemy keeps this many of the nails stuck in it (EnemyIdentifier.DeliverDamage). */
 	private static final int MAX_STUCK_NAILS = 10;
 	/** The Attractor's magnet, and its TimeBomb's explosion: debris that falls off as it breaks. */
@@ -285,7 +311,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 	private final List<Drill> drills = new ArrayList<>();
 	/** The nailguns, and the charges they share. */
 	private final Nailgun.Charges nailgunCharges = new Nailgun.Charges();
-	private final Map<Nailgun.Variant, Nailgun> nailguns = new EnumMap<>(Nailgun.Variant.class);
+	private final Map<FirstPersonWeapons.Weapon, Nailgun> nailguns = new EnumMap<>(FirstPersonWeapons.Weapon.class);
 	private final List<Nail> nails = new ArrayList<>();
 	private final List<Magnet> magnets = new ArrayList<>();
 	private final List<Nail.Burst> nailBursts = new ArrayList<>();
@@ -353,7 +379,10 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 			}
 		}
 		for (Nailgun.Variant variant : Nailgun.Variant.values()) {
-			this.nailguns.put(variant, new Nailgun(variant, this.nailgunCharges, this.sounds));
+			for (boolean alternate : new boolean[]{false, true}) {
+				FirstPersonWeapons.Weapon weapon = weapon(variant, alternate);
+				this.nailguns.put(weapon, new Nailgun(variant, alternate, weapon, this.nailgunCharges, this.sounds));
+			}
 		}
 	}
 
@@ -733,19 +762,14 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 		if (weapon == null) {
 			return null;
 		}
-		return switch (weapon) {
-			case NAILGUN_ATTRACTOR -> this.nailguns.get(Nailgun.Variant.ATTRACTOR);
-			case NAILGUN_OVERHEAT -> this.nailguns.get(Nailgun.Variant.OVERHEAT);
-			case NAILGUN_JUMPSTART -> this.nailguns.get(Nailgun.Variant.JUMPSTART);
-			default -> null;
-		};
+		return this.nailguns.get(weapon);
 	}
 
-	private static FirstPersonWeapons.Weapon weapon(Nailgun.Variant variant) {
+	private static FirstPersonWeapons.Weapon weapon(Nailgun.Variant variant, boolean alternate) {
 		return switch (variant) {
-			case ATTRACTOR -> FirstPersonWeapons.Weapon.NAILGUN_ATTRACTOR;
-			case OVERHEAT -> FirstPersonWeapons.Weapon.NAILGUN_OVERHEAT;
-			case JUMPSTART -> FirstPersonWeapons.Weapon.NAILGUN_JUMPSTART;
+			case ATTRACTOR -> alternate ? FirstPersonWeapons.Weapon.NAILGUN_SAW_ATTRACTOR : FirstPersonWeapons.Weapon.NAILGUN_ATTRACTOR;
+			case OVERHEAT -> alternate ? FirstPersonWeapons.Weapon.NAILGUN_SAW_OVERHEAT : FirstPersonWeapons.Weapon.NAILGUN_OVERHEAT;
+			case JUMPSTART -> alternate ? FirstPersonWeapons.Weapon.NAILGUN_SAW_JUMPSTART : FirstPersonWeapons.Weapon.NAILGUN_JUMPSTART;
 		};
 	}
 
@@ -877,6 +901,15 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 		}
 		if (stack.is(UltraItems.NAILGUN_JUMPSTART)) {
 			return FirstPersonWeapons.Weapon.NAILGUN_JUMPSTART;
+		}
+		if (stack.is(UltraItems.NAILGUN_SAW_ATTRACTOR)) {
+			return FirstPersonWeapons.Weapon.NAILGUN_SAW_ATTRACTOR;
+		}
+		if (stack.is(UltraItems.NAILGUN_SAW_OVERHEAT)) {
+			return FirstPersonWeapons.Weapon.NAILGUN_SAW_OVERHEAT;
+		}
+		if (stack.is(UltraItems.NAILGUN_SAW_JUMPSTART)) {
+			return FirstPersonWeapons.Weapon.NAILGUN_SAW_JUMPSTART;
 		}
 		if (stack.is(UltraItems.RAILCANNON_ELECTRIC)) {
 			return FirstPersonWeapons.Weapon.RAILCANNON_ELECTRIC;
@@ -1543,43 +1576,120 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 	 * the shot, the Shoot animation and a camera shake (stronger during a burnout).
 	 */
 	@Override
-	public void shootNail(Nailgun.Variant variant, int barrel, boolean heated, double spread, float volume, float pitch, int steps) {
+	public void shootNail(Nailgun nailgun, int barrel, boolean heated, double spread, float volume, float pitch, int steps) {
 		Minecraft minecraft = Minecraft.getInstance();
 		LocalPlayer player = minecraft.player;
 		UltraMovement movement = UltraController.INSTANCE.movement();
-		String prefab = heated ? NAIL_HEATED : variant == Nailgun.Variant.ATTRACTOR ? NAIL_FODDER : NAIL;
+		String prefab = heated ? NAIL_HEATED : nailgun.variant == Nailgun.Variant.ATTRACTOR ? NAIL_FODDER : NAIL;
 		UltraModel model = UltraModel.get(prefab);
 		if (player == null || minecraft.level == null || movement == null || model == null) {
 			return;
 		}
-		FirstPersonWeapons.Weapon weapon = weapon(variant);
-		FirstPersonWeapons.Placement point = FirstPersonWeapons.INSTANCE.nailgunShootPoint(weapon, barrel);
+		FirstPersonWeapons.Placement point = FirstPersonWeapons.INSTANCE.nailgunShootPoint(nailgun.weapon, barrel);
 		if (point != null) {
 			this.effects.stepFlash(heated ? NAILGUN_MUZZLE_FLASH_HEATED : NAILGUN_MUZZLE_FLASH, point.position(), point.rotation(), NAILGUN_MUZZLE_FLASH_LIFETIME, point.scale() * NAILGUN_MUZZLE_FLASH_SIZE);
 		}
 		this.sounds.play("nailgun_shoot", volume, pitch);
-		Vec3 eye = movement.eyePosition();
-		Vec3 ahead = eye.add(player.getLookAngle().scale(S));
-		Vec3 from = Hitscan.clear(minecraft.level, player, eye, ahead) ? ahead : eye;
-		Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
-		double up = Math.toRadians(spread(spread / 3));
-		double yaw = Math.toRadians(spread(spread / 3));
-		Vector3f direction = camera.transform(new Vector3f(
-			(float)(Math.cos(up) * Math.sin(yaw)), (float)-Math.sin(up), (float)(-Math.cos(up) * Math.cos(yaw))
-		));
-		Nail nail = new Nail(prefab, model.script("nail"), from, new Vec3(direction.x, direction.y, direction.z).scale(Nail.SPEED));
+		Nail nail = new Nail(prefab, model.script("nail"), nailStart(minecraft.level, player, movement), nailDirection(minecraft, spread).scale(Nail.SPEED));
 		this.nails.add(nail);
 		nail.fly(steps, minecraft.level, player, this);
-		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon);
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(nailgun.weapon);
 		if (animator != null) {
 			animator.setTrigger("Shoot");
 		}
 		movement.shake(heated ? 0.35 : 0.1);
 	}
 
+	/**
+	 * Nailgun.Shoot on the Sawblade Launcher: a sawblade, the Attractor's or the others', out of a unit ahead of the
+	 * camera (or the camera) like a nail, wearing out after {@code hitAmount} unless that's NaN; bouncing off the walls
+	 * just ahead (Nail.ForceCheckSawbladeRicochet). The muzzle flash plays its own shot, and the gun its Shoot
+	 * animation, with a camera shake.
+	 */
+	@Override
+	public void shootSaw(Nailgun nailgun, int barrel, double spread, double hitAmount, int steps) {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		String prefab = nailgun.variant == Nailgun.Variant.ATTRACTOR ? SAW_FODDER : SAW;
+		UltraModel model = UltraModel.get(prefab);
+		if (player == null || minecraft.level == null || movement == null || model == null) {
+			return;
+		}
+		sawMuzzleFlash(nailgun, barrel, SAW_MUZZLE_FLASH);
+		Sawblade saw = new Sawblade(prefab, model.script("sawblade"), nailStart(minecraft.level, player, movement), nailDirection(minecraft, spread).scale(Nail.SPEED),
+			null, this.sounds.loop());
+		if (!Double.isNaN(hitAmount)) {
+			saw.hitAmount = hitAmount;
+		}
+		this.sawblades.add(saw);
+		saw.start(minecraft.level, player, this);
+		saw.fly(steps, minecraft.level, player, this);
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(nailgun.weapon);
+		if (animator != null) {
+			animator.setTrigger("Shoot");
+		}
+		movement.shake(0.1);
+	}
+
+	/**
+	 * Nailgun.SuperSaw: the super saw straight along the aim, out of a unit ahead of the camera (or the camera),
+	 * stopping on each enemy to hit it {@code multiHitAmount} times; its bigger muzzle flash with both its sounds, the
+	 * gun's SuperShoot animation and a bigger camera shake.
+	 */
+	@Override
+	public void shootSuperSaw(Nailgun nailgun, int barrel, int multiHitAmount) {
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		UltraMovement movement = UltraController.INSTANCE.movement();
+		UltraModel model = UltraModel.get(SAW_HEATED);
+		if (player == null || minecraft.level == null || movement == null || model == null) {
+			return;
+		}
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(nailgun.weapon);
+		if (animator != null) {
+			animator.setTrigger("SuperShoot");
+		}
+		sawMuzzleFlash(nailgun, barrel, SAW_MUZZLE_FLASH_HEATED);
+		this.sounds.play("nailgun_saw_super", 1, 1);
+		Sawblade saw = new Sawblade(SAW_HEATED, model.script("sawblade"), nailStart(minecraft.level, player, movement), player.getLookAngle().scale(Nail.SPEED),
+			SAW_HEATED_HUM, this.sounds.loop());
+		saw.multiHitAmount = multiHitAmount;
+		this.sawblades.add(saw);
+		saw.start(minecraft.level, player, this);
+		movement.shake(0.5);
+	}
+
+	/** The Sawblade Launcher's muzzle flash at the barrel's shoot point, with its shot (RandomPitch). */
+	private void sawMuzzleFlash(Nailgun nailgun, int barrel, String flash) {
+		FirstPersonWeapons.Placement point = FirstPersonWeapons.INSTANCE.nailgunShootPoint(nailgun.weapon, barrel);
+		if (point != null) {
+			this.effects.stepFlash(flash, point.position(), point.rotation(), SAW_MUZZLE_FLASH_LIFETIME, point.scale() * NAILGUN_MUZZLE_FLASH_SIZE);
+		}
+		this.sounds.play("nailgun_saw_shoot", 1, this.sounds.randomPitch(1.4F, 1.6F));
+	}
+
+	/** Where Nailgun.Shoot starts its nails and saws: a unit ahead of the camera, or the camera with a wall closer. */
+	private static Vec3 nailStart(Level level, LocalPlayer player, UltraMovement movement) {
+		Vec3 eye = movement.eyePosition();
+		Vec3 ahead = eye.add(player.getLookAngle().scale(S));
+		return Hitscan.clear(level, player, eye, ahead) ? ahead : eye;
+	}
+
+	/** The aim, turned up to a third of {@code spread} degrees about each axis. */
+	private Vec3 nailDirection(Minecraft minecraft, double spread) {
+		Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
+		double up = Math.toRadians(spread(spread / 3));
+		double yaw = Math.toRadians(spread(spread / 3));
+		Vector3f direction = camera.transform(new Vector3f(
+			(float)(Math.cos(up) * Math.sin(yaw)), (float)-Math.sin(up), (float)(-Math.cos(up) * Math.cos(yaw))
+		));
+		return new Vec3(direction.x, direction.y, direction.z);
+	}
+
 	/** Nailgun.ShootMagnet: the magnet thrown out of a unit ahead of the camera (or the camera) along the aim, with its throw. */
 	@Override
-	public void shootMagnet(Nailgun.Variant variant, boolean animate) {
+	public void shootMagnet(Nailgun nailgun, boolean animate) {
 		Minecraft minecraft = Minecraft.getInstance();
 		LocalPlayer player = minecraft.player;
 		UltraMovement movement = UltraController.INSTANCE.movement();
@@ -1591,7 +1701,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 		Vec3 look = player.getLookAngle();
 		Vec3 ahead = eye.add(look.scale(S));
 		this.magnets.add(new Magnet(model, this.sounds, Hitscan.clear(minecraft.level, player, eye, ahead) ? ahead : eye, look));
-		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon(variant));
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(nailgun.weapon);
 		if (animator != null && animate) {
 			animator.setTrigger("Shoot");
 		}
@@ -1740,7 +1850,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 	 * sound, and the gun's Shoot animation.
 	 */
 	@Override
-	public void shootZapper(Nailgun.Variant variant, boolean animate) {
+	public void shootZapper(Nailgun nailgun, boolean animate) {
 		Minecraft minecraft = Minecraft.getInstance();
 		LocalPlayer player = minecraft.player;
 		UltraMovement movement = UltraController.INSTANCE.movement();
@@ -1760,7 +1870,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 			}
 		}
 		this.zapper = new Zapper(script, lightning, this.sounds, movement.eyePosition(), player.getLookAngle(), movement.rootPosition());
-		Animator animator = FirstPersonWeapons.INSTANCE.animator(weapon(variant));
+		Animator animator = FirstPersonWeapons.INSTANCE.animator(nailgun.weapon);
 		if (animator != null && animate) {
 			animator.setTrigger("Shoot");
 		}
@@ -1789,7 +1899,7 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 		return first.kind() == Hitscan.Kind.ENTITY ? first.distance() / S : Double.NaN;
 	}
 
-	/** The zapper, its cable from the JumpStart's ZapperPosition while it's held, else from the player. */
+	/** The zapper, its cable from a held JumpStart's zapperAttachTransform, else from the player. */
 	private void updateZapper(double dt, float partialTick, Level level, LocalPlayer player) {
 		UltraMovement movement = UltraController.INSTANCE.movement();
 		if (this.zapper == null || movement == null) {
@@ -1797,8 +1907,9 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 		}
 		Vec3 root = movement.rootPosition();
 		Vec3 lineStart = root;
-		if (this.held == FirstPersonWeapons.Weapon.NAILGUN_JUMPSTART) {
-			FirstPersonWeapons.Frame point = FirstPersonWeapons.INSTANCE.weaponBone(this.held, "ZapperPosition");
+		Nailgun nailgun = nailgun(this.held);
+		if (nailgun != null && nailgun.variant == Nailgun.Variant.JUMPSTART) {
+			FirstPersonWeapons.Frame point = FirstPersonWeapons.INSTANCE.zapperAttach(this.held);
 			if (point != null) {
 				Minecraft minecraft = Minecraft.getInstance();
 				Quaternionf camera = new Quaternionf(minecraft.gameRenderer.mainCamera().rotation());
@@ -3169,8 +3280,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 			}
 			if (sawblade.removed) {
 				sawblade.spin.stop();
-			} else {
-				sawblade.spin.update("chainsaw_spin", SAWBLADE_SPIN_VOLUME, 1, sawblade.position);
+			} else if (sawblade.hum != null) {
+				sawblade.spin.update(sawblade.hum, SAWBLADE_SPIN_VOLUME, sawblade.humPitch(), sawblade.position);
 			}
 		}
 		this.sawblades.removeIf(sawblade -> sawblade.removed);
@@ -3202,10 +3313,38 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 		sawHitEnemy(enemy, sawScript(THROWN_SAW, "chainsaw").get("damage").getAsFloat());
 	}
 
-	/** Nail.DamageEnemy for a sawblade: twice the damage while punched. */
+	/**
+	 * Nail.HitEnemy for a sawblade: its hit sound, and on the enemy the zapper is attached to, a boost to the zap
+	 * (Zapper.ChargeBoost) with an arc from the zapper to its cable's start and the boost's sound.
+	 */
 	@Override
-	public void sawbladeEnemy(LivingEntity enemy, boolean punched) {
-		sawHitEnemy(enemy, sawScript(SAWBLADE, "sawblade").get("damage").getAsFloat() * (punched ? 2 : 1));
+	public void sawbladeStruck(Sawblade sawblade, LivingEntity enemy) {
+		this.sounds.once().update("nail_hit_enemy", NAIL_HIT_VOLUME, this.sounds.randomPitch(0.9F, 1.1F), sawblade.position);
+		if (this.zapper != null && !this.zapper.removed && this.zapper.attached && this.zapper.enemy == enemy) {
+			this.zapper.boost(ZAPPER_BOOST_DAMAGE, ZAPPER_BOOST_CHARGE);
+			this.effects.arc(this.zapper.position, this.zapper.lineStart, ZAPPER_BOOST_MIN_WIDTH, ZAPPER_BOOST_MAX_WIDTH);
+			this.sounds.once().update("zapper_boost", 1, 1, this.zapper.position);
+		}
+	}
+
+	/**
+	 * Nail.DamageEnemy for a sawblade: its damage (twice while punched), with the chainsaw's hit effect if it has
+	 * one; a heated one sets a soaked enemy alight.
+	 */
+	@Override
+	public void sawbladeEnemy(Sawblade sawblade, LivingEntity enemy) {
+		Level level = Minecraft.getInstance().level;
+		if (level == null) {
+			return;
+		}
+		if (sawblade.script.get("hitEffect").getAsBoolean()) {
+			sawHitEnemy(enemy, sawblade.damage());
+		} else {
+			shotgunHit(level, enemy, sawblade.damage(), enemy.getBoundingBox().getCenter());
+		}
+		if (sawblade.heated()) {
+			ClientPlayNetworking.send(new BurnPayload(enemy.getId()));
+		}
 	}
 
 	@Override
@@ -3214,8 +3353,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 	}
 
 	@Override
-	public void sawbladeWall(BlockPos block, boolean punched) {
-		hitBlock(block, sawScript(SAWBLADE, "sawblade").get("damage").getAsFloat() * (punched ? 2 : 1));
+	public void sawbladeWall(Sawblade sawblade, BlockPos block) {
+		hitBlock(block, sawblade.damage());
 	}
 
 	private void sawHitEnemy(LivingEntity enemy, float damage) {
@@ -3263,17 +3402,17 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 		saw.spin.stop();
 		UltraModel model = UltraModel.get(SAWBLADE);
 		if (model != null) {
-			this.sawblades.add(new Sawblade(model.script("sawblade"), saw.position, velocity, this.sounds.loop()));
+			this.sawblades.add(new Sawblade(SAWBLADE, model.script("sawblade"), saw.position, velocity, SAWBLADE_HUM, this.sounds.loop()));
 		}
 		this.sounds.play("chainsaw_snap", 0.5F, 1);
 	}
 
-	/** Nail.SawBreak: the sawblade breaks apart. */
+	/** Nail.SawBreak: the sawblade breaks apart (its sawBreakEffect, whose sounds' RandomPitch the mod plays too). */
 	@Override
 	public void sawbladeBroke(Sawblade sawblade) {
 		sawblade.spin.stop();
-		this.effects.particles("chainsaw_break", null, sawblade.position);
-		this.sounds.play("chainsaw_break", 1, this.sounds.randomPitch(0.56F, 0.76F));
+		this.effects.particles(SAWBLADE_BREAK, null, sawblade.position);
+		this.sounds.play("chainsaw_break", 1, this.sounds.randomPitch(0.9F, 1.1F));
 		this.sounds.play("chainsaw_spark", 1, this.sounds.randomPitch(0.85F, 1.15F));
 	}
 
@@ -3313,7 +3452,11 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 		return true;
 	}
 
-	/** Punch.ActiveFrame on sawblades that have bounced, in a sphere ahead: on towards what the player aims at. */
+	/**
+	 * Punch.ActiveFrame on sawblades that have bounced, in a sphere ahead: on towards what the player aims at. With
+	 * none there, the punch brings a sawblade out of the field of a magnet it reaches into to just ahead of the
+	 * camera, and sends that on.
+	 */
 	private boolean punchSawblades(LocalPlayer player) {
 		UltraMovement movement = UltraController.INSTANCE.movement();
 		Level level = Minecraft.getInstance().level;
@@ -3331,10 +3474,50 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 				any = true;
 			}
 		}
+		if (!any) {
+			any = punchMagnetSawblade(eye, look, target);
+		}
 		if (any) {
 			sawPunchFeedback();
 		}
 		return any;
+	}
+
+	/**
+	 * Punch.ActiveFrame's reach into a magnet's field: the first magnet holding sawblades whose field takes in a
+	 * unit around the point a unit ahead, 6 to 12 units from that point and within 3 of its height, gives up its
+	 * sawblade furthest from the camera, which the punch brings to that point and sends on.
+	 */
+	private boolean punchMagnetSawblade(Vec3 eye, Vec3 look, Vec3 target) {
+		Vec3 ahead = eye.add(look.scale(S));
+		for (Magnet magnet : this.magnets) {
+			if (magnet.removed) {
+				continue;
+			}
+			Vec3 center = magnet.center();
+			double distance = ahead.distanceTo(center) / S;
+			if (ahead.distanceTo(center) > magnet.reach() + MAGNET_PUNCH_RADIUS * S || distance < MAGNET_PUNCH_NEAR || distance > MAGNET_PUNCH_FAR
+				|| Math.abs(ahead.y - center.y) / S > MAGNET_PUNCH_HEIGHT) {
+				continue;
+			}
+			List<Sawblade> held = magnet.sawblades();
+			Sawblade chosen = null;
+			double chosenDistance = Double.POSITIVE_INFINITY;
+			for (int i = held.size() - 1; i >= 0; i--) {
+				Sawblade sawblade = held.get(i);
+				double away = sawblade.position.distanceTo(eye);
+				if (chosen == null || chosenDistance < away) {
+					chosen = sawblade;
+					chosenDistance = away;
+				}
+			}
+			if (chosen == null) {
+				continue;
+			}
+			chosen.pulledAndPunched(ahead, target);
+			return true;
+		}
+		return false;
 	}
 
 	/** The punch's specialHit: its sound, a short hitstop and the hook. */

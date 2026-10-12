@@ -30,6 +30,9 @@ public final class UltraItems {
 	public static final Item NAILGUN_ATTRACTOR = register("nailgun_attractor");
 	public static final Item NAILGUN_OVERHEAT = register("nailgun_overheat");
 	public static final Item NAILGUN_JUMPSTART = register("nailgun_jumpstart");
+	public static final Item NAILGUN_SAW_ATTRACTOR = register("nailgun_saw_attractor");
+	public static final Item NAILGUN_SAW_OVERHEAT = register("nailgun_saw_overheat");
+	public static final Item NAILGUN_SAW_JUMPSTART = register("nailgun_saw_jumpstart");
 	public static final Item RAILCANNON_ELECTRIC = register("railcannon_electric");
 	public static final Item RAILCANNON_SCREWDRIVER = register("railcannon_screwdriver");
 	public static final Item RAILCANNON_MALICIOUS = register("railcannon_malicious");
@@ -62,6 +65,9 @@ public final class UltraItems {
 			output.accept(NAILGUN_ATTRACTOR);
 			output.accept(NAILGUN_OVERHEAT);
 			output.accept(NAILGUN_JUMPSTART);
+			output.accept(NAILGUN_SAW_ATTRACTOR);
+			output.accept(NAILGUN_SAW_OVERHEAT);
+			output.accept(NAILGUN_SAW_JUMPSTART);
 			output.accept(RAILCANNON_ELECTRIC);
 			output.accept(RAILCANNON_SCREWDRIVER);
 			output.accept(RAILCANNON_MALICIOUS);
@@ -88,7 +94,10 @@ public final class UltraItems {
 			List.of(SHOTGUN_CORE_EJECT, SHOTGUN_PUMP_CHARGE, SHOTGUN_SAWED_ON),
 			List.of(SHOTGUN_HAMMER_CORE_EJECT, SHOTGUN_HAMMER_PUMP_CHARGE, SHOTGUN_HAMMER_SAWED_ON)
 		),
-		NAILGUN(List.of(NAILGUN_ATTRACTOR, NAILGUN_OVERHEAT, NAILGUN_JUMPSTART), List.of()),
+		NAILGUN(
+			List.of(NAILGUN_ATTRACTOR, NAILGUN_OVERHEAT, NAILGUN_JUMPSTART),
+			List.of(NAILGUN_SAW_ATTRACTOR, NAILGUN_SAW_OVERHEAT, NAILGUN_SAW_JUMPSTART)
+		),
 		RAILCANNON(List.of(RAILCANNON_ELECTRIC, RAILCANNON_SCREWDRIVER, RAILCANNON_MALICIOUS), List.of()),
 		ROCKET_LAUNCHER(List.of(ROCKET_LAUNCHER_FREEZEFRAME, ROCKET_LAUNCHER_SRS, ROCKET_LAUNCHER_FIRESTARTER), List.of());
 

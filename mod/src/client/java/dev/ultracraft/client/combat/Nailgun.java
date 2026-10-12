@@ -7,11 +7,16 @@ import org.jspecify.annotations.Nullable;
 import java.util.Locale;
 
 /**
- * ULTRAKILL's nailgun (Nailgun), as the Attractor, the Overheat or the JumpStart. Held down, its barrels spin up and
- * it fires nails from each in turn; their heat glows on the barrels. The Attractor runs on a hundred nails that
- * refill while it isn't firing, and throws magnets. The Overheat fires slower the hotter it gets, and burns out a
- * heat sink to fire a stream of heated nails until it has cooled. The JumpStart fires its zapper, and fires fastest
- * while the zapper is attached to an enemy. It decides when to fire; {@link ClientCombat} does the firing.
+ * ULTRAKILL's nailgun (Nailgun), as the Attractor, the Overheat or the JumpStart, on the standard nailgun or the
+ * Sawblade Launcher (its altVersion). Held down, its barrels spin up and it fires nails from each in turn; their heat
+ * glows on the barrels. The Attractor runs on a hundred nails that refill while it isn't firing, and throws magnets.
+ * The Overheat fires slower the hotter it gets, and burns out a heat sink to fire a stream of heated nails until it
+ * has cooled. The JumpStart fires its zapper, and fires fastest while the zapper is attached to an enemy.
+ * <p>
+ * The Sawblade Launcher fires sawblades instead, slower. Its Attractor runs on ten of them. Its Overheat heats up
+ * with each shot, firing slower and wider and its saws breaking sooner the hotter it is, and spends its one heat sink
+ * on a super saw that hits each enemy more times the hotter it was. Its JumpStart fires fastest while the zapper is
+ * out. It decides when to fire; {@link ClientCombat} does the firing.
  */
 final class Nailgun {
 	enum Variant {
@@ -33,13 +38,23 @@ final class Nailgun {
 		 * of {@code spread} degrees about each axis, its muzzle flash, and the shot at {@code volume} and {@code pitch}.
 		 * The nail flies {@code steps} physics steps before the frame is drawn: the one it's fired in, and those left.
 		 */
-		void shootNail(Variant variant, int barrel, boolean heated, double spread, float volume, float pitch, int steps);
+		void shootNail(Nailgun nailgun, int barrel, boolean heated, double spread, float volume, float pitch, int steps);
+
+		/**
+		 * Nailgun.Shoot on the Sawblade Launcher: a sawblade out of shoot point {@code barrel}, turned up to a third of
+		 * {@code spread} degrees about each axis, wearing out after {@code hitAmount} (NaN for its prefab's), and its
+		 * muzzle flash. It flies {@code steps} physics steps before the frame is drawn.
+		 */
+		void shootSaw(Nailgun nailgun, int barrel, double spread, double hitAmount, int steps);
+
+		/** Nailgun.SuperSaw: the super saw out of shoot point {@code barrel}, stopping to hit each enemy {@code multiHitAmount} times. */
+		void shootSuperSaw(Nailgun nailgun, int barrel, int multiHitAmount);
 
 		/** Nailgun.ShootMagnet: a magnet thrown along the aim; the gun plays its Shoot animation if {@code animate}. */
-		void shootMagnet(Variant variant, boolean animate);
+		void shootMagnet(Nailgun nailgun, boolean animate);
 
 		/** Nailgun.ShootZapper: the zapper shot along the aim; the gun plays its Shoot animation if {@code animate}. */
-		void shootZapper(Variant variant, boolean animate);
+		void shootZapper(Nailgun nailgun, boolean animate);
 
 		/** Whether the zapper is out and attached to an enemy. */
 		boolean zapperAttached();
@@ -52,17 +67,19 @@ final class Nailgun {
 	}
 
 	/**
-	 * WeaponCharges' nailgun charges, which go on recharging whichever weapon is out: the Overheat's heat sinks and
-	 * the barrels' heat as the last nailgun put away left them, the Attractor's nails and its magnet charges, of
-	 * which there are three less the magnets out, and the JumpStart's zapper, which recharges after a zap.
+	 * WeaponCharges' nailgun charges, which go on recharging whichever weapon is out: the Overheats' heat sinks and
+	 * the barrels' heat as the last nailgun put away left them, the Attractors' nails and sawblades and their magnet
+	 * charges, of which there are three less the magnets out, and the JumpStarts' zapper, which recharges after a zap.
 	 */
 	static final class Charges {
-		/** naiHeatsinks and naiheatUp; nai0set: whether a nailgun has left its heat for the next one. */
+		/** naiHeatsinks, naiSawHeatsinks and naiheatUp; nai0set: whether a nailgun has left its heat for the next one. */
 		double heatSinks = HEAT_SINKS;
+		double sawHeatSinks = SAW_HEAT_SINKS;
 		double heat;
 		boolean heatLeft;
-		/** naiAmmo; naiAmmoDontCharge while the Attractor is firing. */
+		/** naiAmmo and naiSaws; naiAmmoDontCharge while an Attractor is firing. */
 		double ammo = AMMO;
+		double saws = SAWS;
 		boolean ammoHeld;
 		/** naiMagnetCharge. */
 		double magnetCharge = MAGNET_CHARGES;
@@ -72,9 +89,11 @@ final class Nailgun {
 		/** WeaponCharges.Charge. */
 		void recharge(double dt, int magnets) {
 			this.heatSinks = toward(this.heatSinks, HEAT_SINKS, dt * HEAT_SINK_RECHARGE);
+			this.sawHeatSinks = toward(this.sawHeatSinks, SAW_HEAT_SINKS, dt * HEAT_SINK_RECHARGE);
 			this.heat = toward(this.heat, 0, dt * COOLING);
 			if (!this.ammoHeld) {
 				this.ammo = toward(this.ammo, AMMO, dt * AMMO_RECHARGE);
+				this.saws = toward(this.saws, SAWS, dt * SAW_RECHARGE);
 			}
 			int room = MAGNET_CHARGES - magnets;
 			if (magnets > 0) {
@@ -88,8 +107,9 @@ final class Nailgun {
 		}
 	}
 
-	/** Nailgun.fireRate: the fire cooldown a shot sets, before heat changes it. */
+	/** Nailgun.fireRate: the fire cooldown a shot sets, before heat changes it, and the Sawblade Launcher's. */
 	private static final double FIRE_RATE = 4;
+	private static final double SAW_FIRE_RATE = 24;
 	/** Nailgun.emptyColor and fullColor: the heat meter's background goes from one to the other with the heat. */
 	private static final float[] EMPTY_COLOR = {0.33F, 0.33F, 0.33F, 1};
 	private static final float[] FULL_COLOR = {1, 0.5F, 0, 1};
@@ -98,9 +118,12 @@ final class Nailgun {
 	/** The fire cooldown counts down by this much a second; a shot sets it to the fire rate. */
 	private static final double COOLDOWN_SPEED = 100;
 	private static final int HEAT_SINKS = 2;
+	private static final int SAW_HEAT_SINKS = 1;
 	private static final double HEAT_SINK_RECHARGE = 0.125;
 	private static final int AMMO = 100;
 	private static final double AMMO_RECHARGE = 5;
+	private static final int SAWS = 10;
+	private static final double SAW_RECHARGE = 0.5;
 	private static final int MAGNET_CHARGES = 3;
 	private static final double MAGNET_RECHARGE = 3;
 	/** The zapper recharges this many seconds after a zap. */
@@ -122,6 +145,17 @@ final class Nailgun {
 	private static final double HEATING = 0.55;
 	private static final double COOLING = 0.3;
 	private static final double BURNING_OUT = 1;
+	/**
+	 * The Sawblade Launcher's Overheat heats up this much a shot, and cools this much a second once it's ready to
+	 * fire again (this much until then). Its spread widens to this many degrees with its heat past a quarter, and its
+	 * saws wear out after three hits cold down to one hot.
+	 */
+	private static final double SAW_HEATING = 0.125;
+	private static final double SAW_COOLING = 0.2;
+	private static final double SAW_COOLING_FIRING = 0.03;
+	private static final double SAW_SPREAD = 45;
+	private static final double SAW_HIT_AMOUNT_COLD = 3;
+	private static final double SAW_HIT_AMOUNT_HOT = 1;
 	/** The barrels spin at this many degrees a second, more by this much at full heat, and slow by this much a second. */
 	private static final double SPIN = 250;
 	private static final double SPIN_HEAT = 2250;
@@ -135,6 +169,9 @@ final class Nailgun {
 	private static final float[] CLEAR = {0, 0, 0, 0};
 
 	final Variant variant;
+	/** The Sawblade Launcher (Nailgun.altVersion). */
+	final boolean alternate;
+	final FirstPersonWeapons.Weapon weapon;
 	private final Charges charges;
 	private final UltraSounds sounds;
 	private final UltraSounds.Loop whir;
@@ -164,19 +201,25 @@ final class Nailgun {
 	private FirstPersonWeapons.ZapHud zapHud = FirstPersonWeapons.ZapHud.NONE;
 	private double accumulator;
 
-	Nailgun(Variant variant, Charges charges, UltraSounds sounds) {
+	Nailgun(Variant variant, boolean alternate, FirstPersonWeapons.Weapon weapon, Charges charges, UltraSounds sounds) {
 		this.variant = variant;
+		this.alternate = alternate;
+		this.weapon = weapon;
 		this.charges = charges;
 		this.sounds = sounds;
 		this.whir = sounds.loop();
 		this.steam = sounds.loop();
+		// Nailgun.Start: the Sawblade Launcher's Overheat has the one heat sink.
+		if (alternate && variant == Variant.OVERHEAT) {
+			this.heatSinks = SAW_HEAT_SINKS;
+		}
 	}
 
 	/** Nailgun.OnEnable: the Overheat takes back its heat sinks, and either takes on the heat the last nailgun left. */
 	void equip() {
 		this.canShoot = false;
 		if (this.variant == Variant.OVERHEAT) {
-			this.heatSinks = this.charges.heatSinks;
+			this.heatSinks = this.alternate ? this.charges.sawHeatSinks : this.charges.heatSinks;
 		}
 		if (this.charges.heatLeft) {
 			this.charges.heatLeft = false;
@@ -194,7 +237,11 @@ final class Nailgun {
 		this.charges.heat = this.heat;
 		this.charges.heatLeft = true;
 		if (this.variant == Variant.OVERHEAT) {
-			this.charges.heatSinks = this.heatSinks;
+			if (this.alternate) {
+				this.charges.sawHeatSinks = this.heatSinks;
+			} else {
+				this.charges.heatSinks = this.heatSinks;
+			}
 		}
 		this.charges.ammoHeld = false;
 		this.whir.stop();
@@ -225,33 +272,38 @@ final class Nailgun {
 		} else if (firing && (this.heat < 1 || this.variant == Variant.JUMPSTART)) {
 			this.heat = switch (this.variant) {
 				case ATTRACTOR -> 1;
-				case OVERHEAT -> toward(this.heat, 1, dt * HEATING);
+				case OVERHEAT -> this.alternate ? this.heat : toward(this.heat, 1, dt * HEATING);
 				case JUMPSTART -> actions.zapperAttached() ? 1 : JUMPSTART_HEAT;
 			};
 		} else if (this.heat > 0 && !firing) {
-			this.heat = toward(this.heat, 0, dt * COOLING);
+			double cooling = !this.alternate ? COOLING : this.fireCooldown <= 0 ? SAW_COOLING : SAW_COOLING_FIRING;
+			this.heat = toward(this.heat, 0, dt * cooling);
 		}
 		if (this.variant == Variant.OVERHEAT) {
 			updateHeatMeter();
 		}
 		this.spinSpeed = firing ? SPIN + this.heat * SPIN_HEAT : toward(this.spinSpeed, 0, dt * SPIN_SLOWING);
-		this.fireRate = currentFireRate();
+		this.fireRate = currentFireRate(actions);
 		this.barrelAngle = (this.barrelAngle + this.spinSpeed * dt) % 360;
 		this.whir.update("nailgun_spin", 1, this.spinSpeed / SPIN_PITCH);
 		if (this.variant == Variant.ATTRACTOR) {
 			this.charges.ammoHeld = input.fire1Held;
 		}
 		if (this.variant == Variant.OVERHEAT && input.fire2Pressed && this.canShoot && !this.burnOut && this.heatSinks >= 1 && this.heat >= 0.1) {
-			this.burnOut = true;
-			this.fireCooldown = 0;
-			this.heatSinks--;
-			this.steaming = true;
-			this.fireRate = FIRE_RATE - 2.5;
+			if (this.alternate) {
+				superSaw(actions);
+			} else {
+				this.burnOut = true;
+				this.fireCooldown = 0;
+				this.heatSinks--;
+				this.steaming = true;
+				this.fireRate = FIRE_RATE - 2.5;
+			}
 		}
 		if (this.variant == Variant.ATTRACTOR && input.fire2Pressed) {
 			if (this.charges.magnetCharge >= 1) {
 				this.layerWeight = animationWeight();
-				actions.shootMagnet(this.variant, this.canShoot);
+				actions.shootMagnet(this, this.canShoot);
 				this.charges.magnetCharge--;
 			} else {
 				noAmmo();
@@ -260,13 +312,13 @@ final class Nailgun {
 		if (this.variant == Variant.JUMPSTART && input.fire2Pressed) {
 			if (this.charges.zapperRecharge >= ZAPPER_RECHARGE) {
 				this.layerWeight = animationWeight();
-				actions.shootZapper(this.variant, this.canShoot);
+				actions.shootZapper(this, this.canShoot);
 			} else {
 				noAmmo();
 			}
 		}
 		if (this.variant == Variant.OVERHEAT && !input.fire1Held) {
-			this.heatSinks = toward(this.heatSinks, HEAT_SINKS, dt * HEAT_SINK_RECHARGE);
+			this.heatSinks = toward(this.heatSinks, this.alternate ? SAW_HEAT_SINKS : HEAT_SINKS, dt * HEAT_SINK_RECHARGE);
 		}
 		if (this.variant != Variant.JUMPSTART) {
 			refreshMeter(dt, this.variant == Variant.OVERHEAT ? this.heatSinks : this.charges.magnetCharge);
@@ -292,7 +344,7 @@ final class Nailgun {
 			if (this.fireCooldown != 0) {
 				return;
 			}
-			if (this.variant == Variant.ATTRACTOR && Math.rint(this.charges.ammo) <= 0) {
+			if (this.variant == Variant.ATTRACTOR && Math.rint(this.alternate ? this.charges.saws : this.charges.ammo) <= 0) {
 				this.fireCooldown = this.fireRate * 2;
 				if (this.shotSuccessfully) {
 					this.sounds.play("nailgun_last_shot", 1, 1);
@@ -317,9 +369,17 @@ final class Nailgun {
 		this.fireCooldown = this.fireRate;
 		this.shotSuccessfully = true;
 		if (this.variant == Variant.ATTRACTOR) {
-			this.charges.ammo--;
+			if (this.alternate) {
+				this.charges.saws--;
+			} else {
+				this.charges.ammo--;
+			}
 		}
 		this.barrel = (this.barrel + 1) % 2;
+		if (this.alternate) {
+			shootSaw(actions, steps);
+			return;
+		}
 		double spread = this.variant.spread;
 		float volume = 0.65F;
 		float pitch;
@@ -332,7 +392,39 @@ final class Nailgun {
 		} else {
 			pitch = this.sounds.randomPitch(0.9F, 1.1F);
 		}
-		actions.shootNail(this.variant, this.barrel, this.burnOut, spread, volume, pitch, steps);
+		actions.shootNail(this, this.barrel, this.burnOut, spread, volume, pitch, steps);
+	}
+
+	/**
+	 * Nailgun.Shoot on the Sawblade Launcher: the Overheat fires wider the hotter it is (widest with no heat sink
+	 * left), and its saws, like the JumpStart's, wear out sooner; the Overheat then heats up.
+	 */
+	private void shootSaw(Actions actions, int steps) {
+		double spread = 0;
+		if (this.variant == Variant.OVERHEAT) {
+			spread = this.heatSinks < 1 ? SAW_SPREAD : SAW_SPREAD * Math.clamp(this.heat - 0.25, 0, 1);
+		}
+		double hitAmount = Double.NaN;
+		if (this.variant != Variant.ATTRACTOR) {
+			hitAmount = this.heatSinks >= 1 && this.variant != Variant.JUMPSTART
+				? SAW_HIT_AMOUNT_COLD + (SAW_HIT_AMOUNT_HOT - SAW_HIT_AMOUNT_COLD) * Math.clamp(this.heat, 0, 1)
+				: SAW_HIT_AMOUNT_HOT;
+		}
+		actions.shootSaw(this, this.barrel, spread, hitAmount, steps);
+		if (this.variant == Variant.OVERHEAT && this.heatSinks >= 1) {
+			this.heat = toward(this.heat, 1, SAW_HEATING);
+		}
+	}
+
+	/** Nailgun.SuperSaw: the super saw out of the next barrel, hitting each enemy once for every third of the heat; it spends the heat sink and the heat. */
+	private void superSaw(Actions actions) {
+		this.fireCooldown = this.fireRate;
+		this.shotSuccessfully = true;
+		this.layerWeight = 0;
+		this.barrel = (this.barrel + 1) % 2;
+		actions.shootSuperSaw(this, this.barrel, (int)Math.rint(this.heat * 3));
+		this.heatSinks--;
+		this.heat = 0;
 	}
 
 	/**
@@ -355,7 +447,7 @@ final class Nailgun {
 		Zapper zapper = actions.zapper();
 		if (zapper == null) {
 			double aimed = actions.aimedEnemyDistance();
-			String status = "NO TARGET";
+			String status = this.alternate ? "NULL" : "NO TARGET";
 			float[] color = GRAY;
 			boolean variantColor = false;
 			double target = 0;
@@ -366,7 +458,7 @@ final class Nailgun {
 					target = 1 - (inRange - aimed) / inRange;
 					color = WHITE;
 				} else {
-					status = "OUT OF RANGE";
+					status = this.alternate ? "TOO FAR" : "OUT OF RANGE";
 					variantColor = true;
 				}
 			}
@@ -379,13 +471,13 @@ final class Nailgun {
 		if (zapper.distance > ZAPPER_REACH || zapper.raycastBlocked) {
 			this.distanceMeter = 1;
 			float[] flash = zapper.breakTimer % WARNING_FLASH > WARNING_FLASH / 2 ? RED : WHITE;
-			this.zapHud = new FirstPersonWeapons.ZapHud(false, 0, zapper.raycastBlocked ? "BLOCKED" : "OUT OF RANGE", WHITE, true, 1, zapMeter, charge, true, flash);
+			this.zapHud = new FirstPersonWeapons.ZapHud(false, 0, zapper.raycastBlocked ? "BLOCKED" : this.alternate ? "TOO FAR" : "OUT OF RANGE", WHITE, true, 1, zapMeter, charge, true, flash);
 			return;
 		}
 		double left = (ZAPPER_REACH - zapper.distance) / ZAPPER_REACH;
 		this.distanceMeter = 1 - left;
 		float[] color = {RED[0] + (WHITE[0] - RED[0]) * (float)left, RED[1] + (WHITE[1] - RED[1]) * (float)left, RED[2] + (WHITE[2] - RED[2]) * (float)left, 1};
-		String status = String.format(Locale.ROOT, "DISTANCE: %.1f", zapper.distance);
+		String status = String.format(Locale.ROOT, this.alternate ? "%.1f" : "DISTANCE: %.1f", zapper.distance);
 		this.zapHud = new FirstPersonWeapons.ZapHud(false, 0, status, color, false, this.distanceMeter, zapMeter, charge, false, WHITE);
 	}
 
@@ -395,20 +487,25 @@ final class Nailgun {
 	}
 
 	/**
-	 * Nailgun's fire rate: the Attractor's and the JumpStart's slow as their heat drops; the Overheat's slows past
-	 * half heat, and slower still with no heat sink left, while a burnout fires fastest.
+	 * Nailgun's fire rate: the Attractor's and the JumpStart's slow as their heat drops (the Sawblade Launcher's
+	 * JumpStart fires at half its rate with no zapper out); the Overheat's slows past half heat, and slower still with
+	 * no heat sink left, while a burnout fires fastest.
 	 */
-	private double currentFireRate() {
+	private double currentFireRate(Actions actions) {
+		double fireRate = this.alternate ? SAW_FIRE_RATE : FIRE_RATE;
 		if (this.variant != Variant.OVERHEAT) {
-			return FIRE_RATE + 3.5 - this.heat * 3.5;
+			if (this.variant == Variant.JUMPSTART && this.alternate && actions.zapper() == null) {
+				return fireRate * 2;
+			}
+			return fireRate + 3.5 - this.heat * 3.5;
 		}
 		if (this.burnOut) {
 			return FIRE_RATE - 2.5;
 		}
 		if (this.heatSinks >= 1) {
-			return this.heat < 0.5 ? FIRE_RATE : FIRE_RATE + (this.heat - 0.5) * 7;
+			return this.heat < 0.5 ? fireRate : fireRate + (this.heat - 0.5) * (this.alternate ? 65 : 7);
 		}
-		return FIRE_RATE + 10;
+		return fireRate + (this.alternate ? 50 : 10);
 	}
 
 	/** Nailgun.UpdateAnimationWeight: the hotter the Overheat (or with no heat sink left), the less each shot kicks. */
@@ -458,7 +555,7 @@ final class Nailgun {
 			fills[i] = Math.clamp(this.meterFill - i, 0, 1);
 		}
 		return new FirstPersonWeapons.NailgunState(this.barrelAngle, this.heat, this.heatMeter, this.heatMeterBackground, fills, this.meterFull.clone(),
-			(int)Math.rint(this.charges.ammo), this.layerWeight, this.steaming, this.zapHud);
+			(int)Math.rint(this.alternate ? this.charges.saws : this.charges.ammo), this.layerWeight, this.steaming, this.zapHud);
 	}
 
 	private static float[] lerp(float[] from, float[] to, float t) {

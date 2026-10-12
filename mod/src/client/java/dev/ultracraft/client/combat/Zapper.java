@@ -25,7 +25,7 @@ import java.util.Optional;
  * touches; the first living enemy within a unit of it, it attaches to, closing its prongs. Attached, it charges for
  * five seconds, a pulse running down the cable ever faster, then zaps the enemy (at once if the enemy dies first).
  * While the cable is longer than 20 units, or a wall is in its way, it warns, and it snaps after a second (half a
- * second while blocked).
+ * second while blocked). Sawblades cutting the enemy it's attached to boost its charge and its zap's damage.
  */
 final class Zapper {
 	private static final double S = PlayerShape.BLOCKS_PER_UNIT;
@@ -76,6 +76,8 @@ final class Zapper {
 	private Vec3 localForward = Vec3.ZERO;
 	boolean attached;
 	double charge;
+	/** Its zap's damage. */
+	private float damage;
 	/** Zapper.breakTimer: how far through its warning it is, 0 to 1. */
 	double breakTimer;
 	/** The cable's length, in units, and whether a wall is in its way. */
@@ -104,6 +106,7 @@ final class Zapper {
 		this.velocity = forward.scale(SPEED);
 		this.anchorOffset = position.subtract(root);
 		this.lineStart = position;
+		this.damage = script.get("damage").getAsFloat();
 	}
 
 	double maxDistance() {
@@ -111,7 +114,13 @@ final class Zapper {
 	}
 
 	float damage() {
-		return this.script.get("damage").getAsFloat();
+		return this.damage;
+	}
+
+	/** Nail.HitEnemy on the enemy it's attached to (EnemyIdentifier.zapperer): its zap hits harder, and Zapper.ChargeBoost brings it sooner. */
+	void boost(float damage, double charge) {
+		this.damage += damage;
+		this.charge += charge;
 	}
 
 	/**
