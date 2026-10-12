@@ -1,6 +1,7 @@
 package dev.ultracraft.client;
 
 import dev.ultracraft.UltraItems;
+import dev.ultracraft.client.combat.ClientCombat;
 import dev.ultracraft.net.SwitchVariantPayload;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
@@ -20,12 +21,9 @@ import java.util.List;
  */
 public final class WeaponSwitching {
 	public static final WeaponSwitching INSTANCE = new WeaponSwitching();
-	/** GunControl.scrollCooldown: 0.5, counted down at 5 a second. */
-	private static final long SCROLL_COOLDOWN_NANOS = 100_000_000L;
 
 	/** GunControl.lastSlotIndex: the hotbar slot selected before the current one, or -1. */
 	private int lastSlot = -1;
-	private long scrollReadyAt;
 
 	private WeaponSwitching() {
 	}
@@ -83,7 +81,7 @@ public final class WeaponSwitching {
 		}
 	}
 
-	/** A hotbar key pressed for {@code slot}, before Minecraft selects it. */
+	/** A hotbar key pressed or the scroll wheel turned to {@code slot}, before Minecraft selects it. */
 	public void slotKey(Inventory inventory, int slot) {
 		if (slot != inventory.getSelectedSlot()) {
 			selecting(inventory, slot, false);
@@ -94,68 +92,17 @@ public final class WeaponSwitching {
 		if (weapon == null) {
 			return;
 		}
+		// The held weapon's own key only acts when its slot has another variant.
 		List<Item> variants = variants(weapon);
-		if (variants.isEmpty()) {
+		if (variants.isEmpty() || variants.equals(List.of(held))) {
 			return;
 		}
 		int index = variants.indexOf(held);
-		switch (UltraConfig.get().weaponRedraw) {
-			case CYCLE -> switchTo(inventory, slot, variants.get(Math.floorMod(index + 1, variants.size())));
-			case FIRST -> switchTo(inventory, slot, variants.getFirst());
-			case KEEP -> {
-				if (index < 0) {
-					switchTo(inventory, slot, variants.getFirst());
-				}
-			}
-		}
-	}
-
-	/**
-	 * A scroll of the hotbar while ULTRAKILL movement is on: {@code toward} is the slot Minecraft picks for it.
-	 * Returns the slot to select.
-	 */
-	public int scroll(Inventory inventory, int toward) {
-		UltraConfig config = UltraConfig.get();
-		int current = inventory.getSelectedSlot();
-		long now = System.nanoTime();
-		if (!config.scrollEnabled || now < this.scrollReadyAt) {
-			return current;
-		}
-		// Rightwards along the hotbar is forwards.
-		int direction = Math.floorMod(toward - current, Inventory.getSelectionSize()) == 1 ? 1 : -1;
-		if (config.scrollReversed) {
-			direction = -direction;
-		}
-		Item held = inventory.getSelectedItem().getItem();
-		UltraItems.Weapon weapon = UltraItems.Weapon.of(held);
-		if (weapon != null && config.scrollMode != UltraConfig.ScrollMode.WEAPONS) {
-			List<Item> variants = variants(weapon);
-			int index = variants.indexOf(held);
-			if (config.scrollMode == UltraConfig.ScrollMode.VARIATIONS) {
-				if (variants.size() > 1) {
-					step(inventory, direction);
-					this.scrollReadyAt = now + SCROLL_COOLDOWN_NANOS;
-				}
-				return current;
-			}
-			if (direction > 0 ? index + 1 < variants.size() : index > 0) {
-				switchTo(inventory, current, variants.get(index + direction));
-				this.scrollReadyAt = now + SCROLL_COOLDOWN_NANOS;
-				return current;
-			}
-		}
-		int slot = Math.floorMod(current + direction, Inventory.getSelectionSize());
-		boolean backIntoLast = config.scrollMode == UltraConfig.ScrollMode.BOTH && direction < 0;
-		selecting(inventory, slot, backIntoLast);
-		if (backIntoLast) {
-			UltraItems.Weapon previous = UltraItems.Weapon.of(inventory.getItem(slot).getItem());
-			List<Item> variants = previous == null ? List.of() : variants(previous);
-			if (!variants.isEmpty()) {
-				switchTo(inventory, slot, variants.getLast());
-			}
-		}
-		this.scrollReadyAt = now + SCROLL_COOLDOWN_NANOS;
-		return slot;
+		switchTo(inventory, slot, switch (UltraConfig.get().weaponRedraw) {
+			case CYCLE -> variants.get(Math.floorMod(index + 1, variants.size()));
+			case FIRST -> variants.getFirst();
+			case KEEP -> index < 0 ? variants.getFirst() : held;
+		});
 	}
 
 	/**
@@ -196,11 +143,18 @@ public final class WeaponSwitching {
 		}
 	}
 
-	/** Swaps the weapon in the hotbar slot for its variant {@code item}, here at once and on the server. */
+	/**
+	 * Swaps the weapon in the hotbar slot for its variant {@code item}, here at once and on the server. A slot
+	 * holding it already draws it again.
+	 */
 	private static void switchTo(Inventory inventory, int slot, Item item) {
 		ItemStack current = inventory.getItem(slot);
+		if (current.is(item)) {
+			ClientCombat.INSTANCE.redraw();
+			return;
+		}
 		UltraItems.Weapon weapon = UltraItems.Weapon.of(item);
-		if (current.is(item) || weapon == null || !ClientPlayNetworking.canSend(SwitchVariantPayload.TYPE)) {
+		if (weapon == null || !ClientPlayNetworking.canSend(SwitchVariantPayload.TYPE)) {
 			return;
 		}
 		inventory.setItem(slot, new ItemStack(item, current.getCount()));

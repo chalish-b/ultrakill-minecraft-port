@@ -4,25 +4,19 @@ import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import dev.ultracraft.client.UltraController;
 import dev.ultracraft.client.WeaponSwitching;
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.MouseHandler;
-import org.spongepowered.asm.mixin.Final;
+import net.minecraft.world.entity.player.Inventory;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyArgs;
 import org.spongepowered.asm.mixin.injection.invoke.arg.Args;
 
 /**
- * CameraController: while a zoom narrows the view, the mouse turns it slower by as much. While ULTRAKILL movement
- * is on, the scroll wheel switches weapons as GunControl does.
+ * CameraController: while a zoom narrows the view, the mouse turns it slower by as much. The scroll wheel selects
+ * hotbar slots as the hotbar keys do.
  */
 @Mixin(MouseHandler.class)
 public abstract class MouseHandlerMixin {
-	@Shadow
-	@Final
-	private Minecraft minecraft;
-
 	@ModifyArgs(method = "turnPlayer", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/player/LocalPlayer;turn(DD)V"))
 	private void ultracraft$zoomedLook(Args args) {
 		double scale = UltraController.INSTANCE.lookScale();
@@ -32,12 +26,9 @@ public abstract class MouseHandlerMixin {
 		}
 	}
 
-	@WrapOperation(method = "onScroll", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/ScrollWheelHandler;getNextScrollWheelSelection(DII)I"))
-	private int ultracraft$scrollWeapons(double wheel, int current, int limit, Operation<Integer> original) {
-		int toward = original.call(wheel, current, limit);
-		if (!UltraController.INSTANCE.isDriving(this.minecraft.player)) {
-			return toward;
-		}
-		return WeaponSwitching.INSTANCE.scroll(this.minecraft.player.getInventory(), toward);
+	@WrapOperation(method = "onScroll", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/entity/player/Inventory;setSelectedSlot(I)V"))
+	private void ultracraft$scrollSlot(Inventory inventory, int slot, Operation<Void> original) {
+		WeaponSwitching.INSTANCE.slotKey(inventory, slot);
+		original.call(inventory, slot);
 	}
 }

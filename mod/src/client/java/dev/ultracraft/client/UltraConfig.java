@@ -36,16 +36,6 @@ public final class UltraConfig {
 		KEEP
 	}
 
-	/** What the scroll wheel switches between while ULTRAKILL movement is on. */
-	public enum ScrollMode {
-		/** Hotbar slots, as in Minecraft. */
-		WEAPONS,
-		/** The held weapon's variants. */
-		VARIATIONS,
-		/** The held weapon's variants, then on to the next hotbar slot. */
-		BOTH
-	}
-
 	/** A weapon variant's equip state in the loadout. */
 	public enum Equip {
 		UNEQUIPPED,
@@ -111,9 +101,6 @@ public final class UltraConfig {
 	public Redraw weaponRedraw = Redraw.CYCLE;
 	/** Switching to a weapon brings back the variant it had instead of its first. */
 	public boolean variationMemory = false;
-	public boolean scrollEnabled = true;
-	public ScrollMode scrollMode = ScrollMode.WEAPONS;
-	public boolean scrollReversed = false;
 	private Map<UltraItems.Weapon, Loadout> loadouts = new EnumMap<>(UltraItems.Weapon.class);
 
 	/** The weapon's loadout, ULTRAKILL's default (every variant equipped, in color order) if it has none. */

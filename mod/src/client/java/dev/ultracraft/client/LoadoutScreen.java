@@ -142,12 +142,6 @@ public final class LoadoutScreen extends Screen {
 			() -> config.weaponRedraw = next(UltraConfig.Redraw.values(), config.weaponRedraw));
 		option(graphics, "variation_memory", onOff(config.variationMemory), x, rowY += 30, width, mouseX, mouseY,
 			() -> config.variationMemory = !config.variationMemory);
-		option(graphics, "scroll_enabled", onOff(config.scrollEnabled), x, rowY += 30, width, mouseX, mouseY,
-			() -> config.scrollEnabled = !config.scrollEnabled);
-		option(graphics, "scroll_mode", "scroll_mode." + config.scrollMode.name().toLowerCase(Locale.ROOT), x, rowY += 30, width, mouseX, mouseY,
-			() -> config.scrollMode = next(UltraConfig.ScrollMode.values(), config.scrollMode));
-		option(graphics, "scroll_reversed", onOff(config.scrollReversed), x, rowY += 30, width, mouseX, mouseY,
-			() -> config.scrollReversed = !config.scrollReversed);
 	}
 
 	private void option(GuiGraphicsExtractor graphics, String name, String value, int x, int y, int width, int mouseX, int mouseY, Runnable change) {

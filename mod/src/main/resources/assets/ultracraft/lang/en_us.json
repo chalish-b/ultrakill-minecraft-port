@@ -72,12 +72,6 @@
 	"ultracraft.loadout.option.redraw.first": "FIRST VARIANT",
 	"ultracraft.loadout.option.redraw.keep": "SAME VARIANT",
 	"ultracraft.loadout.option.variation_memory": "VARIATION MEMORY",
-	"ultracraft.loadout.option.scroll_enabled": "SCROLL WHEEL",
-	"ultracraft.loadout.option.scroll_mode": "SCROLL SWITCHES",
-	"ultracraft.loadout.option.scroll_mode.weapons": "WEAPONS",
-	"ultracraft.loadout.option.scroll_mode.variations": "VARIATIONS",
-	"ultracraft.loadout.option.scroll_mode.both": "BOTH",
-	"ultracraft.loadout.option.scroll_reversed": "REVERSE SCROLL",
 	"ultracraft.loadout.option.on": "ON",
 	"ultracraft.loadout.option.off": "OFF"
 }

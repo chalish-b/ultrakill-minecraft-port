@@ -346,6 +346,8 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 	/** Since the grinding chainsaw last hit the wall; below 0 while not grinding. */
 	private double sinceSawWallHit = -1;
 	private FirstPersonWeapons.@Nullable Weapon held;
+	/** The held weapon is to be put away and drawn again. */
+	private boolean redraw;
 	private boolean wasFire1;
 	private boolean wasFire2;
 	private final List<Ricochet> ricochets = new ArrayList<>();
@@ -628,8 +630,15 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 		FirstPersonWeapons.INSTANCE.update(dt, this.held, display, shotgunDisplay, hammerDisplay, nailgunDisplay, this.railcannon.charge(), rocketLauncherDisplay, this);
 	}
 
+	/** GunControl.SwitchWeapon to the variant already held: its object is disabled and enabled again. */
+	public void redraw() {
+		this.redraw = true;
+	}
+
 	private void updateHeld(FirstPersonWeapons.@Nullable Weapon weapon) {
-		if (weapon == this.held) {
+		boolean redraw = this.redraw;
+		this.redraw = false;
+		if (weapon == this.held && (!redraw || weapon == null)) {
 			return;
 		}
 		Revolver revolver = revolver(this.held);
