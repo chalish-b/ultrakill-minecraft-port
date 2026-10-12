@@ -8,7 +8,6 @@ import dev.ultracraft.UltraPlayer;
 import dev.ultracraft.mixin.AbstractArrowAccessor;
 import dev.ultracraft.mixin.LivingEntityAccessor;
 import dev.ultracraft.net.BurnPayload;
-import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.KnockbackHitPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
@@ -20,6 +19,7 @@ import dev.ultracraft.net.MagnetPullPayload;
 import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
 import dev.ultracraft.net.SlamHitPayload;
+import dev.ultracraft.net.SwitchVariantPayload;
 import dev.ultracraft.net.WeaponHitPayload;
 import dev.ultracraft.net.ZapHurtPayload;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -32,7 +32,6 @@ import net.minecraft.server.ServerTickRateManager;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Util;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageType;
 import net.minecraft.world.entity.Entity;
@@ -40,6 +39,7 @@ import net.minecraft.world.entity.EntityReference;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragon;
 import net.minecraft.world.entity.boss.wither.WitherBoss;
+import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.projectile.Projectile;
 import net.minecraft.world.entity.projectile.ProjectileDeflection;
 import net.minecraft.world.entity.projectile.arrow.AbstractArrow;
@@ -111,7 +111,7 @@ public final class ServerCombat {
 	public static void init() {
 		ServerPlayNetworking.registerGlobalReceiver(WeaponHitPayload.TYPE, (payload, context) -> onWeaponHit(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(PunchPayload.TYPE, (payload, context) -> onPunch(context.player(), payload.fist()));
-		ServerPlayNetworking.registerGlobalReceiver(CycleVariantPayload.TYPE, (payload, context) -> onCycleVariant(context.player()));
+		ServerPlayNetworking.registerGlobalReceiver(SwitchVariantPayload.TYPE, (payload, context) -> onSwitchVariant(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(ExplosionHitPayload.TYPE, (payload, context) -> onExplosionHit(context.player(), payload));
 		ServerPlayNetworking.registerGlobalReceiver(ExplosionHurtPayload.TYPE, (payload, context) -> onExplosionHurt(context.player(), payload.damage()));
 		ServerPlayNetworking.registerGlobalReceiver(SlamHitPayload.TYPE, (payload, context) -> onSlamHit(context.player(), payload));
@@ -377,11 +377,15 @@ public final class ServerCombat {
 		}
 	}
 
-	private static void onCycleVariant(ServerPlayer player) {
-		ItemStack held = player.getMainHandItem();
-		Item next = UltraItems.nextVariant(held);
-		if (next != null) {
-			player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(next, held.getCount()));
+	private static void onSwitchVariant(ServerPlayer player, SwitchVariantPayload payload) {
+		if (!Inventory.isHotbarSlot(payload.slot())) {
+			return;
+		}
+		ItemStack weapon = player.getInventory().getItem(payload.slot());
+		UltraItems.Weapon kind = UltraItems.Weapon.of(weapon.getItem());
+		Item variant = kind == null ? null : kind.variant(payload.color(), payload.alternate());
+		if (variant != null) {
+			player.getInventory().setItem(payload.slot(), new ItemStack(variant, weapon.getCount()));
 		}
 	}
 

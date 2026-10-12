@@ -3,6 +3,7 @@ package dev.ultracraft.client.mixin;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import dev.ultracraft.client.UltraController;
+import dev.ultracraft.client.WeaponSwitching;
 import dev.ultracraft.client.combat.ClientCombat;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
@@ -14,8 +15,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * Attack and use belong to a held ULTRAKILL weapon, F punches instead of swapping hands, and pressing the
- * selected slot's key again switches its weapon's variant.
+ * Attack and use belong to a held ULTRAKILL weapon, F punches instead of swapping hands, and the hotbar keys
+ * switch weapons and their variants as GunControl does.
  */
 @Mixin(Minecraft.class)
 public abstract class MinecraftCombatInputMixin {
@@ -41,10 +42,8 @@ public abstract class MinecraftCombatInputMixin {
 	}
 
 	@WrapOperation(method = "handleKeybinds", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/entity/player/Inventory;setSelectedSlot(I)V"))
-	private void ultracraft$cycleVariant(Inventory inventory, int slot, Operation<Void> original) {
-		if (slot == inventory.getSelectedSlot()) {
-			ClientCombat.INSTANCE.cycleVariant();
-		}
+	private void ultracraft$switchWeapon(Inventory inventory, int slot, Operation<Void> original) {
+		WeaponSwitching.INSTANCE.slotKey(inventory, slot);
 		original.call(inventory, slot);
 	}
 

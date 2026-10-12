@@ -11,6 +11,7 @@ public class UltracraftClient implements ClientModInitializer {
 		UltraKeys.register();
 		UltraHud.register();
 		UltraCommands.register();
+		WeaponSwitching.init();
 		ClientCombat.init();
 		LevelRenderEvents.COLLECT_SUBMITS.register(ClientCombat.INSTANCE::render);
 	}

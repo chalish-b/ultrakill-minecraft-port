@@ -21,7 +21,6 @@ import dev.ultracraft.combat.ServerCombat;
 import dev.ultracraft.net.BlockHitPayload;
 import dev.ultracraft.net.BurnPayload;
 import dev.ultracraft.net.KnockbackHitPayload;
-import dev.ultracraft.net.CycleVariantPayload;
 import dev.ultracraft.net.ExplosionBlocksPayload;
 import dev.ultracraft.net.ExplosionHitPayload;
 import dev.ultracraft.net.ExplosionHurtPayload;
@@ -954,14 +953,6 @@ public final class ClientCombat implements Revolver.Actions, Shotgun.Actions, Ja
 	public boolean handlesHeldItem() {
 		LocalPlayer player = Minecraft.getInstance().player;
 		return player != null && UltraController.INSTANCE.isDriving(player) && UltraItems.isWeapon(player.getMainHandItem());
-	}
-
-	/** Pressing the selected slot's key again switches the weapon there to its next variant. */
-	public void cycleVariant() {
-		LocalPlayer player = Minecraft.getInstance().player;
-		if (player != null && UltraItems.isWeapon(player.getMainHandItem()) && ClientPlayNetworking.canSend(CycleVariantPayload.TYPE)) {
-			ClientPlayNetworking.send(new CycleVariantPayload());
-		}
 	}
 
 	private void sampleInput(Options options) {

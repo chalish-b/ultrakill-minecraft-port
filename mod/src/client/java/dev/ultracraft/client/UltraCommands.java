@@ -45,6 +45,22 @@ final class UltraCommands {
 				UltraConfig.get().stepMode = UltraConfig.StepMode.MINECRAFT;
 				return saved(context.getSource());
 			})));
+		LiteralArgumentBuilder<FabricClientCommandSource> redraw = literal("weaponRedraw");
+		for (UltraConfig.Redraw value : UltraConfig.Redraw.values()) {
+			redraw.then(literal(value.name().toLowerCase()).executes(context -> {
+				UltraConfig.get().weaponRedraw = value;
+				return saved(context.getSource());
+			}));
+		}
+		root.then(redraw);
+		LiteralArgumentBuilder<FabricClientCommandSource> scrollMode = literal("scrollMode");
+		for (UltraConfig.ScrollMode value : UltraConfig.ScrollMode.values()) {
+			scrollMode.then(literal(value.name().toLowerCase()).executes(context -> {
+				UltraConfig.get().scrollMode = value;
+				return saved(context.getSource());
+			}));
+		}
+		root.then(scrollMode);
 		root.then(toggle("enabled", config -> config.enabled, (config, value) -> config.enabled = value));
 		root.then(toggle("cameraTilt", config -> config.cameraTilt, (config, value) -> config.cameraTilt = value));
 		root.then(toggle("fovEffects", config -> config.fovEffects, (config, value) -> config.fovEffects = value));
@@ -52,6 +68,9 @@ final class UltraCommands {
 		root.then(toggle("debug", config -> config.debug, (config, value) -> config.debug = value));
 		root.then(toggle("infiniteStamina", config -> config.infiniteStamina, (config, value) -> config.infiniteStamina = value));
 		root.then(toggle("ultrakillFootsteps", config -> config.ultrakillFootsteps, (config, value) -> config.ultrakillFootsteps = value));
+		root.then(toggle("variationMemory", config -> config.variationMemory, (config, value) -> config.variationMemory = value));
+		root.then(toggle("scrollEnabled", config -> config.scrollEnabled, (config, value) -> config.scrollEnabled = value));
+		root.then(toggle("scrollReversed", config -> config.scrollReversed, (config, value) -> config.scrollReversed = value));
 		dispatcher.register(root);
 	}
 
@@ -78,9 +97,11 @@ final class UltraCommands {
 	private static void show(FabricClientCommandSource source) {
 		UltraConfig config = UltraConfig.get();
 		source.sendFeedback(Component.literal(String.format(
-			"ULTRACRAFT: enabled %s, speedScale %.3f, stepMode %s, cameraTilt %s, screenShake %.2f, fovEffects %s, speedometer %s, debug %s, infiniteStamina %s, ultrakillFootsteps %s",
+			"ULTRACRAFT: enabled %s, speedScale %.3f, stepMode %s, cameraTilt %s, screenShake %.2f, fovEffects %s, speedometer %s, debug %s, infiniteStamina %s, ultrakillFootsteps %s, "
+				+ "weaponRedraw %s, variationMemory %s, scrollEnabled %s, scrollMode %s, scrollReversed %s",
 			config.enabled, config.speedScale, config.stepMode.name().toLowerCase(), config.cameraTilt, config.screenShake,
-			config.fovEffects, config.speedometer, config.debug, config.infiniteStamina, config.ultrakillFootsteps
+			config.fovEffects, config.speedometer, config.debug, config.infiniteStamina, config.ultrakillFootsteps,
+			config.weaponRedraw.name().toLowerCase(), config.variationMemory, config.scrollEnabled, config.scrollMode.name().toLowerCase(), config.scrollReversed
 		)));
 	}
 }
