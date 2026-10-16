@@ -1,6 +1,10 @@
 # ULTRACRAFT
 
-ULTRAKILL's movement and arsenal in Minecraft, as a Fabric mod. Private project.
+ULTRAKILL's movement and arsenal in Minecraft, as a Fabric mod.
+
+An unofficial fan project, not affiliated with or endorsed by Arsi "Hakita" Patala or New Blood
+Interactive. The repo contains no ULTRAKILL assets or code: you need your own copy of ULTRAKILL, and
+`tools/extract.sh` pulls what the mod needs from it.
 
 ## Layout
 
@@ -53,3 +57,14 @@ All rebindable under Controls → ULTRACRAFT. `/ultracraft` shows the settings, 
 `tools/extract.sh` reads the ULTRAKILL install in the CrossOver Steam bottle (set `ULTRAKILL_DIR` to
 use another one) and rebuilds `reference/` and `mod/src/generated/`. `tools/extract_sounds.py` redoes
 just the sounds.
+
+The defaults (game folder, `JAVA_HOME`, `DOTNET_ROOT`) are macOS paths with Homebrew and CrossOver. On
+Windows or Linux, point them at your own installs, e.g.:
+
+```bash
+ULTRAKILL_DIR="$HOME/.steam/steam/steamapps/common/ULTRAKILL" tools/extract.sh
+```
+
+## License
+
+The mod's code is MIT licensed (see `LICENSE`). ULTRAKILL and its assets belong to their owners.

@@ -5,7 +5,7 @@
 	"name": "ULTRACRAFT",
 	"description": "ULTRAKILL's movement and arsenal in Minecraft.",
 	"authors": [],
-	"license": "All-Rights-Reserved",
+	"license": "MIT",
 	"icon": "assets/ultracraft/icon.png",
 	"environment": "*",
 	"entrypoints": {

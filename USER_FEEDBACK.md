@@ -1,6 +1,7 @@
 Bugs
 - Water is completely broken, same with ladders and stuff, anything that changes the movement "mode" I think
 - Coins don't prioritize the closet targets?
+- And I think deadcoin mechanics are not implemented at all. I can shoot a coin anytime I want, and coins will split / bounce to other coins that were supposed to be "dead"
 - Ricochet aim assist doesn't work that well? Especially when shooting the ground. In Ultrakill, the auto-aim basically redirects a ground shot to an enemy near, even if I shoot straight down.
 
 Other feedback or ideas to discuss
