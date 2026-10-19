@@ -15,7 +15,7 @@ import org.jspecify.annotations.Nullable;
 
 /**
  * Runs ULTRAKILL movement on the local player once per rendered frame, and hands the player back to
- * Minecraft's movement where ULTRAKILL's has no equivalent: flight, gliding, riding.
+ * Minecraft's movement while riding.
  */
 public final class UltraController {
 	public static final UltraController INSTANCE = new UltraController();
@@ -89,9 +89,7 @@ public final class UltraController {
 			&& player.isAlive()
 			&& !player.isSpectator()
 			&& !player.isPassenger()
-			&& !player.isSleeping()
-			&& !player.isFallFlying()
-			&& !player.getAbilities().flying;
+			&& !player.isSleeping();
 	}
 
 	private void take(Minecraft minecraft, LocalPlayer player) {

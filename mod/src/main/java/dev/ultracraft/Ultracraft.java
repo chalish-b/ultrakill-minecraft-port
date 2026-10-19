@@ -17,6 +17,7 @@ import dev.ultracraft.net.HitstopPayload;
 import dev.ultracraft.net.IgnitePayload;
 import dev.ultracraft.net.MagnetPullPayload;
 import dev.ultracraft.net.SlamHitPayload;
+import dev.ultracraft.net.StopGlidingPayload;
 import dev.ultracraft.net.SwitchVariantPayload;
 import dev.ultracraft.net.PunchPayload;
 import dev.ultracraft.net.PunchResultPayload;
@@ -61,12 +62,14 @@ public class Ultracraft implements ModInitializer {
 		PayloadTypeRegistry.serverboundPlay().register(GasolineSoakPayload.TYPE, GasolineSoakPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(BurnPayload.TYPE, BurnPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(IgnitePayload.TYPE, IgnitePayload.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(StopGlidingPayload.TYPE, StopGlidingPayload.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(PunchResultPayload.TYPE, PunchResultPayload.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(WhiplashBrokenPayload.TYPE, WhiplashBrokenPayload.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(GasolineExplosionPayload.TYPE, GasolineExplosionPayload.CODEC);
 		ServerPlayNetworking.registerGlobalReceiver(UltraStatePayload.TYPE, (payload, context) ->
 			((UltraPlayer)context.player()).ultracraft$setUltraState(payload.active(), payload.crouched())
 		);
+		ServerPlayNetworking.registerGlobalReceiver(StopGlidingPayload.TYPE, (payload, context) -> context.player().stopFallFlying());
 		UltraBlocks.init();
 		Gasoline.init();
 		UltraItems.init();

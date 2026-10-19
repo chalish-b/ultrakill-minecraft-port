@@ -6,14 +6,19 @@ import dev.ultracraft.UltraPlayer;
 import dev.ultracraft.client.UltraConfig;
 import dev.ultracraft.client.movement.UltraSounds.Channel;
 import dev.ultracraft.combat.Gasoline;
+import dev.ultracraft.net.StopGlidingPayload;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.tags.FluidTags;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.MoverType;
+import net.minecraft.world.entity.player.Abilities;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
@@ -85,6 +90,16 @@ public final class UltraMovement {
 	 */
 	private static final double LADDER_FALL_SPEED = 0.15 * 20;
 	private static final double LADDER_CLIMB_SPEED = (0.2 - 0.08) * 0.98 * 20;
+	/** Gliding runs Minecraft's movement, which changes velocity once a game tick (seconds). */
+	private static final double MINECRAFT_TICK = 0.05;
+	/**
+	 * Creative flight is this many times as fast as walking horizontally, and vertically as Minecraft's flight is
+	 * (0.375 blocks a tick against walking's 0.216).
+	 */
+	private static final double FLIGHT_SPEED_MULTIPLIER = 2;
+	private static final double FLIGHT_VERTICAL_SPEED_MULTIPLIER = 0.375 / 0.216;
+	/** LocalPlayer.aiStep: a second jump press within 6 ticks of the first toggles creative flight (seconds). */
+	private static final double FLIGHT_TOGGLE_WINDOW = 0.3;
 
 	/** Jumps and landings are quieter than ULTRAKILL's, which stand out against Minecraft's sounds. */
 	private static final float JUMP_VOLUME = 0.5F;
@@ -226,6 +241,11 @@ public final class UltraMovement {
 	/** On a ladder, vine, scaffolding or other climbable block, and not slamming. */
 	private boolean climbingLadder;
 
+	/** Time since gliding last changed the velocity, as a game tick would. */
+	private double minecraftTickTime = MINECRAFT_TICK;
+	/** When jump was last pressed, for creative flight's double tap. */
+	private double lastJumpPress = Double.NEGATIVE_INFINITY;
+
 	public UltraMovement(LocalPlayer player) {
 		this.player = player;
 		this.previousFeet = player.position();
@@ -299,7 +319,10 @@ public final class UltraMovement {
 		this.currentFeet = feet;
 
 		Vec3 change = this.player.getDeltaMovement().subtract(lastDeltaMovement);
-		if (change.lengthSqr() > 0.05 * 0.05) {
+		if (gliding()) {
+			// Fireworks push a gliding player a little every tick.
+			addVelocity(change.scale(20 / displacementScale()));
+		} else if (change.lengthSqr() > 0.05 * 0.05) {
 			launch(change.scale(20 / displacementScale()));
 		}
 	}
@@ -333,6 +356,9 @@ public final class UltraMovement {
 			}
 		}
 		updateTriggers();
+		if (gliding() && (this.groundTouching || this.touchingWater || this.climbingLadder)) {
+			stopGliding();
+		}
 		// Minecraft's own ground flag (mining speed, the server's fall checks) follows ULTRAKILL's ground
 		// check: a step with gravity off moves nothing vertically, which Minecraft would read as airborne.
 		this.player.setOnGround(this.groundTouching);
@@ -377,12 +403,77 @@ public final class UltraMovement {
 		if (this.boost) {
 			this.body.useGravity = true;
 			dodge();
+		} else if (flying()) {
+			fly();
+		} else if (gliding()) {
+			glide();
 		} else {
 			move();
+		}
+		if (!gliding()) {
+			this.minecraftTickTime = MINECRAFT_TICK;
 		}
 		if (!this.boost || this.boostLeft <= 0) {
 			this.preDashSpeed = this.body.velocity;
 		}
+	}
+
+	/**
+	 * Gliding: Minecraft's elytra movement, in blocks a tick, changes the velocity once a game tick (from the first
+	 * step in it), and the player moves at that velocity until the next.
+	 */
+	private void glide() {
+		this.slideEnding = false;
+		this.invincible = false;
+		this.body.useGravity = false;
+		this.minecraftTickTime += DT;
+		if (this.minecraftTickTime >= MINECRAFT_TICK) {
+			this.minecraftTickTime -= MINECRAFT_TICK;
+			double blocksPerTick = displacementScale() / 20;
+			this.body.velocity = glideTick(this.body.velocity.scale(blocksPerTick)).scale(1 / blocksPerTick);
+		}
+	}
+
+	/**
+	 * Creative flight: ULTRAKILL's walking in three dimensions, faster, with jump to rise and sneak to sink.
+	 */
+	private void fly() {
+		this.slideEnding = false;
+		this.invincible = false;
+		this.body.useGravity = false;
+		double speed = WALK_SPEED * DT * 2.75;
+		double vertical = (this.input.jumpHeld ? 1 : 0) - (this.input.descendHeld ? 1 : 0);
+		Vec3 target = this.inputDir.scale(FLIGHT_SPEED_MULTIPLIER * speed).add(UP.scale(vertical * FLIGHT_VERTICAL_SPEED_MULTIPLIER * speed));
+		this.body.velocity = U.lerp(this.body.velocity, target, 0.25);
+	}
+
+	/**
+	 * LivingEntity.updateFallFlyingMovement: the elytra trades height for speed and back by the player's pitch,
+	 * turns toward where they look, and drags.
+	 */
+	private Vec3 glideTick(Vec3 movement) {
+		Vec3 lookAngle = this.player.getLookAngle();
+		double leanAngle = Math.toRadians(this.player.getXRot());
+		double lookHorLength = Math.sqrt(lookAngle.x * lookAngle.x + lookAngle.z * lookAngle.z);
+		double moveHorLength = movement.horizontalDistance();
+		// LivingEntity.getEffectiveGravity
+		double gravity = movement.y <= 0 && this.player.hasEffect(MobEffects.SLOW_FALLING) ? Math.min(this.player.getGravity(), 0.01) : this.player.getGravity();
+		double liftForce = Math.pow(Math.cos(leanAngle), 2);
+		movement = movement.add(0, gravity * (-1 + liftForce * 0.75), 0);
+		if (movement.y < 0 && lookHorLength > 0) {
+			double convert = movement.y * -0.1 * liftForce;
+			movement = movement.add(lookAngle.x * convert / lookHorLength, convert, lookAngle.z * convert / lookHorLength);
+		}
+		if (leanAngle < 0 && lookHorLength > 0) {
+			double convert = moveHorLength * -Math.sin(leanAngle) * 0.04;
+			movement = movement.add(-lookAngle.x * convert / lookHorLength, convert * 3.2, -lookAngle.z * convert / lookHorLength);
+		}
+		if (lookHorLength > 0) {
+			movement = movement.add(
+				(lookAngle.x / lookHorLength * moveHorLength - movement.x) * 0.1, 0, (lookAngle.z / lookHorLength * moveHorLength - movement.z) * 0.1
+			);
+		}
+		return movement.multiply(0.99F, 0.98F, 0.99F);
 	}
 
 	/** Water.ApplyWaterForces, while the player's body is in water and gravity pulls on it. */
@@ -593,7 +684,7 @@ public final class UltraMovement {
 			if (this.windState > 0) {
 				this.sounds.woosh(Math.min(this.windState, 1), 1);
 			}
-			if (upward < -100) {
+			if (upward < -100 && !gliding()) {
 				this.body.velocity = U.projectOnPlane(this.body.velocity, G).add(G.scale(100));
 			}
 		}
@@ -602,7 +693,13 @@ public final class UltraMovement {
 		} else {
 			this.sounds.woosh(0, 0);
 		}
-		handleInputs();
+		if (flying()) {
+			if (this.input.jumpPressed) {
+				minecraftJump(false, false);
+			}
+		} else {
+			handleInputs();
+		}
 		if (this.onGround) {
 			this.sounds.wallScrape(null);
 			this.wallScrapeParticles = null;
@@ -634,6 +731,8 @@ public final class UltraMovement {
 	private void handleInputs() {
 		boolean canGroundJump = !this.falling;
 		boolean canEnemyStep = !this.onGround && (this.canJump || enemyNearWallCheck());
+		boolean steppedOrWallJumped = false;
+		boolean groundJumped = false;
 		if (this.input.jumpPressed && !this.jumpCooldown) {
 			if (canEnemyStep) {
 				this.enemyStepping = true;
@@ -642,8 +741,10 @@ public final class UltraMovement {
 					this.windState = 0.5;
 				}
 				jump();
+				steppedOrWallJumped = true;
 			} else if (canGroundJump) {
 				jump();
+				groundJumped = true;
 			}
 		}
 		if (this.input.slidePressed) {
@@ -658,11 +759,77 @@ public final class UltraMovement {
 		if (!this.onGround) {
 			if (this.input.jumpPressed && this.currentWallJumps < 3 && !this.jumpCooldown && this.onWall) {
 				wallJump();
+				steppedOrWallJumped = true;
 			}
 			if (this.input.slidePressed) {
 				tryStartSlam();
 			}
 		}
+		if (this.input.jumpPressed) {
+			minecraftJump(steppedOrWallJumped, groundJumped);
+		}
+	}
+
+	/**
+	 * LocalPlayer.aiStep's jump presses, after ULTRAKILL's: a second press soon after the first toggles creative
+	 * flight, and a press in the air opens an elytra. A press that stepped off an enemy or wall jumped does neither.
+	 */
+	private void minecraftJump(boolean steppedOrWallJumped, boolean groundJumped) {
+		boolean doubleTap = this.clock - this.lastJumpPress < FLIGHT_TOGGLE_WINDOW;
+		this.lastJumpPress = this.clock;
+		if (steppedOrWallJumped) {
+			return;
+		}
+		Abilities abilities = this.player.getAbilities();
+		if (abilities.mayfly && doubleTap) {
+			abilities.flying = !abilities.flying;
+			this.player.onUpdateAbilities();
+			this.lastJumpPress = Double.NEGATIVE_INFINITY;
+			if (abilities.flying) {
+				startFlying();
+			}
+			return;
+		}
+		if (!groundJumped && !abilities.flying && !this.climbingLadder && this.player.tryToStartFallFlying()) {
+			this.player.connection.send(new ServerboundPlayerCommandPacket(this.player, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+			startGliding();
+		}
+	}
+
+	/** Taking off in creative flight calls off a dash, slide, slam or glide. */
+	private void startFlying() {
+		if (this.sliding) {
+			stopSlide();
+		}
+		this.boost = false;
+		this.heavyFall = false;
+		stopGliding();
+	}
+
+	/** Opening the elytra calls off a dash, slide or slam, and the player glides with the slide's short collider. */
+	private void startGliding() {
+		if (this.sliding) {
+			stopSlide();
+		}
+		this.boost = false;
+		this.heavyFall = false;
+		setShortCollider(true);
+	}
+
+	/** Closes the elytra, here and on the server. */
+	private void stopGliding() {
+		if (gliding()) {
+			this.player.stopFallFlying();
+			ClientPlayNetworking.send(new StopGlidingPayload());
+		}
+	}
+
+	private boolean gliding() {
+		return this.player.isFallFlying();
+	}
+
+	private boolean flying() {
+		return this.player.getAbilities().flying;
 	}
 
 	private void tryDash() {
@@ -674,6 +841,7 @@ public final class UltraMovement {
 		if (this.sliding) {
 			stopSlide();
 		}
+		stopGliding();
 		this.boostLeft = 100;
 		this.dashStorage = 1;
 		this.boost = true;
@@ -704,6 +872,7 @@ public final class UltraMovement {
 			if (this.sliding) {
 				stopSlide();
 			}
+			stopGliding();
 			this.falling = true;
 			this.fallSpeed = -100;
 			this.body.velocity = new Vec3(0, -100, 0);
@@ -741,7 +910,7 @@ public final class UltraMovement {
 	/** Sliding down a wall: holding into it while falling slows the fall at first. */
 	private void cling(double dt) {
 		BlockHitResult wall = this.onWall ? raycastHit(root(), this.inputDir, 1) : null;
-		if (!this.sliding && wall != null && !this.heavyFall && upwardSpeed() < -1) {
+		if (!this.sliding && !gliding() && !flying() && wall != null && !this.heavyFall && upwardSpeed() < -1) {
 			Vec3 right = right();
 			Vec3 forward = forward();
 			double sideways = U.clamp(-1, 1, right.dot(this.body.velocity));
@@ -758,6 +927,11 @@ public final class UltraMovement {
 	}
 
 	private void handleSlideState(double dt) {
+		if (gliding()) {
+			this.standing = false;
+			this.camera.crouch();
+			return;
+		}
 		if (this.sliding) {
 			if (this.input.slideReleased || this.slowMode && !this.crouching) {
 				stopSlide();
@@ -823,7 +997,7 @@ public final class UltraMovement {
 
 	/** Walking down slopes and small steps keeps the player on the ground. */
 	private void tryFloorSnap(double dt) {
-		if (this.slopeOnGround || this.friction == 0 || this.jumping || this.boost || this.climbingLadder || U.isZero(this.body.velocity)) {
+		if (this.slopeOnGround || this.friction == 0 || this.jumping || this.boost || this.climbingLadder || gliding() || flying() || U.isZero(this.body.velocity)) {
 			return;
 		}
 		double rootHeight = rootHeight();
@@ -842,6 +1016,7 @@ public final class UltraMovement {
 		if (this.beingPulled) {
 			return;
 		}
+		stopGliding();
 		if (!this.crouching) {
 			setShortCollider(true);
 		}
@@ -865,6 +1040,7 @@ public final class UltraMovement {
 
 	/** NewMovement.Jump. */
 	public void jump() {
+		stopGliding();
 		this.fallTime = 0;
 		this.lastJump = 0;
 		double force = JUMP_POWER * 1500;
@@ -928,6 +1104,7 @@ public final class UltraMovement {
 	}
 
 	private void wallJump() {
+		stopGliding();
 		this.jumping = true;
 		this.notJumpingTimer = scheduleEarliest(this.notJumpingTimer, 0.25);
 		this.currentWallJumps++;
@@ -1640,6 +1817,7 @@ public final class UltraMovement {
 		this.ridingRocket = riding;
 		if (riding) {
 			this.heavyFall = false;
+			stopGliding();
 			forceGroundOff();
 		} else {
 			stopForceGroundOff();

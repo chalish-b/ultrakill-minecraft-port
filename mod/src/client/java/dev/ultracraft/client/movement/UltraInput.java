@@ -15,6 +15,8 @@ public final class UltraInput {
 	boolean slideHeld;
 	boolean slideReleased;
 	boolean dashPressed;
+	/** Minecraft's sneak key or ULTRACRAFT's: sinking in creative flight. */
+	boolean descendHeld;
 
 	public void sample(Options options) {
 		this.moveX = axis(options.keyRight, options.keyLeft);
@@ -33,6 +35,7 @@ public final class UltraInput {
 		this.slideReleased = (slideWasHeld || this.slidePressed) && !this.slideHeld;
 
 		this.dashPressed = consumeClicks(UltraKeys.DASH);
+		this.descendHeld = options.keyShift.isDown() || UltraKeys.SNEAK.isDown();
 	}
 
 	/** Drops presses made before ULTRAKILL movement took over. */
