@@ -10,18 +10,15 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.network.chat.Component;
-import net.minecraft.tags.FluidTags;
 import net.minecraft.world.phys.Vec3;
 import org.jspecify.annotations.Nullable;
 
 /**
  * Runs ULTRAKILL movement on the local player once per rendered frame, and hands the player back to
- * Minecraft's movement where ULTRAKILL's has no equivalent: deep water, lava, ladders, flight, riding.
+ * Minecraft's movement where ULTRAKILL's has no equivalent: flight, gliding, riding.
  */
 public final class UltraController {
 	public static final UltraController INSTANCE = new UltraController();
-	/** Water at least this deep (blocks) is swum through with Minecraft's movement. */
-	private static final double SWIM_DEPTH = 0.6;
 
 	private final UltraInput input = new UltraInput();
 	private @Nullable UltraMovement movement;
@@ -94,10 +91,7 @@ public final class UltraController {
 			&& !player.isPassenger()
 			&& !player.isSleeping()
 			&& !player.isFallFlying()
-			&& !player.getAbilities().flying
-			&& !player.onClimbable()
-			&& !player.isInLava()
-			&& player.getFluidHeight(FluidTags.WATER) < SWIM_DEPTH;
+			&& !player.getAbilities().flying;
 	}
 
 	private void take(Minecraft minecraft, LocalPlayer player) {

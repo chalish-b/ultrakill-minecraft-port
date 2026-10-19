@@ -20,6 +20,8 @@ final class UltraBody {
 
 	Vec3 velocity = Vec3.ZERO;
 	boolean useGravity = true;
+	/** Falls are capped at this speed (units a second) once gravity and forces are in. */
+	double maxFallSpeed = Double.POSITIVE_INFINITY;
 	private Vec3 pendingVelocityChange = Vec3.ZERO;
 
 	/** ForceMode.Force: applied over the next physics step. */
@@ -63,6 +65,9 @@ final class UltraBody {
 		}
 		this.velocity = this.velocity.add(this.pendingVelocityChange);
 		this.pendingVelocityChange = Vec3.ZERO;
+		if (this.velocity.y < -this.maxFallSpeed) {
+			this.velocity = new Vec3(this.velocity.x, -this.maxFallSpeed, this.velocity.z);
+		}
 
 		Vec3 beforeContact = this.velocity;
 		Vec3 wanted = this.velocity.scale(FIXED_DT * blocksPerUnit);

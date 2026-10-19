@@ -8,6 +8,7 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
@@ -140,8 +141,9 @@ public final class ServerWhiplash {
 				case PULL_PLAYER -> true;
 				case GRAB -> pullItem(player, entity, hook);
 			};
-			// HookArm: empty health turns into hard damage while the player pulls or is pulled to an enemy, out of water.
-			if ((hook.mode == Mode.PULL_ENEMY || hook.mode == Mode.PULL_PLAYER) && !player.isInWater()) {
+			// HookArm: empty health turns into hard damage while the player pulls or is pulled to an enemy, unless their
+			// head is in water or lava.
+			if ((hook.mode == Mode.PULL_ENEMY || hook.mode == Mode.PULL_PLAYER) && !player.isUnderWater() && !player.isEyeInFluid(FluidTags.LAVA)) {
 				UltraHealth.whiplash(player, 0.05F);
 			}
 			if (!keep) {

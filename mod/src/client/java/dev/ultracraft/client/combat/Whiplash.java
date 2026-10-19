@@ -403,7 +403,7 @@ final class Whiplash {
 		if (this.lightTarget) {
 			ClientPlayNetworking.send(new WhiplashPayload(WhiplashPayload.Action.PULL_ENEMY, enemy.getId(), next, scale()));
 			if (!movement.touchingGround()) {
-				movement.setVelocity(new Vec3(0, player.isInWater() ? LIGHT_PULL_RISE_WATER : LIGHT_PULL_RISE, 0));
+				movement.setVelocity(new Vec3(0, movement.underwater() ? LIGHT_PULL_RISE_WATER : LIGHT_PULL_RISE, 0));
 			}
 		} else {
 			ClientPlayNetworking.send(new WhiplashPayload(WhiplashPayload.Action.PULL_PLAYER, enemy.getId(), next, scale()));
@@ -447,7 +447,7 @@ final class Whiplash {
 			stopThrow(level, player, 1, false);
 			double below = (this.hookPoint.y - origin.y) / S;
 			if (!movement.touchingGround()) {
-				if (player.isInWater()) {
+				if (movement.underwater()) {
 					movement.setVelocity(Vec3.ZERO);
 				} else if (origin.y < this.hookPoint.y) {
 					movement.setVelocity(new Vec3(0, ARRIVE_RISE + below, 0));

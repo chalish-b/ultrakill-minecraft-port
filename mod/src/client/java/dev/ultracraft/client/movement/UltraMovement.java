@@ -9,12 +9,16 @@ import dev.ultracraft.combat.Gasoline;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.MoverType;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -66,6 +70,21 @@ public final class UltraMovement {
 	private static final double CLIMB_STEP = 2.1;
 	private static final double CLIMB_FORWARD = 0.6;
 	private static final double CLIMB_COOLDOWN = 0.1;
+
+	/**
+	 * Water.ApplyWaterForces: a body falling faster than a fifth of gravity is eased back to that speed; otherwise the
+	 * water holds up three quarters of its weight.
+	 */
+	private static final double WATER_SINK_SPEED = 0.2 * UltraBody.GRAVITY;
+	private static final double WATER_BUOYANCY = 0.75;
+	/** GroundCheck.BounceOnWater: sliding down onto water bounces the player up at this speed. */
+	private static final double WATER_BOUNCE = 10;
+	/**
+	 * Minecraft's climbing (LivingEntity.handleOnClimbable), in blocks a second: falls are capped at 0.15 blocks a
+	 * tick, and climbing sets 0.2 blocks a tick, which gravity and drag bring to 0.1176 by the next move.
+	 */
+	private static final double LADDER_FALL_SPEED = 0.15 * 20;
+	private static final double LADDER_CLIMB_SPEED = (0.2 - 0.08) * 0.98 * 20;
 
 	/** Jumps and landings are quieter than ULTRAKILL's, which stand out against Minecraft's sounds. */
 	private static final float JUMP_VOLUME = 0.5F;
@@ -196,6 +215,17 @@ public final class UltraMovement {
 	// ClimbStep
 	private double climbCooldown;
 
+	// Water (the player's Water triggers and UnderwaterController), for water and lava alike
+	/** Water.isPlayerTouchingWater: the player's body is in water. */
+	private boolean touchingWater;
+	/** UnderwaterController.inWater: the camera is in water. */
+	private boolean underwater;
+	/** The ground check's trigger is in water. */
+	private boolean groundCheckInWater;
+
+	/** On a ladder, vine, scaffolding or other climbable block, and not slamming. */
+	private boolean climbingLadder;
+
 	public UltraMovement(LocalPlayer player) {
 		this.player = player;
 		this.previousFeet = player.position();
@@ -288,11 +318,18 @@ public final class UltraMovement {
 			this.hookFixedUpdate.run();
 		}
 		if (this.ridingRocket) {
+			this.climbingLadder = false;
 			this.body.stop();
 		} else {
+			applyWaterForces();
+			this.climbingLadder = this.player.onClimbable() && !this.heavyFall;
+			this.body.maxFallSpeed = this.climbingLadder ? ladderFallSpeed() : Double.POSITIVE_INFINITY;
 			UltraBody.Contact contact = this.body.step(this.player, displacementScale());
 			if (UltraConfig.get().stepMode == UltraConfig.StepMode.ULTRAKILL && contact.hitHorizontally()) {
 				climbStep(contact);
+			}
+			if (this.climbingLadder) {
+				climbLadder(contact);
 			}
 		}
 		updateTriggers();
@@ -345,6 +382,38 @@ public final class UltraMovement {
 		}
 		if (!this.boost || this.boostLeft <= 0) {
 			this.preDashSpeed = this.body.velocity;
+		}
+	}
+
+	/** Water.ApplyWaterForces, while the player's body is in water and gravity pulls on it. */
+	private void applyWaterForces() {
+		if (!this.touchingWater || !this.body.useGravity) {
+			return;
+		}
+		Vec3 velocity = this.body.velocity;
+		if (velocity.y < -WATER_SINK_SPEED) {
+			Vec3 target = new Vec3(velocity.x, -WATER_SINK_SPEED, velocity.z);
+			this.body.velocity = U.moveTowards(velocity, target, DT * 10 * Math.abs(velocity.y + WATER_SINK_SPEED + 0.5));
+		} else {
+			this.body.addForce(UltraBody.gravityVector().scale(-WATER_BUOYANCY * MASS));
+		}
+	}
+
+	/** How fast the player can slide down the climbable block they're on: not at all while sneaking, except on scaffolding. */
+	private double ladderFallSpeed() {
+		boolean holding = this.player.isSuppressingSlidingDownLadder() && !this.player.getInBlockState().is(Blocks.SCAFFOLDING);
+		return holding ? 0 : LADDER_FALL_SPEED / displacementScale();
+	}
+
+	/**
+	 * Minecraft's climbing: walking into a wall climbs, and so does holding jump away from walls, where jumping wall
+	 * jumps instead. Climbing raises the player to at least the climbing speed (set so the next step's gravity brings
+	 * it there), and a faster rise keeps its speed.
+	 */
+	private void climbLadder(UltraBody.Contact contact) {
+		if (contact.hitHorizontally() || this.input.jumpHeld && !this.onWall) {
+			double speed = Math.max(upwardSpeed(), LADDER_CLIMB_SPEED / displacementScale() + UltraBody.GRAVITY * DT);
+			this.body.velocity = new Vec3(this.body.velocity.x, speed, this.body.velocity.z);
 		}
 	}
 
@@ -754,7 +823,7 @@ public final class UltraMovement {
 
 	/** Walking down slopes and small steps keeps the player on the ground. */
 	private void tryFloorSnap(double dt) {
-		if (this.slopeOnGround || this.friction == 0 || this.jumping || this.boost || U.isZero(this.body.velocity)) {
+		if (this.slopeOnGround || this.friction == 0 || this.jumping || this.boost || this.climbingLadder || U.isZero(this.body.velocity)) {
 			return;
 		}
 		double rootHeight = rootHeight();
@@ -1063,7 +1132,7 @@ public final class UltraMovement {
 		}
 		this.footstepTimer = 1;
 		if (UltraConfig.get().ultrakillFootsteps) {
-			String surface = this.player.isInWater() ? Surfaces.WET : groundSurface();
+			String surface = this.touchingWater && !this.underwater ? Surfaces.WET : groundSurface();
 			this.sounds.play(Channel.FOOTSTEPS, "footstep." + surface, volume, this.sounds.randomPitch(), delayTicks);
 		}
 	}
@@ -1150,6 +1219,76 @@ public final class UltraMovement {
 		this.slopeOnGround = this.groundForcedOff == 0 && groundOverlap(SLOPE_CHECK_DEPTH, SLOPE_CHECK_INSET * S);
 		this.canJump = enemyUnderFeet();
 		updateWallCheck();
+		updateWater();
+	}
+
+	/**
+	 * The water triggers: the player's body (Water), the camera (UnderwaterController) and the ground check
+	 * (GroundCheck.OnTriggerEnter, where sliding down into water while the camera is above it bounces off it).
+	 */
+	private void updateWater() {
+		AABB box = this.player.getBoundingBox().deflate(1.0E-3);
+		this.touchingWater = waterTop(box) >= box.minY;
+		this.underwater = cameraInWater();
+
+		Vec3 check = groundCheckPosition();
+		AABB checkBox = new AABB(box.minX, box.minY - GROUND_CHECK_DEPTH * S, box.minZ, box.maxX, box.minY, box.maxZ);
+		double surface = waterTop(checkBox);
+		boolean inWater = surface >= checkBox.minY;
+		if (inWater && !this.groundCheckInWater && this.sliding && upwardSpeed() < 0 && !this.underwater && openDownTo(check, surface)) {
+			bounceOnWater(check, surface);
+		}
+		this.groundCheckInWater = inWater;
+	}
+
+	/**
+	 * The trigger reaches water it has a clear way down to: the ground check is at its surface or in it, or no block
+	 * stands between them.
+	 */
+	private boolean openDownTo(Vec3 check, double surface) {
+		double depth = (check.y - surface) / S;
+		return depth < 0.1 || raycast(check, G, depth) < 0;
+	}
+
+	/** GroundCheck.BounceOnWater: the fall stops and the player bounces up, with a splash. */
+	private void bounceOnWater(Vec3 check, double surface) {
+		this.body.velocity = U.projectOnPlane(this.body.velocity, UP);
+		this.body.addVelocityChange(UP.scale(WATER_BOUNCE));
+		boolean lava = level().getFluidState(BlockPos.containing(check.x, Math.min(check.y, surface) - 1.0E-3, check.z)).is(FluidTags.LAVA);
+		float pitch = 1 + (this.player.getRandom().nextFloat() - this.player.getRandom().nextFloat()) * 0.4F;
+		this.player.playSound(lava ? SoundEvents.LAVA_POP : SoundEvents.PLAYER_SPLASH, 0.65F, pitch);
+	}
+
+	/** The highest water surface among the water in {@code box} reaching its bottom, or -infinity (blocks). */
+	private double waterTop(AABB box) {
+		double top = Double.NEGATIVE_INFINITY;
+		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+		for (int x = (int)Math.floor(box.minX); x < Math.ceil(box.maxX); x++) {
+			for (int y = (int)Math.floor(box.minY); y < Math.ceil(box.maxY); y++) {
+				for (int z = (int)Math.floor(box.minZ); z < Math.ceil(box.maxZ); z++) {
+					FluidState fluid = level().getFluidState(pos.set(x, y, z));
+					if (isWater(fluid)) {
+						double surface = y + fluid.getHeight(level(), pos);
+						if (surface >= box.minY) {
+							top = Math.max(top, surface);
+						}
+					}
+				}
+			}
+		}
+		return top;
+	}
+
+	private boolean cameraInWater() {
+		Vec3 eye = this.player.position().add(0, (rootHeight() + this.camera.height()) * S, 0);
+		BlockPos pos = BlockPos.containing(eye);
+		FluidState fluid = level().getFluidState(pos);
+		return isWater(fluid) && eye.y <= pos.getY() + fluid.getHeightForCamera(level(), pos);
+	}
+
+	/** Minecraft's water and lava both work as ULTRAKILL's Water. */
+	private static boolean isWater(FluidState fluid) {
+		return fluid.is(FluidTags.WATER) || fluid.is(FluidTags.LAVA);
 	}
 
 	private void groundCheckUpdate(double dt) {
@@ -1646,6 +1785,11 @@ public final class UltraMovement {
 		this.camera.updateShake(dt);
 	}
 
+	/** UnderwaterController.inWater: the camera is in water or lava. */
+	public boolean underwater() {
+		return this.underwater;
+	}
+
 	/** NewMovement.FullStamina. */
 	public void fullStamina() {
 		this.boostCharge = 300;
@@ -1685,9 +1829,10 @@ public final class UltraMovement {
 
 	public String debugState() {
 		return String.format(
-			"ground %s slope %s wall %s | falling %s jumping %s cooldown %s | boost %s slide %s slam %s (force %.1f) | walljumps %d | wind %.2f",
+			"ground %s slope %s wall %s | falling %s jumping %s cooldown %s | boost %s slide %s slam %s (force %.1f) | walljumps %d | wind %.2f | water %s under %s ladder %s",
 			this.onGround, this.slopeOnGround, this.onWall, this.falling, this.jumping, this.jumpCooldown,
-			this.boost, this.sliding, this.heavyFall, this.slamForce, this.currentWallJumps, this.windState
+			this.boost, this.sliding, this.heavyFall, this.slamForce, this.currentWallJumps, this.windState,
+			this.touchingWater, this.underwater, this.climbingLadder
 		);
 	}
 }

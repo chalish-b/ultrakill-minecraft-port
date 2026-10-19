@@ -199,6 +199,10 @@ final class Rocket extends Grenade {
 				this.levelledUp = true;
 				hits.rocketLevelledUp(this);
 			}
+		} else if (this.playerRiding && movement.underwater()) {
+			// Under water, a ridden rocket flies straight and its downpull goes no higher than 0.
+			this.downpull = Math.min(this.downpull, 0);
+			this.velocity = this.forward.scale(SPEED * RIDE_SPEED_SHARE);
 		} else if (this.playerRiding) {
 			Vec3 cruise = this.forward.scale(SPEED * RIDE_SPEED_SHARE);
 			this.velocity = cruise.lerp(new Vec3(0, -RIDE_FALL_SPEED, 0), Math.max(0, this.downpull));
