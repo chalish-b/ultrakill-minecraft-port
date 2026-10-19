@@ -8,6 +8,7 @@ import dev.ultracraft.client.movement.UltraSounds.Channel;
 import dev.ultracraft.combat.Gasoline;
 import dev.ultracraft.net.StopGlidingPayload;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
@@ -303,7 +304,7 @@ public final class UltraMovement {
 	}
 
 	private static double defaultFov() {
-		return net.minecraft.client.Minecraft.getInstance().options.fov().get();
+		return Minecraft.getInstance().options.fov().get();
 	}
 
 	/** Takes in position and velocity changes made outside this controller since the last frame. */
@@ -319,6 +320,9 @@ public final class UltraMovement {
 		this.currentFeet = feet;
 
 		Vec3 change = this.player.getDeltaMovement().subtract(lastDeltaMovement);
+		if (riding()) {
+			return;
+		}
 		if (gliding()) {
 			// Fireworks push a gliding player a little every tick.
 			addVelocity(change.scale(20 / displacementScale()));
@@ -340,7 +344,7 @@ public final class UltraMovement {
 		if (this.hookFixedUpdate != null) {
 			this.hookFixedUpdate.run();
 		}
-		if (this.ridingRocket) {
+		if (this.ridingRocket || riding()) {
 			this.climbingLadder = false;
 			this.body.stop();
 		} else {
@@ -693,7 +697,13 @@ public final class UltraMovement {
 		} else {
 			this.sounds.woosh(0, 0);
 		}
-		if (flying()) {
+		if (riding()) {
+			if (this.sliding) {
+				stopSlide();
+			}
+			this.boost = false;
+			this.heavyFall = false;
+		} else if (flying()) {
 			if (this.input.jumpPressed) {
 				minecraftJump(false, false);
 			}
@@ -826,6 +836,11 @@ public final class UltraMovement {
 
 	private boolean gliding() {
 		return this.player.isFallFlying();
+	}
+
+	/** Riding a mount, boat or minecart, which carries the player: their own physics moves them nowhere. */
+	private boolean riding() {
+		return this.player.isPassenger();
 	}
 
 	private boolean flying() {
@@ -1935,7 +1950,9 @@ public final class UltraMovement {
 
 	/** Where the camera is drawn this frame, between the last two physics steps. */
 	public Vec3 eyePosition() {
-		Vec3 feet = U.lerp(this.previousFeet, this.currentFeet, this.accumulator / DT);
+		Vec3 feet = riding()
+			? this.player.getPosition(Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false))
+			: U.lerp(this.previousFeet, this.currentFeet, this.accumulator / DT);
 		Vec3 right = right();
 		double yaw = Math.toRadians(this.player.getYRot());
 		double pitch = Math.toRadians(this.player.getXRot());

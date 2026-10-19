@@ -13,10 +13,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.world.phys.Vec3;
 import org.jspecify.annotations.Nullable;
 
-/**
- * Runs ULTRAKILL movement on the local player once per rendered frame, and hands the player back to
- * Minecraft's movement while riding.
- */
+/** Runs ULTRAKILL movement on the local player once per rendered frame. */
 public final class UltraController {
 	public static final UltraController INSTANCE = new UltraController();
 
@@ -88,7 +85,6 @@ public final class UltraController {
 			&& ClientPlayNetworking.canSend(UltraStatePayload.TYPE)
 			&& player.isAlive()
 			&& !player.isSpectator()
-			&& !player.isPassenger()
 			&& !player.isSleeping();
 	}
 

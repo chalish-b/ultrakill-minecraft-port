@@ -36,7 +36,7 @@ cd mod && ./gradlew runClient
 
 ## Playing
 
-Singleplayer. ULTRAKILL movement is on by default and switches to Minecraft's while riding.
+Singleplayer. ULTRAKILL movement is on by default.
 
 | Key | |
 |---|---|
