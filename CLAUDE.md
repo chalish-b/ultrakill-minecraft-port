@@ -1,4 +1,4 @@
-# ULTRACRAFT
+# ULTRAKILL Minecraft Port
 
 Ports ULTRAKILL's player controller and weapons into Minecraft (Fabric, 26.3). Singleplayer only.
 See `README.md` for layout and setup.

@@ -2,7 +2,7 @@
 	"schemaVersion": 1,
 	"id": "ultracraft",
 	"version": "${version}",
-	"name": "ULTRACRAFT",
+	"name": "ULTRAKILL Minecraft Port",
 	"description": "ULTRAKILL's movement and arsenal in Minecraft.",
 	"authors": [],
 	"license": "MIT",

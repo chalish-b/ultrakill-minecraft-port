@@ -87,7 +87,7 @@ final class UltraCommands {
 	private static void show(FabricClientCommandSource source) {
 		UltraConfig config = UltraConfig.get();
 		source.sendFeedback(Component.literal(String.format(
-			"ULTRACRAFT: enabled %s, speedScale %.3f, stepMode %s, cameraTilt %s, screenShake %.2f, fovEffects %s, speedometer %s, debug %s, infiniteStamina %s, ultrakillFootsteps %s, "
+			"ULTRAKILL Minecraft Port: enabled %s, speedScale %.3f, stepMode %s, cameraTilt %s, screenShake %.2f, fovEffects %s, speedometer %s, debug %s, infiniteStamina %s, ultrakillFootsteps %s, "
 				+ "weaponRedraw %s, variationMemory %s",
 			config.enabled, config.speedScale, config.stepMode.name().toLowerCase(), config.cameraTilt, config.screenShake,
 			config.fovEffects, config.speedometer, config.debug, config.infiniteStamina, config.ultrakillFootsteps,

@@ -1,4 +1,4 @@
-# ULTRACRAFT
+# ULTRAKILL Minecraft Port
 
 ULTRAKILL's movement and arsenal in Minecraft, as a Fabric mod.
 
@@ -13,7 +13,7 @@ Interactive. The repo contains no ULTRAKILL assets or code: you need your own co
 | `mod/` | The Fabric mod (Minecraft 26.3, Java 25) |
 | `tools/` | Extraction scripts for ULTRAKILL's code and data |
 | `reference/` | Decompiled ULTRAKILL code, the player prefab as JSON, Minecraft sources. Not committed |
-| `mod/src/generated/` | ULTRAKILL's sounds, packaged into the mod. Not committed |
+| `mod/src/generated/` | ULTRAKILL's sounds, textures, fonts and viewmodels, packaged into the mod. Not committed |
 
 ## Setup
 
@@ -46,7 +46,7 @@ Singleplayer. ULTRAKILL movement is on by default.
 | Space | Jump, wall jump (3 before landing) |
 | Left Alt | Sneak |
 
-All rebindable under Controls → ULTRACRAFT. `/ultracraft` shows the settings, and
+All rebindable under Controls → ULTRAKILL Minecraft Port. `/ultracraft` shows the settings, and
 `/ultracraft <setting> <value>` changes one: `speedScale` (1 = ULTRAKILL relative to your body,
 1.944 = one ULTRAKILL unit per block), `stepMode ultrakill|minecraft`, `cameraTilt`, `screenShake`,
 `fovEffects`, `speedometer`, `debug`, `infiniteStamina`, `ultrakillFootsteps`.
