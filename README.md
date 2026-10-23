@@ -3,6 +3,8 @@
 > [!note]
 > This project was 100% vibe coded with Claude. It was a fun experiement to see how well it can do something like this. It still made a lot of mistakes during the process, and I had to give feedback on what feels wrong or what's missing as an ULTRAKILL player.
 >
+> Unlike other similar projects where both games are run simultaneously and communicate with each other, this one is just a plain Minecraft Fabric mod that ports ULTRAKILL's movement and weapons. So the mechanics might not be exact 1:1, but it also means you don't need to have two games running at the same time, it's just Minecraft.
+>
 > There aren't any plans to release this as a proper mod. If you want to, just ask your AI to build it or something. Do whatever you want, as long as you credit the original creators (of ULTRAKILL, not me)
 >
 >  (This was the only thing written by a human in this project. Everything after this point is Claude slop)
