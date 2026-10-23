@@ -85,7 +85,7 @@ public final class UltraConfig {
 	 * How far ULTRAKILL's speeds carry you. 1 matches ULTRAKILL relative to your body (the player is
 	 * scaled to Minecraft's height); 1.944 makes one ULTRAKILL unit one block.
 	 */
-	public double speedScale = 1.0;
+	public double speedScale = 0.85;
 	public StepMode stepMode = StepMode.ULTRAKILL;
 	/** The camera leans into strafes and dashes. */
 	public boolean cameraTilt = true;

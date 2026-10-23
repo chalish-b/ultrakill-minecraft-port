@@ -60,9 +60,17 @@ Singleplayer. ULTRAKILL movement is on by default.
 | Ctrl | Slide (on the ground) / slam (in the air) |
 | Space | Jump, wall jump (3 before landing) |
 | Left Alt | Sneak |
+| Left click | Fire |
+| Right click | Alt fire |
+| F | Punch (Feedbacker) |
+| G | Punch (Knuckleblaster) |
+| R | Whiplash |
+| X / C | Variation slot 2 / 3 |
+| Unbound | Variation slot 1, next / previous variation, last used weapon |
+| K | Weapon loadout |
 
 All rebindable under Controls → ULTRAKILL Minecraft Port. `/ultracraft` shows the settings, and
-`/ultracraft <setting> <value>` changes one: `speedScale` (1 = ULTRAKILL relative to your body,
+`/ultracraft <setting> <value>` changes one: `speedScale` (default 0.85; 1 = ULTRAKILL relative to your body,
 1.944 = one ULTRAKILL unit per block), `stepMode ultrakill|minecraft`, `cameraTilt`, `screenShake`,
 `fovEffects`, `speedometer`, `debug`, `infiniteStamina`, `ultrakillFootsteps`.
 
