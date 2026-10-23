@@ -431,7 +431,7 @@ public final class UltraModel {
 		Identifier id = Ultracraft.id("viewmodels/" + name + ".json");
 		Optional<Resource> resource = Minecraft.getInstance().getResourceManager().getResource(id);
 		if (resource.isEmpty()) {
-			Ultracraft.LOGGER.warn("Missing model {}; run tools/extract.sh", id);
+			Ultracraft.LOGGER.warn("Missing model {}; run tools/extract.py", id);
 			return Optional.empty();
 		}
 		try (Reader reader = resource.get().openAsReader()) {

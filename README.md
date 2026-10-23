@@ -4,7 +4,7 @@ ULTRAKILL's movement and arsenal in Minecraft, as a Fabric mod.
 
 An unofficial fan project, not affiliated with or endorsed by Arsi "Hakita" Patala or New Blood
 Interactive. The repo contains no ULTRAKILL assets or code: you need your own copy of ULTRAKILL, and
-`tools/extract.sh` pulls what the mod needs from it.
+`tools/extract.py` pulls what the mod needs from it.
 
 ## Layout
 
@@ -17,8 +17,22 @@ Interactive. The repo contains no ULTRAKILL assets or code: you need your own co
 
 ## Setup
 
-You need JDK 25 (`brew install openjdk@25`), and for `tools/`: .NET with `ilspycmd`, and `uv`.
-Gradle needs `JAVA_HOME` pointing at JDK 25:
+You need JDK 25, the .NET 10 SDK with `ilspycmd`, and [uv](https://docs.astral.sh/uv/).
+
+| OS | |
+|---|---|
+| macOS | `brew install openjdk@25 dotnet uv` |
+| Windows | `winget install Microsoft.OpenJDK.25 Microsoft.DotNet.SDK.10 astral-sh.uv` |
+| Linux | JDK 25 and the .NET 10 SDK from your distro's packages, uv from its install script |
+
+Then install `ilspycmd`:
+
+```bash
+dotnet tool install -g ilspycmd
+```
+
+Gradle runs on the JDK in `JAVA_HOME`, or on the `java` in your `PATH`, which has to be JDK 25. Homebrew's
+JDK is on neither, so on macOS:
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home
@@ -27,11 +41,12 @@ export JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home
 Extract from your ULTRAKILL install once (and again after a game update), then run the game with the mod:
 
 ```bash
-tools/extract.sh
+uv run tools/extract.py
 ```
 
 ```bash
-cd mod && ./gradlew runClient
+cd mod
+./gradlew runClient    # Windows: .\gradlew runClient
 ```
 
 ## Playing
@@ -53,15 +68,18 @@ All rebindable under Controls → ULTRAKILL Minecraft Port. `/ultracraft` shows 
 
 ## Extraction
 
-`tools/extract.sh` reads the ULTRAKILL install in the CrossOver Steam bottle (set `ULTRAKILL_DIR` to
-use another one) and rebuilds `reference/` and `mod/src/generated/`. `tools/extract_sounds.py` redoes
-just the sounds.
+`tools/extract.py` finds ULTRAKILL in your Steam libraries and rebuilds `reference/` and
+`mod/src/generated/`. On macOS, it looks in the Steam installs inside your CrossOver bottles. `tools/extract_sounds.py`
+redoes just the sounds.
 
-The defaults (game folder, `JAVA_HOME`, `DOTNET_ROOT`) are macOS paths with Homebrew and CrossOver. On
-Windows or Linux, point them at your own installs, e.g.:
+If ULTRAKILL isn't found, set `ULTRAKILL_DIR` to its install folder:
 
 ```bash
-ULTRAKILL_DIR="$HOME/.steam/steam/steamapps/common/ULTRAKILL" tools/extract.sh
+ULTRAKILL_DIR="/path/to/ULTRAKILL" uv run tools/extract.py
+```
+
+```powershell
+$env:ULTRAKILL_DIR = "D:\Games\ULTRAKILL"; uv run tools/extract.py
 ```
 
 ## License
