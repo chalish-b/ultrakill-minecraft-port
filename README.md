@@ -83,6 +83,25 @@ All rebindable under Controls → ULTRAKILL Minecraft Port. `/ultracraft` shows 
 1.944 = one ULTRAKILL unit per block), `stepMode ultrakill|minecraft`, `cameraTilt`, `screenShake`,
 `fovEffects`, `speedometer`, `debug`, `infiniteStamina`, `ultrakillFootsteps`.
 
+### Weapons
+
+Every weapon is an item, in the Combat tab of the creative inventory. Put one in your hotbar, select it, and fire
+with left and right click. The Feedbacker (F), Knuckleblaster (G) and Whiplash (R) are always with you, no item
+needed.
+
+A weapon in the hotbar stands for all its variants, like a weapon slot in ULTRAKILL, so one revolver is enough to
+use all three:
+
+- Press the slot's number key again while holding it to switch to the next variant.
+- X and C pick the second and third variant directly.
+- Switching to the slot from another one brings out its first variant.
+
+Press K to open the loadout. For each weapon, click a variant's status to set it to unequipped (left out of the
+slot), equipped, or alternate (the slab revolvers, the Jackhammer and the Sawblade Launcher), and use the arrows to
+change the order the slot goes through. The options page sets what pressing the held weapon's key does (next
+variant, first variant, or redraw the same one), and variation memory, which brings back the variant you last
+used instead of the first.
+
 ## Extraction
 
 `tools/extract.py` finds ULTRAKILL in your Steam libraries and rebuilds `reference/` and
